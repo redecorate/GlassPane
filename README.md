@@ -119,7 +119,7 @@ GlassPane exists to observe, correlate, and explain.
 
 ## Dashboard
 
-> *(Insert screenshot)*
+![GlassPane dashboard](Screenshots/GlassPane-Dashboard.png)
 
 ## Graph View
 
@@ -183,7 +183,7 @@ Release
 
 GlassPane will remain focused on analysis.
 
-Future active response capabilities are planned as a **separate project**:
+Future active response capabilities are planned as a **separate project**
 
 ---
 
