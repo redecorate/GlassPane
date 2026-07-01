@@ -123,15 +123,15 @@ GlassPane exists to observe, correlate, and explain.
 
 ## Graph View
 
-> *(Insert screenshot)*
+![GlassPane dashboard](Screenshots/GlassPane-GraphView.png)
 
 ## Triage
 
-> *(Insert screenshot)*
+![GlassPane dashboard](Screenshots/GlassPane-Triage.png)
 
 ## Handle Inspection
 
-> *(Insert screenshot)*
+![GlassPane dashboard](Screenshots/GlassPane-Handles.png)
 
 ---
 
