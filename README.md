@@ -2,6 +2,8 @@
 
 > **A read-only Windows process relationship and forensic analysis dashboard.**
 
+Current preview: **v0.2.0-preview**
+
 GlassPane is a modern Windows security analysis tool designed to help analysts, researchers, and developers understand **what a process is doing and why it matters**.
 
 Instead of acting like an antivirus or EDR, GlassPane focuses on **collecting local evidence** and presenting it in a clear, explainable way.
@@ -72,6 +74,7 @@ It does **not** upload data, kill processes, inject into processes, or remediate
 ### Export
 
 - JSON export
+- Markdown selected-process report export
 - Structured findings
 - Process metadata
 - Token information
@@ -175,7 +178,7 @@ Release
 - Handle inspection
 - Correlation engine
 - Triage dashboard
-- Exporting Results to JSON
+- Exporting results to JSON and Markdown reports
 
 ---
 

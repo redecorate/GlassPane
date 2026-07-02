@@ -72,7 +72,7 @@ namespace GlassPane::UI
         constexpr UINT WindowWidth = 1440;
         constexpr UINT WindowHeight = 900;
         constexpr std::uint32_t InvalidPid = 0;
-        constexpr const char* GlassPaneBaseVersion = "v0.1.1";
+        constexpr const char* GlassPaneBaseVersion = "v0.2.0";
 #ifdef _DEBUG
         constexpr const char* GlassPaneBuildSuffix = "-Debug";
 #else
