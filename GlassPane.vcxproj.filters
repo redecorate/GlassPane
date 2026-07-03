@@ -98,6 +98,9 @@
     <ClCompile Include="Core\TokenCollector.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
+    <ClCompile Include="Core\SnapshotCompare.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
     <ClCompile Include="UI\MainWindow.cpp">
       <Filter>Source Files\UI</Filter>
     </ClCompile>
@@ -200,6 +203,9 @@
       <Filter>Header Files\Core</Filter>
     </ClInclude>
     <ClInclude Include="Core\TokenInfo.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\SnapshotCompare.h">
       <Filter>Header Files\Core</Filter>
     </ClInclude>
     <ClInclude Include="UI\MainWindow.h">

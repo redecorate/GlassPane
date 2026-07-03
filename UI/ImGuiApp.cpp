@@ -31,10 +31,12 @@ namespace GlassPane::UI
 #include "../Core/ProcessCollector.h"
 #include "../Core/ProcessTree.h"
 #include "../Core/RuntimeCollector.h"
+#include "../Core/SnapshotCompare.h"
 #include "../Core/TimelineModel.h"
 #include "../Core/TokenCollector.h"
 #include "../Export/JsonExporter.h"
 #include "../Export/MarkdownReportExporter.h"
+#include "../resource.h"
 
 #include "imgui.h"
 #ifdef IMGUI_HAS_DOCK
@@ -47,6 +49,8 @@ namespace GlassPane::UI
 #include <commdlg.h>
 #include <d3d11.h>
 #include <shellapi.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
@@ -68,6 +72,7 @@ namespace GlassPane::UI
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "Shell32.lib")
+#pragma comment(lib, "Windowscodecs.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -78,13 +83,29 @@ namespace GlassPane::UI
         constexpr UINT WindowWidth = 1440;
         constexpr UINT WindowHeight = 900;
         constexpr std::uint32_t InvalidPid = 0;
+<<<<<<< HEAD
         constexpr const char* GlassPaneBaseVersion = "v0.3.1";
+=======
+        constexpr const char* GlassPaneBaseVersion = "V0.4.0";
+>>>>>>> 558a064 (V0.4.0)
 #ifdef _DEBUG
         constexpr const char* GlassPaneBuildSuffix = "-Debug";
 #else
         constexpr const char* GlassPaneBuildSuffix = "-Release";
 #endif
         constexpr const char* GlassPaneGithubUrl = "https://github.com/redecorate/GlassPane";
+
+        HICON LoadGlassPaneIcon(HINSTANCE instance, int width, int height)
+        {
+            HICON icon = reinterpret_cast<HICON>(LoadImageW(
+                instance,
+                MAKEINTRESOURCEW(IDI_GLASSPANE_ICON),
+                IMAGE_ICON,
+                width,
+                height,
+                LR_DEFAULTCOLOR | LR_SHARED));
+            return icon != nullptr ? icon : LoadIconW(nullptr, IDI_APPLICATION);
+        }
 
         enum class LogLevel
         {
@@ -108,6 +129,7 @@ namespace GlassPane::UI
             std::uint64_t findingsMs = 0;
             std::uint64_t jsonExportMs = 0;
             std::uint64_t markdownReportMs = 0;
+            std::uint64_t snapshotCompareMs = 0;
         };
 
         enum class ProcessFilterMode
@@ -182,6 +204,72 @@ namespace GlassPane::UI
             InspectorTabSpec{"Token", InspectorTab::Token},
         };
 
+        std::size_t InspectorTabIndex(InspectorTab tab)
+        {
+            for (std::size_t index = 0; index < InspectorTabs.size(); ++index)
+            {
+                if (InspectorTabs[index].tab == tab)
+                {
+                    return index;
+                }
+            }
+            return 0;
+        }
+
+        const char* InspectorTabLabel(InspectorTab tab)
+        {
+            for (const InspectorTabSpec& spec : InspectorTabs)
+            {
+                if (spec.tab == tab)
+                {
+                    return spec.label;
+                }
+            }
+            return "Inspector";
+        }
+
+        const char* InspectorDockWindowTitle(InspectorTab tab)
+        {
+            switch (tab)
+            {
+            case InspectorTab::Triage:
+                return "Triage##InspectorDockView";
+            case InspectorTab::Details:
+                return "Details##InspectorDockView";
+            case InspectorTab::Chain:
+                return "Chain##InspectorDockView";
+            case InspectorTab::Memory:
+                return "Memory##InspectorDockView";
+            case InspectorTab::Runtime:
+                return "Runtime##InspectorDockView";
+            case InspectorTab::Handles:
+                return "Handles##InspectorDockView";
+            case InspectorTab::Modules:
+                return "Modules##InspectorDockView";
+            case InspectorTab::Network:
+                return "Network##InspectorDockView";
+            case InspectorTab::Token:
+                return "Token##InspectorDockView";
+            default:
+                return "Inspector View##InspectorDockView";
+            }
+        }
+
+        bool IsHeavyInspectorTab(InspectorTab tab)
+        {
+            return tab == InspectorTab::Memory ||
+                tab == InspectorTab::Handles ||
+                tab == InspectorTab::Modules ||
+                tab == InspectorTab::Network;
+        }
+
+        ImVec2 InspectorDockDefaultSize(InspectorTab tab)
+        {
+            return IsHeavyInspectorTab(tab)
+                ? ImVec2(720.0f, 520.0f)
+                : ImVec2(640.0f, 460.0f);
+        }
+
         enum class GraphLayoutMode
         {
             TopDown,
@@ -219,6 +307,16 @@ namespace GlassPane::UI
             ID3D11ShaderResourceView* texture = nullptr;
             bool ownsTexture = false;
         };
+
+        template <typename TValue>
+        void TrimEvidenceCache(std::unordered_map<std::wstring, TValue>& cache)
+        {
+            constexpr std::size_t MaxEntries = 16;
+            while (cache.size() > MaxEntries)
+            {
+                cache.erase(cache.begin());
+            }
+        }
 
         const char* BuildArchitecture()
         {
@@ -682,6 +780,14 @@ namespace GlassPane::UI
         {
             ImGui::PushStyleColor(ImGuiCol_WindowBg, PanelBg());
             const bool visible = ImGui::Begin(title, nullptr, PanelWindowFlags() | extraFlags);
+            DrawActivePanelAccent();
+            return visible;
+        }
+
+        bool BeginPanelWindow(const char* title, bool* open, ImGuiWindowFlags extraFlags)
+        {
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, PanelBg());
+            const bool visible = ImGui::Begin(title, open, PanelWindowFlags() | extraFlags);
             DrawActivePanelAccent();
             return visible;
         }
@@ -1537,6 +1643,12 @@ namespace GlassPane::UI
             return ImGui::CalcTextSize(label).x + 20.0f;
         }
 
+        float StandardButtonWidth(const char* label)
+        {
+            const ImGuiStyle& style = ImGui::GetStyle();
+            return ImGui::CalcTextSize(label).x + style.FramePadding.x * 2.0f + 2.0f;
+        }
+
         void SameLineIfFits(float nextItemWidth, float spacing = 4.0f)
         {
             const float contentRight = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
@@ -1630,8 +1742,8 @@ namespace GlassPane::UI
             windowClass.hInstance = instance_;
             windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
             windowClass.lpszClassName = L"GlassPaneImGuiWindow";
-            windowClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-            windowClass.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
+            windowClass.hIcon = LoadGlassPaneIcon(instance_, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+            windowClass.hIconSm = LoadGlassPaneIcon(instance_, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
 
             if (RegisterClassExW(&windowClass) == 0)
             {
@@ -1655,6 +1767,8 @@ namespace GlassPane::UI
                 UnregisterClassW(windowClass.lpszClassName, instance_);
                 return false;
             }
+            SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(windowClass.hIcon));
+            SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(windowClass.hIconSm));
 
             if (!CreateDeviceD3D())
             {
@@ -1664,6 +1778,9 @@ namespace GlassPane::UI
                 UnregisterClassW(windowClass.lpszClassName, instance_);
                 return false;
             }
+
+            const HRESULT comInitResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            comInitialized_ = SUCCEEDED(comInitResult);
 
             IMGUI_CHECKVERSION();
             ImGui::CreateContext();
@@ -1965,6 +2082,11 @@ namespace GlassPane::UI
             ImGui::DestroyContext();
 
             ReleaseIconCache();
+            if (comInitialized_)
+            {
+                CoUninitialize();
+                comInitialized_ = false;
+            }
             CleanupDeviceD3D();
 
             if (hwnd_ != nullptr)
@@ -2029,9 +2151,166 @@ namespace GlassPane::UI
                 return fallbackIconTexture_;
             }
 
-            HICON fallbackIcon = LoadIconW(nullptr, IDI_APPLICATION);
+            HICON fallbackIcon = LoadGlassPaneIcon(instance_, 32, 32);
             fallbackIconTexture_ = CreateTextureFromIcon(fallbackIcon);
             return fallbackIconTexture_;
+        }
+
+        ID3D11ShaderResourceView* GetAppLogoTexture()
+        {
+            if (appLogoTexture_ != nullptr)
+            {
+                return appLogoTexture_;
+            }
+
+            appLogoTexture_ = CreateTextureFromPngResource(IDB_GLASSPANE_LOGO_PNG);
+            if (appLogoTexture_ == nullptr)
+            {
+                appLogoTexture_ = CreateTextureFromIcon(LoadGlassPaneIcon(instance_, 32, 32));
+            }
+            return appLogoTexture_;
+        }
+
+        ID3D11ShaderResourceView* CreateTextureFromPngResource(UINT resourceId) const
+        {
+            if (device_ == nullptr)
+            {
+                return nullptr;
+            }
+
+            HRSRC resource = FindResourceW(instance_, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
+            if (resource == nullptr)
+            {
+                return nullptr;
+            }
+
+            HGLOBAL loadedResource = LoadResource(instance_, resource);
+            const DWORD resourceSize = SizeofResource(instance_, resource);
+            void* resourceData = LockResource(loadedResource);
+            if (loadedResource == nullptr || resourceData == nullptr || resourceSize == 0)
+            {
+                return nullptr;
+            }
+
+            Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+            HRESULT result = CoCreateInstance(
+                CLSID_WICImagingFactory,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&factory));
+            if (FAILED(result))
+            {
+                return nullptr;
+            }
+
+            Microsoft::WRL::ComPtr<IWICStream> stream;
+            result = factory->CreateStream(&stream);
+            if (FAILED(result))
+            {
+                return nullptr;
+            }
+
+            result = stream->InitializeFromMemory(
+                static_cast<BYTE*>(resourceData),
+                resourceSize);
+            if (FAILED(result))
+            {
+                return nullptr;
+            }
+
+            Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+            result = factory->CreateDecoderFromStream(
+                stream.Get(),
+                nullptr,
+                WICDecodeMetadataCacheOnLoad,
+                &decoder);
+            if (FAILED(result))
+            {
+                return nullptr;
+            }
+
+            Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+            result = decoder->GetFrame(0, &frame);
+            if (FAILED(result))
+            {
+                return nullptr;
+            }
+
+            Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+            result = factory->CreateFormatConverter(&converter);
+            if (FAILED(result))
+            {
+                return nullptr;
+            }
+
+            result = converter->Initialize(
+                frame.Get(),
+                GUID_WICPixelFormat32bppRGBA,
+                WICBitmapDitherTypeNone,
+                nullptr,
+                0.0,
+                WICBitmapPaletteTypeCustom);
+            if (FAILED(result))
+            {
+                return nullptr;
+            }
+
+            UINT width = 0;
+            UINT height = 0;
+            result = converter->GetSize(&width, &height);
+            if (FAILED(result) || width == 0 || height == 0)
+            {
+                return nullptr;
+            }
+
+            const UINT stride = width * 4;
+            std::vector<BYTE> pixels(static_cast<std::size_t>(stride) * height);
+            result = converter->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data());
+            if (FAILED(result))
+            {
+                return nullptr;
+            }
+
+            return CreateTextureFromRgbaPixels(pixels.data(), width, height, stride);
+        }
+
+        ID3D11ShaderResourceView* CreateTextureFromRgbaPixels(
+            const void* pixels,
+            UINT width,
+            UINT height,
+            UINT stride) const
+        {
+            if (device_ == nullptr || pixels == nullptr || width == 0 || height == 0 || stride == 0)
+            {
+                return nullptr;
+            }
+
+            D3D11_TEXTURE2D_DESC textureDescription = {};
+            textureDescription.Width = width;
+            textureDescription.Height = height;
+            textureDescription.MipLevels = 1;
+            textureDescription.ArraySize = 1;
+            textureDescription.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            textureDescription.SampleDesc.Count = 1;
+            textureDescription.Usage = D3D11_USAGE_DEFAULT;
+            textureDescription.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+            D3D11_SUBRESOURCE_DATA initialData = {};
+            initialData.pSysMem = pixels;
+            initialData.SysMemPitch = stride;
+
+            ID3D11Texture2D* texture = nullptr;
+            ID3D11ShaderResourceView* textureView = nullptr;
+            if (SUCCEEDED(device_->CreateTexture2D(&textureDescription, &initialData, &texture)))
+            {
+                if (FAILED(device_->CreateShaderResourceView(texture, nullptr, &textureView)))
+                {
+                    textureView = nullptr;
+                }
+                texture->Release();
+            }
+
+            return textureView;
         }
 
         ID3D11ShaderResourceView* CreateTextureFromIcon(HICON icon) const
@@ -2131,6 +2410,11 @@ namespace GlassPane::UI
                 fallbackIconTexture_->Release();
                 fallbackIconTexture_ = nullptr;
             }
+            if (appLogoTexture_ != nullptr)
+            {
+                appLogoTexture_->Release();
+                appLogoTexture_ = nullptr;
+            }
         }
 
         void AddLog(LogLevel level, const std::string& message)
@@ -2151,6 +2435,14 @@ namespace GlassPane::UI
         static std::uint64_t ProcessCacheStamp(const Core::ProcessInfo& process)
         {
             return process.hasCreationTime ? process.creationTimeFileTime : 0;
+        }
+
+        static std::wstring EvidenceCacheKey(const Core::ProcessInfo& process)
+        {
+            return std::to_wstring(process.pid) + L"|" +
+                (process.hasCreationTime
+                    ? std::to_wstring(process.creationTimeFileTime)
+                    : std::wstring(L"pid-only"));
         }
 
         static bool CacheMatchesProcess(
@@ -2199,6 +2491,90 @@ namespace GlassPane::UI
         {
             return selectedHandlesLoaded_ &&
                 CacheMatchesProcess(selectedHandlesPid_, selectedHandlesCreationTime_, process);
+        }
+
+        bool RestoreModulesFromCache(const Core::ProcessInfo& process)
+        {
+            const auto cached = moduleEvidenceCache_.find(EvidenceCacheKey(process));
+            if (cached == moduleEvidenceCache_.end())
+            {
+                return false;
+            }
+
+            selectedModules_ = cached->second;
+            selectedModulesLoaded_ = true;
+            selectedModulesPid_ = process.pid;
+            selectedModulesCreationTime_ = ProcessCacheStamp(process);
+            selectedModulePid_ = InvalidPid;
+            selectedModuleIndex_ = 0;
+            modulesTableNeedsAutoSize_ = true;
+            return true;
+        }
+
+        bool RestoreTokenFromCache(const Core::ProcessInfo& process)
+        {
+            const auto cached = tokenEvidenceCache_.find(EvidenceCacheKey(process));
+            if (cached == tokenEvidenceCache_.end())
+            {
+                return false;
+            }
+
+            selectedToken_ = cached->second;
+            selectedTokenLoaded_ = true;
+            selectedTokenPid_ = process.pid;
+            selectedTokenCreationTime_ = ProcessCacheStamp(process);
+            tokenTableNeedsAutoSize_ = true;
+            return true;
+        }
+
+        bool RestoreRuntimeFromCache(const Core::ProcessInfo& process)
+        {
+            const auto cached = runtimeEvidenceCache_.find(EvidenceCacheKey(process));
+            if (cached == runtimeEvidenceCache_.end())
+            {
+                return false;
+            }
+
+            selectedRuntime_ = cached->second;
+            selectedRuntimeLoaded_ = true;
+            selectedRuntimePid_ = process.pid;
+            selectedRuntimeCreationTime_ = ProcessCacheStamp(process);
+            runtimeTableNeedsAutoSize_ = true;
+            return true;
+        }
+
+        bool RestoreMemoryFromCache(const Core::ProcessInfo& process)
+        {
+            const auto cached = memoryEvidenceCache_.find(EvidenceCacheKey(process));
+            if (cached == memoryEvidenceCache_.end())
+            {
+                return false;
+            }
+
+            selectedMemory_ = cached->second;
+            selectedMemoryLoaded_ = true;
+            selectedMemoryPid_ = process.pid;
+            selectedMemoryCreationTime_ = ProcessCacheStamp(process);
+            memoryTableNeedsAutoSize_ = true;
+            visibleMemoryRegionsDirty_ = true;
+            return true;
+        }
+
+        bool RestoreHandlesFromCache(const Core::ProcessInfo& process)
+        {
+            const auto cached = handleEvidenceCache_.find(EvidenceCacheKey(process));
+            if (cached == handleEvidenceCache_.end())
+            {
+                return false;
+            }
+
+            selectedHandles_ = cached->second;
+            selectedHandlesLoaded_ = true;
+            selectedHandlesPid_ = process.pid;
+            selectedHandlesCreationTime_ = ProcessCacheStamp(process);
+            handlesTableNeedsAutoSize_ = true;
+            visibleHandlesDirty_ = true;
+            return true;
         }
 
         void ClearSelectedProcessEvidence()
@@ -2828,7 +3204,7 @@ namespace GlassPane::UI
             visibleMemoryRegionsDirty_ = false;
         }
 
-        void RefreshSnapshot()
+        void RefreshSnapshot(bool refreshSelectedEvidence = false)
         {
             AddLog(LogLevel::Info, "Refreshing process snapshot.");
             const std::uint32_t previousSelectedPid = selectedPid_;
@@ -2882,6 +3258,14 @@ namespace GlassPane::UI
 
             RefreshToken(false);
             RefreshRuntime(false);
+            if (refreshSelectedEvidence)
+            {
+                const Core::ProcessInfo* selectedProcess = Core::FindProcessByPid(snapshot_, selectedPid_);
+                if (selectedProcess != nullptr)
+                {
+                    EnsureSelectedProcessEvidenceLoaded(*selectedProcess);
+                }
+            }
             RebuildFocusedGraph("snapshot-refresh");
             RequestGraphFit();
             RebuildVisibleProcessRowsIfNeeded();
@@ -2942,6 +3326,74 @@ namespace GlassPane::UI
             }
 
             AddLog(selectedRuntime_.success ? LogLevel::Info : LogLevel::Warning, message);
+        }
+
+        void EnsureSelectedProcessEvidenceLoaded(const Core::ProcessInfo& process)
+        {
+            std::vector<std::string> refreshed;
+            bool hasFailure = false;
+
+            if (!ModulesLoadedForProcess(process) && !RestoreModulesFromCache(process))
+            {
+                RefreshModules(false);
+                refreshed.push_back("modules");
+                hasFailure = hasFailure || !selectedModules_.success;
+            }
+
+            if (!TokenLoadedForProcess(process) && !RestoreTokenFromCache(process))
+            {
+                RefreshToken(false);
+                refreshed.push_back("token");
+                hasFailure = hasFailure || !selectedToken_.success;
+            }
+
+            if (!RuntimeLoadedForProcess(process) && !RestoreRuntimeFromCache(process))
+            {
+                RefreshRuntime(false);
+                refreshed.push_back("runtime");
+                hasFailure = hasFailure || !selectedRuntime_.success;
+            }
+
+            if (!MemoryLoadedForProcess(process) && !RestoreMemoryFromCache(process))
+            {
+                RefreshMemory(false);
+                refreshed.push_back("memory");
+                hasFailure = hasFailure || !selectedMemory_.success;
+            }
+
+            if (!HandlesLoadedForProcess(process) && !RestoreHandlesFromCache(process))
+            {
+                RefreshHandles(false);
+                refreshed.push_back("handles");
+                hasFailure = hasFailure || !selectedHandles_.success;
+            }
+
+            if (!networkLoaded_)
+            {
+                RefreshNetwork(false);
+                refreshed.push_back("network");
+                hasFailure = hasFailure || !networkSnapshot_.success;
+            }
+
+            if (refreshed.empty())
+            {
+                return;
+            }
+
+            std::string summary;
+            for (std::size_t index = 0; index < refreshed.size(); ++index)
+            {
+                if (index > 0)
+                {
+                    summary += ", ";
+                }
+                summary += refreshed[index];
+            }
+
+            AddLog(
+                hasFailure ? LogLevel::Warning : LogLevel::Info,
+                "Selected-process evidence refreshed for PID " + std::to_string(process.pid) +
+                    ": " + summary + ".");
         }
 
         void RequestNetworkTableAutoFit(std::uint32_t pid)
@@ -3123,15 +3575,10 @@ namespace GlassPane::UI
             }
 
             selectedPid_ = pid;
-            if (changed)
+            EnsureSelectedProcessEvidenceLoaded(*selectedProcess);
+            if (changed && inspectorTab_ == InspectorTab::Network)
             {
-                RefreshToken(false);
-                RefreshRuntimeForSelectionChange(*selectedProcess);
-                RefreshHandlesForSelectionChange(*selectedProcess);
-                if (inspectorTab_ == InspectorTab::Network)
-                {
-                    RequestNetworkTableAutoFit(selectedPid_);
-                }
+                RequestNetworkTableAutoFit(selectedPid_);
             }
             if (focusGraph)
             {
@@ -3553,7 +4000,7 @@ namespace GlassPane::UI
                     ImGuiWindowFlags_NoDocking |
                     ImGuiWindowFlags_NoSavedSettings);
 
-            dockspaceId_ = ImGui::GetID("GlassPaneDockSpace-v0.2.3");
+            dockspaceId_ = ImGui::GetID("GlassPaneDockSpace-v0.4.0");
             const bool missingSavedDockspace = ImGui::DockBuilderGetNode(dockspaceId_) == nullptr;
             if (resetDockLayoutRequested_ || (!dockspaceBuilt_ && missingSavedDockspace))
             {
@@ -3601,6 +4048,7 @@ namespace GlassPane::UI
             ImGui::DockBuilderDockWindow("Timeline", centerDockId_);
 
             ImGui::DockBuilderDockWindow("Inspector", rightDockId_);
+            ImGui::DockBuilderDockWindow("Compare", rightDockId_);
 
             ImGui::DockBuilderDockWindow("Indicators", bottomDockId_);
             ImGui::DockBuilderDockWindow("Logs", bottomDockId_);
@@ -3668,6 +4116,7 @@ namespace GlassPane::UI
             RenderDockedContentPanel("Graph", [this]() { RenderGraphView(); });
             dockLayoutFocusRequested_ = false;
             RenderDockedContentPanel("Timeline", [this]() { RenderTimelineView(); });
+            RenderDockedContentPanel("Compare", [this]() { RenderCompareView(); });
 
             if (rightDockLayoutFocusRequested_)
             {
@@ -3675,6 +4124,7 @@ namespace GlassPane::UI
             }
             RenderRightPanel();
             rightDockLayoutFocusRequested_ = false;
+            RenderInspectorDockViews();
 
             RenderDockedContentPanel("Indicators", [this]() { RenderSelectedIndicators(); });
             RenderDockedContentPanel("Logs", [this]() { RenderLogsPanelContent(); });
@@ -3684,6 +4134,7 @@ namespace GlassPane::UI
 
         void RequestDockLayoutReset()
         {
+            CloseInspectorDockViews();
             resetDockLayoutRequested_ = true;
             dockspaceBuilt_ = false;
         }
@@ -3719,14 +4170,22 @@ namespace GlassPane::UI
             if (BeginGlassPaneModal(
                     "About GlassPane",
                     aboutPopupOpenedFrame_,
-                    ImVec2(520.0f, 0.0f),
+                    ImVec2(540.0f, 0.0f),
                     &closeRequested))
             {
                 const std::string appVersion = GlassPaneVersion();
+                ID3D11ShaderResourceView* logoTexture = GetAppLogoTexture();
+                if (logoTexture != nullptr)
+                {
+                    ImGui::Image(reinterpret_cast<ImTextureID>(logoTexture), ImVec2(56.0f, 56.0f));
+                    ImGui::SameLine(0.0f, 14.0f);
+                }
+                ImGui::BeginGroup();
                 const bool pushedTitleFont = PushFontIfAvailable(fonts_.title);
                 ImGui::TextColored(AccentBlue(), "GlassPane");
                 PopFontIfPushed(pushedTitleFont);
                 ImGui::TextDisabled("Version: %s", appVersion.c_str());
+                ImGui::EndGroup();
                 ImGui::Spacing();
                 WrappedTextWide(L"Read-only Windows process and forensic context analysis dashboard.");
 
@@ -3739,15 +4198,8 @@ namespace GlassPane::UI
                 ImGui::SameLine(120.0f);
                 ImGui::TextColored(AccentBlue(), "%s", GlassPaneGithubUrl);
 
-                ImGui::SeparatorText("Safety Model");
-                ImGui::BulletText("Read-only inspection");
-                ImGui::BulletText("No process killing");
-                ImGui::BulletText("No injection");
-                ImGui::BulletText("No tampering");
-                ImGui::BulletText("No remediation");
-
                 ImGui::SeparatorText("Disclaimer");
-                WrappedTextDisabled("Findings are evidence worth investigating, not proof of malicious activity.");
+                WrappedTextDisabled("GlassPane is a read-only local analysis tool. Findings are evidence worth investigating, not proof of malicious activity.");
 
                 ImGui::Spacing();
                 if (ImGui::Button("Copy GitHub URL"))
@@ -3853,12 +4305,22 @@ namespace GlassPane::UI
 
                 ImGui::TableSetColumnIndex(0);
                 ImGui::SetCursorPosY(centeredRowY + 2.0f);
+                const ImVec2 brandMin = ImGui::GetCursorScreenPos();
+                constexpr float logoSize = 28.0f;
+                ID3D11ShaderResourceView* logoTexture = GetAppLogoTexture();
+                if (logoTexture != nullptr)
+                {
+                    ImGui::Image(reinterpret_cast<ImTextureID>(logoTexture), ImVec2(logoSize, logoSize));
+                    ImGui::SameLine(0.0f, 8.0f);
+                }
                 const ImVec2 titlePosition = ImGui::GetCursorScreenPos();
                 bool pushedTitleFont = PushFontIfAvailable(fonts_.title);
                 const ImVec2 titleSize = ImGui::CalcTextSize("GlassPane");
                 PopFontIfPushed(pushedTitleFont);
-                ImGui::InvisibleButton("##glasspane_about_title", titleSize);
-                const bool titleHovered = ImGui::IsItemHovered();
+                const ImVec2 brandMax(
+                    titlePosition.x + titleSize.x,
+                    brandMin.y + std::max(logoTexture != nullptr ? logoSize : 0.0f, titleSize.y));
+                const bool titleHovered = ImGui::IsMouseHoveringRect(brandMin, brandMax);
                 if (titleHovered)
                 {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -3877,7 +4339,7 @@ namespace GlassPane::UI
                 ImGui::SetCursorPosY(centeredRowY + 36.0f);
                 if (ImGui::Button("Refresh"))
                 {
-                    RefreshSnapshot();
+                    RefreshSnapshot(true);
                 }
                 ImGui::SameLine();
                 if (ImGui::Button("Pick Window"))
@@ -4124,9 +4586,622 @@ namespace GlassPane::UI
                     RenderTimelineView();
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("Compare"))
+                {
+                    RenderCompareView();
+                    ImGui::EndTabItem();
+                }
                 ImGui::EndTabBar();
             }
             EndPanelWindow();
+        }
+
+        Core::ProcessSnapshotCapture CaptureSnapshotForCompare() const
+        {
+            return Core::CaptureProcessSnapshotForCompare(
+                snapshot_,
+                networkLoaded_ ? &networkSnapshot_ : nullptr,
+                networkLoaded_,
+                LocalTimestamp());
+        }
+
+        void ComputeSnapshotCompare()
+        {
+            if (!baselineCompareSnapshot_.captured || !currentCompareSnapshot_.captured)
+            {
+                compareResult_ = {};
+                compareResultValid_ = false;
+                return;
+            }
+
+            const ULONGLONG started = GetTickCount64();
+            compareResult_ = Core::CompareSnapshots(baselineCompareSnapshot_, currentCompareSnapshot_);
+            timings_.snapshotCompareMs = ElapsedMs(started);
+            compareResultValid_ = true;
+            AddLog(
+                LogLevel::Info,
+                "Snapshot compare computed: " +
+                    std::to_string(compareResult_.newProcesses.size()) +
+                    " new, " +
+                    std::to_string(compareResult_.exitedProcesses.size()) +
+                    " exited, " +
+                    std::to_string(compareResult_.changedProcesses.size()) +
+                    " changed (" + std::to_string(timings_.snapshotCompareMs) + " ms).");
+        }
+
+        void CaptureBaselineSnapshot()
+        {
+            RefreshSnapshot();
+            baselineCompareSnapshot_ = CaptureSnapshotForCompare();
+            compareResult_ = {};
+            compareResultValid_ = false;
+            AddLog(
+                LogLevel::Info,
+                "Baseline snapshot captured after refresh: " +
+                    std::to_string(baselineCompareSnapshot_.processes.size()) +
+                    " process(es).");
+
+            if (currentCompareSnapshot_.captured)
+            {
+                ComputeSnapshotCompare();
+            }
+        }
+
+        void CaptureCurrentSnapshot()
+        {
+            RefreshSnapshot();
+            currentCompareSnapshot_ = CaptureSnapshotForCompare();
+            AddLog(
+                LogLevel::Info,
+                "Current snapshot captured after refresh: " +
+                    std::to_string(currentCompareSnapshot_.processes.size()) +
+                    " process(es).");
+
+            if (baselineCompareSnapshot_.captured)
+            {
+                ComputeSnapshotCompare();
+            }
+            else
+            {
+                compareResult_ = {};
+                compareResultValid_ = false;
+            }
+        }
+
+        void ClearSnapshotCompare()
+        {
+            baselineCompareSnapshot_ = {};
+            currentCompareSnapshot_ = {};
+            compareResult_ = {};
+            compareResultValid_ = false;
+            AddLog(LogLevel::Info, "Snapshot compare cleared.");
+        }
+
+        std::wstring CompareEndpointText(const Core::SnapshotNetworkEndpoint& endpoint, bool remote) const
+        {
+            const std::wstring& address = remote ? endpoint.remoteAddress : endpoint.localAddress;
+            const std::uint16_t port = remote ? endpoint.remotePort : endpoint.localPort;
+            if (remote && (endpoint.isListening || endpoint.protocol == L"UDP" || address.empty() || port == 0))
+            {
+                return L"-";
+            }
+            if (address.empty())
+            {
+                return L"(unknown)";
+            }
+            return address + L":" + std::to_wstring(port);
+        }
+
+        void SelectCompareProcessIfCurrent(const Core::SnapshotProcessRecord& process)
+        {
+            if (Core::FindProcessByPid(snapshot_, process.pid) == nullptr)
+            {
+                return;
+            }
+
+            SelectProcess(process.pid, true);
+            scrollSelectedProcessIntoView_ = true;
+        }
+
+        void RenderCompareSummary()
+        {
+            const std::size_t baselineCount = baselineCompareSnapshot_.captured ? baselineCompareSnapshot_.processes.size() : 0;
+            const std::size_t currentCount = currentCompareSnapshot_.captured ? currentCompareSnapshot_.processes.size() : 0;
+            if (ImGui::BeginTable("CompareSummaryTable##SnapshotCompare", 4, ImGuiTableFlags_SizingStretchProp))
+            {
+                ImGui::TableSetupColumn("Metric", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableSetupColumn("Metric2", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Count2", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextDisabled("Baseline processes");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%zu", baselineCount);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("Current processes");
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text("%zu", currentCount);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextDisabled("New processes");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%zu", compareResultValid_ ? compareResult_.newProcesses.size() : 0);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("Exited processes");
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text("%zu", compareResultValid_ ? compareResult_.exitedProcesses.size() : 0);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextDisabled("Changed processes");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text("%zu", compareResultValid_ ? compareResult_.changedProcesses.size() : 0);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("New network connections");
+                ImGui::TableSetColumnIndex(3);
+                if (compareResultValid_ && compareResult_.networkCompared)
+                {
+                    ImGui::Text("%zu", compareResult_.newNetworkConnections.size());
+                }
+                else
+                {
+                    ImGui::TextDisabled("N/A");
+                }
+                ImGui::EndTable();
+            }
+        }
+
+        void RenderCompareProcessTable(
+            const char* tableId,
+            const std::vector<Core::SnapshotProcessRecord>& processes,
+            bool selectableRows)
+        {
+            constexpr ImGuiTableFlags flags =
+                ImGuiTableFlags_BordersInnerV |
+                ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable |
+                ImGuiTableFlags_ScrollY |
+                ImGuiTableFlags_SizingStretchProp;
+            const float tableHeight = std::min(260.0f, std::max(118.0f, ImGui::GetTextLineHeightWithSpacing() * (static_cast<float>(processes.size()) + 2.0f)));
+            if (!ImGui::BeginTable(tableId, 5, flags, ImVec2(0.0f, tableHeight)))
+            {
+                return;
+            }
+
+            ImGui::TableSetupColumn("Process", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+            ImGui::TableSetupColumn("PPID", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+            ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 92.0f);
+            ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(processes.size()));
+            while (clipper.Step())
+            {
+                for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+                {
+                    const Core::SnapshotProcessRecord& process = processes[static_cast<std::size_t>(rowIndex)];
+                    ImGui::PushID(rowIndex);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    if (selectableRows)
+                    {
+                        if (ImGui::Selectable(
+                                DisplayName(process.processName).c_str(),
+                                false,
+                                ImGuiSelectableFlags_SpanAllColumns))
+                        {
+                            SelectCompareProcessIfCurrent(process);
+                        }
+                    }
+                    else
+                    {
+                        ImGui::TextUnformatted(DisplayName(process.processName).c_str());
+                    }
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%u", process.pid);
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%u", process.parentPid);
+                    ImGui::TableSetColumnIndex(3);
+                    SeverityText(process.severity);
+                    ImGui::TableSetColumnIndex(4);
+                    ClippedTextWithTooltip(process.executablePath.empty() ? L"(path unavailable)" : process.executablePath);
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+
+        void RenderCompareChangedProcessTable()
+        {
+            const std::vector<Core::SnapshotProcessChange>& changes = compareResult_.changedProcesses;
+            constexpr ImGuiTableFlags flags =
+                ImGuiTableFlags_BordersInnerV |
+                ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable |
+                ImGuiTableFlags_ScrollY |
+                ImGuiTableFlags_SizingStretchProp;
+            const float tableHeight = std::min(300.0f, std::max(126.0f, ImGui::GetTextLineHeightWithSpacing() * 10.0f));
+            if (!ImGui::BeginTable("CompareChangedProcessesTable##SnapshotCompare", 5, flags, ImVec2(0.0f, tableHeight)))
+            {
+                return;
+            }
+
+            ImGui::TableSetupColumn("Process", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+            ImGui::TableSetupColumn("Field", ImGuiTableColumnFlags_WidthFixed, 122.0f);
+            ImGui::TableSetupColumn("Baseline", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Current", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+
+            std::vector<std::pair<std::size_t, std::size_t>> rows;
+            for (std::size_t changeIndex = 0; changeIndex < changes.size(); ++changeIndex)
+            {
+                for (std::size_t fieldIndex = 0; fieldIndex < changes[changeIndex].fields.size(); ++fieldIndex)
+                {
+                    rows.push_back({ changeIndex, fieldIndex });
+                }
+            }
+
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(rows.size()));
+            while (clipper.Step())
+            {
+                for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+                {
+                    const auto [changeIndex, fieldIndex] = rows[static_cast<std::size_t>(rowIndex)];
+                    const Core::SnapshotProcessChange& change = changes[changeIndex];
+                    const Core::SnapshotChangedField& field = change.fields[fieldIndex];
+                    ImGui::PushID(rowIndex);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    if (ImGui::Selectable(
+                            DisplayName(change.current.processName).c_str(),
+                            false,
+                            ImGuiSelectableFlags_SpanAllColumns))
+                    {
+                        SelectCompareProcessIfCurrent(change.current);
+                    }
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::Text("%u", change.current.pid);
+                    ImGui::TableSetColumnIndex(2);
+                    ClippedTextWithTooltip(field.field);
+                    ImGui::TableSetColumnIndex(3);
+                    ClippedTextWithTooltip(field.baselineValue);
+                    ImGui::TableSetColumnIndex(4);
+                    ClippedTextWithTooltip(field.currentValue);
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+
+        void RenderCompareNetworkTable()
+        {
+            const std::size_t totalRows =
+                compareResult_.newNetworkConnections.size() +
+                compareResult_.closedNetworkConnections.size();
+            constexpr ImGuiTableFlags flags =
+                ImGuiTableFlags_BordersInnerV |
+                ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable |
+                ImGuiTableFlags_ScrollY |
+                ImGuiTableFlags_SizingStretchProp;
+            const float tableHeight = std::min(300.0f, std::max(118.0f, ImGui::GetTextLineHeightWithSpacing() * (static_cast<float>(totalRows) + 2.0f)));
+            if (!ImGui::BeginTable("CompareNetworkChangesTable##SnapshotCompare", 7, flags, ImVec2(0.0f, tableHeight)))
+            {
+                return;
+            }
+
+            ImGui::TableSetupColumn("Change", ImGuiTableColumnFlags_WidthFixed, 86.0f);
+            ImGui::TableSetupColumn("Process", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("Protocol", ImGuiTableColumnFlags_WidthFixed, 82.0f);
+            ImGui::TableSetupColumn("Local", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Remote", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 92.0f);
+            ImGui::TableHeadersRow();
+
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(totalRows));
+            while (clipper.Step())
+            {
+                for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+                {
+                    const std::size_t index = static_cast<std::size_t>(rowIndex);
+                    const bool isNew = index < compareResult_.newNetworkConnections.size();
+                    const Core::SnapshotNetworkEndpoint& endpoint = isNew
+                        ? compareResult_.newNetworkConnections[index]
+                        : compareResult_.closedNetworkConnections[index - compareResult_.newNetworkConnections.size()];
+                    ImGui::PushID(rowIndex);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextColored(isNew ? AccentBlue() : MutedText(), "%s", isNew ? "Appeared" : "Closed");
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(DisplayName(endpoint.processName).c_str());
+                    if (ImGui::IsItemHovered() && Core::FindProcessByPid(snapshot_, endpoint.owningPid) != nullptr && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+                    {
+                        SelectProcess(endpoint.owningPid, true);
+                    }
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::Text("%u", endpoint.owningPid);
+                    ImGui::TableSetColumnIndex(3);
+                    ClippedTextWithTooltip(endpoint.protocol);
+                    ImGui::TableSetColumnIndex(4);
+                    ClippedTextWithTooltip(CompareEndpointText(endpoint, false));
+                    ImGui::TableSetColumnIndex(5);
+                    ClippedTextWithTooltip(CompareEndpointText(endpoint, true));
+                    ImGui::TableSetColumnIndex(6);
+                    ClippedTextWithTooltip(endpoint.state.empty() ? L"-" : endpoint.state);
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+
+        void RenderCompareFindingTable()
+        {
+            const std::size_t totalRows =
+                compareResult_.newFindings.size() +
+                compareResult_.changedFindings.size() +
+                compareResult_.removedFindings.size();
+            constexpr ImGuiTableFlags flags =
+                ImGuiTableFlags_BordersInnerV |
+                ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_Resizable |
+                ImGuiTableFlags_ScrollY |
+                ImGuiTableFlags_SizingStretchProp;
+            const float tableHeight = std::min(320.0f, std::max(118.0f, ImGui::GetTextLineHeightWithSpacing() * (static_cast<float>(totalRows) + 2.0f)));
+            if (!ImGui::BeginTable("CompareFindingChangesTable##SnapshotCompare", 6, flags, ImVec2(0.0f, tableHeight)))
+            {
+                return;
+            }
+
+            ImGui::TableSetupColumn("Change", ImGuiTableColumnFlags_WidthFixed, 86.0f);
+            ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 86.0f);
+            ImGui::TableSetupColumn("Process", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+            ImGui::TableSetupColumn("Finding", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 104.0f);
+            ImGui::TableHeadersRow();
+
+            ImGuiListClipper clipper;
+            clipper.Begin(static_cast<int>(totalRows));
+            while (clipper.Step())
+            {
+                for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
+                {
+                    const std::size_t index = static_cast<std::size_t>(rowIndex);
+                    const Core::SnapshotFindingRecord* finding = nullptr;
+                    const char* changeLabel = "New";
+                    if (index < compareResult_.newFindings.size())
+                    {
+                        finding = &compareResult_.newFindings[index];
+                        changeLabel = "New";
+                    }
+                    else if (index < compareResult_.newFindings.size() + compareResult_.changedFindings.size())
+                    {
+                        const std::size_t changedIndex = index - compareResult_.newFindings.size();
+                        finding = &compareResult_.changedFindings[changedIndex].current;
+                        changeLabel = "Changed";
+                    }
+                    else
+                    {
+                        const std::size_t removedIndex =
+                            index - compareResult_.newFindings.size() - compareResult_.changedFindings.size();
+                        finding = &compareResult_.removedFindings[removedIndex];
+                        changeLabel = "Removed";
+                    }
+
+                    if (finding == nullptr)
+                    {
+                        continue;
+                    }
+
+                    ImGui::PushID(rowIndex);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(changeLabel);
+                    ImGui::TableSetColumnIndex(1);
+                    SeverityText(FindingSeverityAsCoreSeverity(finding->severity));
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(DisplayName(finding->processName).c_str());
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::Text("%u", finding->pid);
+                    ImGui::TableSetColumnIndex(4);
+                    ClippedTextWithTooltip(finding->title.empty() ? L"(untitled)" : finding->title);
+                    ImGui::TableSetColumnIndex(5);
+                    ClippedTextWithTooltip(finding->category.empty() ? L"(none)" : finding->category);
+                    ImGui::PopID();
+                }
+            }
+            ImGui::EndTable();
+        }
+
+        void ExportCompareReport()
+        {
+            if (!baselineCompareSnapshot_.captured || !currentCompareSnapshot_.captured || !compareResultValid_)
+            {
+                AddLog(LogLevel::Warning, "Compare report export requires baseline and current snapshots.");
+                return;
+            }
+
+            wchar_t fileName[MAX_PATH] = {};
+            const std::wstring defaultName = L"glasspane-compare-" + FileTimestamp() + L".md";
+            wcsncpy_s(fileName, defaultName.c_str(), _TRUNCATE);
+            if (!PromptForMarkdownPath(fileName))
+            {
+                return;
+            }
+
+            Export::SnapshotCompareMarkdownReportContext context;
+            context.baseline = &baselineCompareSnapshot_;
+            context.current = &currentCompareSnapshot_;
+            context.result = &compareResult_;
+            context.appVersion = Utf8ToWide(GlassPaneVersion().c_str());
+            context.buildConfiguration = Utf8ToWide(BuildConfiguration());
+
+            std::wstring error;
+            const ULONGLONG started = GetTickCount64();
+            if (!Export::ExportSnapshotCompareMarkdownReport(context, fileName, &error))
+            {
+                timings_.markdownReportMs = ElapsedMs(started);
+                AddLog(LogLevel::High, "Compare report export failed: " + WideToUtf8(error));
+                MessageBoxW(hwnd_, error.c_str(), L"Compare report export failed", MB_ICONERROR | MB_OK);
+                return;
+            }
+            timings_.markdownReportMs = ElapsedMs(started);
+            AddLog(
+                LogLevel::Info,
+                "Compare report exported: " + WideToUtf8(fileName) +
+                    " (" + std::to_string(timings_.markdownReportMs) + " ms).");
+        }
+
+        void RenderCompareView()
+        {
+            const bool pushedTitleFont = PushFontIfAvailable(fonts_.bold);
+            ImGui::TextColored(AccentBlue(), "Snapshot Compare");
+            PopFontIfPushed(pushedTitleFont);
+            WrappedTextDisabled("Compare local in-memory snapshots. Changes are evidence worth reviewing, not proof of malicious activity.");
+            WrappedTextDisabled("Capture Baseline and Capture Current refresh the process snapshot first. Capture Current replaces the previous current snapshot and compares it to the baseline.");
+            ImGui::Spacing();
+
+            if (ImGui::Button("Capture Baseline##Compare"))
+            {
+                CaptureBaselineSnapshot();
+            }
+            SameLineIfFits(StandardButtonWidth("Capture Current"), 8.0f);
+            if (ImGui::Button("Capture Current##Compare"))
+            {
+                CaptureCurrentSnapshot();
+            }
+            SameLineIfFits(StandardButtonWidth("Clear Compare"), 8.0f);
+            if (ImGui::Button("Clear Compare##Compare"))
+            {
+                ClearSnapshotCompare();
+            }
+            SameLineIfFits(StandardButtonWidth("Export Compare Report"), 8.0f);
+            if (ImGui::Button("Export Compare Report##Compare"))
+            {
+                ExportCompareReport();
+            }
+
+            ImGui::Spacing();
+            RenderCompareSummary();
+            ImGui::Separator();
+
+            if (!baselineCompareSnapshot_.captured && !currentCompareSnapshot_.captured)
+            {
+                WrappedTextDisabled("Capture a baseline snapshot, then capture a current snapshot to compare changes.");
+                return;
+            }
+            if (baselineCompareSnapshot_.captured && !currentCompareSnapshot_.captured)
+            {
+                WrappedTextDisabled("Baseline captured. Capture a current snapshot to compare changes.");
+                return;
+            }
+            if (!baselineCompareSnapshot_.captured && currentCompareSnapshot_.captured)
+            {
+                WrappedTextDisabled("Current snapshot captured. Capture a baseline snapshot to compare changes.");
+                return;
+            }
+            if (!compareResultValid_)
+            {
+                WrappedTextDisabled("Capture both snapshots to compute a comparison.");
+                return;
+            }
+
+            const bool noDifferences =
+                compareResult_.newProcesses.empty() &&
+                compareResult_.exitedProcesses.empty() &&
+                compareResult_.changedProcesses.empty() &&
+                compareResult_.newNetworkConnections.empty() &&
+                compareResult_.closedNetworkConnections.empty() &&
+                compareResult_.newFindings.empty() &&
+                compareResult_.removedFindings.empty() &&
+                compareResult_.changedFindings.empty();
+            if (noDifferences)
+            {
+                WrappedTextDisabled("No meaningful differences found between snapshots.");
+            }
+
+            if (!compareResult_.notes.empty())
+            {
+                ImGui::SeparatorText("Notes");
+                for (const std::wstring& note : compareResult_.notes)
+                {
+                    ImGui::Bullet();
+                    ImGui::SameLine();
+                    WrappedTextDisabled(note);
+                }
+            }
+
+            ImGui::SeparatorText("New Processes");
+            if (compareResult_.newProcesses.empty())
+            {
+                WrappedTextDisabled("No new processes were observed.");
+            }
+            else
+            {
+                RenderCompareProcessTable(
+                    "CompareNewProcessesTable##SnapshotCompare",
+                    compareResult_.newProcesses,
+                    true);
+            }
+
+            ImGui::SeparatorText("Exited Processes");
+            if (compareResult_.exitedProcesses.empty())
+            {
+                WrappedTextDisabled("No exited processes were observed.");
+            }
+            else
+            {
+                RenderCompareProcessTable(
+                    "CompareExitedProcessesTable##SnapshotCompare",
+                    compareResult_.exitedProcesses,
+                    false);
+            }
+
+            ImGui::SeparatorText("Changed Processes");
+            if (compareResult_.changedProcesses.empty())
+            {
+                WrappedTextDisabled("No important process attribute changes were observed.");
+            }
+            else
+            {
+                RenderCompareChangedProcessTable();
+            }
+
+            ImGui::SeparatorText("Network Changes");
+            if (!compareResult_.networkCompared)
+            {
+                WrappedTextDisabled("Network comparison unavailable. Refresh Network before capturing both snapshots to include socket ownership changes.");
+            }
+            else if (compareResult_.newNetworkConnections.empty() && compareResult_.closedNetworkConnections.empty())
+            {
+                WrappedTextDisabled("No network connection changes were observed.");
+            }
+            else
+            {
+                RenderCompareNetworkTable();
+            }
+
+            ImGui::SeparatorText("Finding Changes");
+            if (!compareResult_.findingsCompared)
+            {
+                WrappedTextDisabled("Finding comparison unavailable.");
+            }
+            else if (compareResult_.newFindings.empty() && compareResult_.removedFindings.empty() && compareResult_.changedFindings.empty())
+            {
+                WrappedTextDisabled("No finding or process indicator changes were observed.");
+            }
+            else
+            {
+                RenderCompareFindingTable();
+            }
         }
 
         void SelectInspectorTab(InspectorTab tab)
@@ -4136,6 +5211,115 @@ namespace GlassPane::UI
             if (tab == InspectorTab::Network && !wasNetworkTab)
             {
                 RequestNetworkTableAutoFit(selectedPid_);
+            }
+        }
+
+        bool IsInspectorDockViewOpen(InspectorTab tab) const
+        {
+            return inspectorDockViewOpen_[InspectorTabIndex(tab)];
+        }
+
+        void SetInspectorDockViewOpen(InspectorTab tab, bool open, bool logActivity = true)
+        {
+            bool& state = inspectorDockViewOpen_[InspectorTabIndex(tab)];
+            if (state == open)
+            {
+                return;
+            }
+
+            state = open;
+            if (open && tab == InspectorTab::Network)
+            {
+                RequestNetworkTableAutoFit(selectedPid_);
+            }
+            if (open && inspectorTab_ == tab)
+            {
+                for (const InspectorTabSpec& spec : InspectorTabs)
+                {
+                    if (spec.tab != tab && !IsInspectorDockViewOpen(spec.tab))
+                    {
+                        inspectorTab_ = spec.tab;
+                        break;
+                    }
+                }
+            }
+            if (logActivity)
+            {
+                AddLog(
+                    LogLevel::Info,
+                    std::string(open ? "Opened " : "Closed ") +
+                        InspectorTabLabel(tab) +
+                        " dockable inspector panel.");
+            }
+        }
+
+        void CloseInspectorDockViews()
+        {
+            for (bool& open : inspectorDockViewOpen_)
+            {
+                open = false;
+            }
+        }
+
+        void RenderInspectorTabContextMenu(InspectorTab tab)
+        {
+            if (!ImGui::BeginPopupContextItem("InspectorTabContext"))
+            {
+                return;
+            }
+
+            if (IsInspectorDockViewOpen(tab))
+            {
+                if (ImGui::MenuItem("Close Dockable Panel"))
+                {
+                    SetInspectorDockViewOpen(tab, false);
+                }
+            }
+            else
+            {
+                if (ImGui::MenuItem("Open as Dockable Panel"))
+                {
+                    SetInspectorDockViewOpen(tab, true);
+                }
+            }
+
+            ImGui::EndPopup();
+        }
+
+        void RenderInspectorTabContent(InspectorTab tab)
+        {
+            switch (tab)
+            {
+            case InspectorTab::Triage:
+                RenderTriagePanel();
+                break;
+            case InspectorTab::Details:
+                RenderDetailsPanel();
+                break;
+            case InspectorTab::Chain:
+                RenderChainPanel();
+                break;
+            case InspectorTab::Modules:
+                RenderModulesPanel();
+                break;
+            case InspectorTab::Network:
+                RenderNetworkPanel();
+                break;
+            case InspectorTab::Runtime:
+                RenderRuntimePanel();
+                break;
+            case InspectorTab::Memory:
+                RenderMemoryPanel();
+                break;
+            case InspectorTab::Token:
+                RenderTokenPanel();
+                break;
+            case InspectorTab::Handles:
+                RenderHandlesPanel();
+                break;
+            default:
+                RenderTriagePanel();
+                break;
             }
         }
 
@@ -4152,13 +5336,19 @@ namespace GlassPane::UI
 
             const float visibleWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x);
             float contentWidth = 0.0f;
+            std::size_t visibleTabCount = 0;
             for (std::size_t index = 0; index < InspectorTabs.size(); ++index)
             {
+                if (IsInspectorDockViewOpen(InspectorTabs[index].tab))
+                {
+                    continue;
+                }
                 contentWidth += ChipButtonWidth(InspectorTabs[index].label);
-                if (index + 1 < InspectorTabs.size())
+                if (visibleTabCount > 0)
                 {
                     contentWidth += spacing;
                 }
+                ++visibleTabCount;
             }
             const float maxScroll = std::max(0.0f, contentWidth - visibleWidth);
             inspectorTabScrollX_ = std::clamp(inspectorTabScrollX_, 0.0f, maxScroll);
@@ -4259,20 +5449,30 @@ namespace GlassPane::UI
 
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() - inspectorTabScrollX_);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 2.0f);
+            bool renderedAnyTab = false;
             for (std::size_t index = 0; index < InspectorTabs.size(); ++index)
             {
                 const InspectorTabSpec& spec = InspectorTabs[index];
-                if (index > 0)
+                if (IsInspectorDockViewOpen(spec.tab))
+                {
+                    continue;
+                }
+                if (renderedAnyTab)
                 {
                     ImGui::SameLine(0.0f, spacing);
                 }
-                if (ChipButton(spec.label, inspectorTab_ == spec.tab, AccentBlue()))
+                ImGui::PushID(spec.label);
+                const std::string chipId = std::string(spec.label) + "##InspectorTab";
+                if (ChipButton(chipId.c_str(), inspectorTab_ == spec.tab, AccentBlue()))
                 {
                     if (!suppressTabClick)
                     {
                         SelectInspectorTab(spec.tab);
                     }
                 }
+                RenderInspectorTabContextMenu(spec.tab);
+                ImGui::PopID();
+                renderedAnyTab = true;
             }
 
             ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -4310,6 +5510,18 @@ namespace GlassPane::UI
             ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(4.0f, 4.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(5.0f, 5.0f));
 
+            if (IsInspectorDockViewOpen(inspectorTab_))
+            {
+                for (const InspectorTabSpec& spec : InspectorTabs)
+                {
+                    if (!IsInspectorDockViewOpen(spec.tab))
+                    {
+                        inspectorTab_ = spec.tab;
+                        break;
+                    }
+                }
+            }
+
             RenderInspectorTabStrip();
             ImGui::Separator();
 
@@ -4317,43 +5529,67 @@ namespace GlassPane::UI
                 "inspector_content_scroll",
                 ImVec2(0.0f, 0.0f),
                 ImGuiChildFlags_None);
-            switch (inspectorTab_)
+            if (IsInspectorDockViewOpen(inspectorTab_))
             {
-            case InspectorTab::Triage:
-                RenderTriagePanel();
-                break;
-            case InspectorTab::Details:
-                RenderDetailsPanel();
-                break;
-            case InspectorTab::Chain:
-                RenderChainPanel();
-                break;
-            case InspectorTab::Modules:
-                RenderModulesPanel();
-                break;
-            case InspectorTab::Network:
-                RenderNetworkPanel();
-                break;
-            case InspectorTab::Runtime:
-                RenderRuntimePanel();
-                break;
-            case InspectorTab::Memory:
-                RenderMemoryPanel();
-                break;
-            case InspectorTab::Token:
-                RenderTokenPanel();
-                break;
-            case InspectorTab::Handles:
-                RenderHandlesPanel();
-                break;
-            default:
-                RenderTriagePanel();
-                break;
+                WrappedTextDisabled("All Inspector views are currently open as dockable panels. Close a panel to restore its pill tab here.");
+            }
+            else
+            {
+                RenderInspectorTabContent(inspectorTab_);
             }
             ImGui::EndChild();
 
             ImGui::PopStyleVar(3);
             EndPanelWindow();
+        }
+
+        void RenderInspectorDockView(InspectorTab tab)
+        {
+            bool open = IsInspectorDockViewOpen(tab);
+            if (!open)
+            {
+                return;
+            }
+
+            const ImGuiViewport* viewport = ImGui::GetMainViewport();
+            const ImVec2 defaultSize = InspectorDockDefaultSize(tab);
+            ImGui::SetNextWindowSize(defaultSize, ImGuiCond_FirstUseEver);
+            ImGui::SetNextWindowPos(
+                ImVec2(
+                    viewport->WorkPos.x + viewport->WorkSize.x * 0.5f,
+                    viewport->WorkPos.y + viewport->WorkSize.y * 0.5f),
+                ImGuiCond_FirstUseEver,
+                ImVec2(0.5f, 0.5f));
+            const char* title = InspectorDockWindowTitle(tab);
+            if (!BeginPanelWindow(title, &open, ImGuiWindowFlags_None))
+            {
+                EndPanelWindow();
+                if (!open)
+                {
+                    SetInspectorDockViewOpen(tab, false);
+                }
+                return;
+            }
+
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 3.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemInnerSpacing, ImVec2(4.0f, 4.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(5.0f, 5.0f));
+            RenderInspectorTabContent(tab);
+            ImGui::PopStyleVar(3);
+            EndPanelWindow();
+
+            if (!open)
+            {
+                SetInspectorDockViewOpen(tab, false);
+            }
+        }
+
+        void RenderInspectorDockViews()
+        {
+            for (const InspectorTabSpec& spec : InspectorTabs)
+            {
+                RenderInspectorDockView(spec.tab);
+            }
         }
 
         void RenderTriagePanel()
@@ -6988,6 +8224,27 @@ namespace GlassPane::UI
                     WrappedTextWide(indicator);
                 }
             }
+
+            if (compareResultValid_ && compareResult_.hasBaseline && compareResult_.hasCurrent)
+            {
+                ImGui::Separator();
+                ImGui::TextDisabled("Snapshot Compare");
+                std::string summary =
+                    "Snapshot compare: " +
+                    std::to_string(compareResult_.newProcesses.size()) +
+                    " new processes, " +
+                    std::to_string(compareResult_.exitedProcesses.size()) +
+                    " exited processes, " +
+                    std::to_string(compareResult_.changedProcesses.size()) +
+                    " changed processes";
+                if (compareResult_.networkCompared)
+                {
+                    summary += ", " + std::to_string(compareResult_.newNetworkConnections.size()) +
+                        " new network connection(s)";
+                }
+                summary += ".";
+                WrappedTextDisabled(summary);
+            }
         }
 
         bool ProcessMatchesFilters(const Core::ProcessInfo& process) const
@@ -7118,12 +8375,15 @@ namespace GlassPane::UI
             AddLog(LogLevel::Info, "Log console saved: " + WideToUtf8(fileName));
         }
 
-        void RefreshModules()
+        void RefreshModules(bool logActivity = true)
         {
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                AddLog(LogLevel::Warning, "No selected process for module refresh.");
+                if (logActivity)
+                {
+                    AddLog(LogLevel::Warning, "No selected process for module refresh.");
+                }
                 selectedModules_ = {};
                 selectedModulesLoaded_ = false;
                 selectedModulesPid_ = InvalidPid;
@@ -7140,12 +8400,17 @@ namespace GlassPane::UI
             selectedModulesCreationTime_ = ProcessCacheStamp(*process);
             selectedModulePid_ = InvalidPid;
             selectedModuleIndex_ = 0;
+            moduleEvidenceCache_[EvidenceCacheKey(*process)] = selectedModules_;
+            TrimEvidenceCache(moduleEvidenceCache_);
             InvalidateFindingsCache();
-            AddLog(
-                selectedModules_.success ? LogLevel::Info : LogLevel::Warning,
-                "Module refresh for PID " + std::to_string(process->pid) + ": " +
-                    WideToUtf8(selectedModules_.statusMessage) +
-                    " (" + std::to_string(timings_.modulesMs) + " ms).");
+            if (logActivity)
+            {
+                AddLog(
+                    selectedModules_.success ? LogLevel::Info : LogLevel::Warning,
+                    "Module refresh for PID " + std::to_string(process->pid) + ": " +
+                        WideToUtf8(selectedModules_.statusMessage) +
+                        " (" + std::to_string(timings_.modulesMs) + " ms).");
+            }
         }
 
         void RefreshToken(bool logActivity = true)
@@ -7172,6 +8437,8 @@ namespace GlassPane::UI
             tokenTableNeedsAutoSize_ = true;
             selectedTokenPid_ = process->pid;
             selectedTokenCreationTime_ = ProcessCacheStamp(*process);
+            tokenEvidenceCache_[EvidenceCacheKey(*process)] = selectedToken_;
+            TrimEvidenceCache(tokenEvidenceCache_);
             InvalidateFindingsCache();
 
             if (logActivity)
@@ -7208,6 +8475,8 @@ namespace GlassPane::UI
             runtimeTableNeedsAutoSize_ = true;
             selectedRuntimePid_ = process->pid;
             selectedRuntimeCreationTime_ = ProcessCacheStamp(*process);
+            runtimeEvidenceCache_[EvidenceCacheKey(*process)] = selectedRuntime_;
+            TrimEvidenceCache(runtimeEvidenceCache_);
             InvalidateFindingsCache();
 
             if (logActivity)
@@ -7253,6 +8522,8 @@ namespace GlassPane::UI
             selectedMemoryPid_ = process->pid;
             selectedMemoryCreationTime_ = ProcessCacheStamp(*process);
             visibleMemoryRegionsDirty_ = true;
+            memoryEvidenceCache_[EvidenceCacheKey(*process)] = selectedMemory_;
+            TrimEvidenceCache(memoryEvidenceCache_);
             InvalidateFindingsCache();
 
             if (logActivity)
@@ -7300,6 +8571,8 @@ namespace GlassPane::UI
             selectedHandlesPid_ = process->pid;
             selectedHandlesCreationTime_ = ProcessCacheStamp(*process);
             visibleHandlesDirty_ = true;
+            handleEvidenceCache_[EvidenceCacheKey(*process)] = selectedHandles_;
+            TrimEvidenceCache(handleEvidenceCache_);
             InvalidateFindingsCache();
 
             if (logActivity)
@@ -7509,6 +8782,9 @@ namespace GlassPane::UI
 
         Core::ProcessSnapshot snapshot_;
         Core::FocusedGraph focusedGraph_;
+        Core::ProcessSnapshotCapture baselineCompareSnapshot_;
+        Core::ProcessSnapshotCapture currentCompareSnapshot_;
+        Core::SnapshotCompareResult compareResult_;
         Core::ModuleCollectionResult selectedModules_;
         Core::NetworkCollectionResult networkSnapshot_;
         Core::TokenInfo selectedToken_;
@@ -7538,6 +8814,7 @@ namespace GlassPane::UI
         bool selectedRuntimeLoaded_ = false;
         bool selectedMemoryLoaded_ = false;
         bool selectedHandlesLoaded_ = false;
+        bool compareResultValid_ = false;
         bool processTableNeedsAutoSize_ = true;
         bool timelineTableNeedsAutoSize_ = true;
         bool modulesTableNeedsAutoSize_ = true;
@@ -7553,6 +8830,7 @@ namespace GlassPane::UI
         ULONGLONG inspectorTabEdgeHoverStartedMs_ = 0;
         ULONGLONG inspectorTabAutoScrollCooldownUntilMs_ = 0;
         bool networkLoaded_ = false;
+        bool comInitialized_ = false;
         bool pickWindowActive_ = false;
         bool pickerOverlayClassRegistered_ = false;
         bool scrollSelectedProcessIntoView_ = false;
@@ -7564,6 +8842,7 @@ namespace GlassPane::UI
         TriageFilter triageFilter_ = TriageFilter::All;
         HandleFilter handleFilter_ = HandleFilter::All;
         InspectorTab inspectorTab_ = InspectorTab::Triage;
+        std::array<bool, InspectorTabs.size()> inspectorDockViewOpen_ = {};
         std::array<char, 256> searchBuffer_ = {};
         std::array<char, 256> handleSearchBuffer_ = {};
         std::array<char, 256> memorySearchBuffer_ = {};
@@ -7632,8 +8911,14 @@ namespace GlassPane::UI
         std::vector<LogEntry> logs_;
         std::unordered_map<std::wstring, CachedIconTexture> iconCache_;
         std::unordered_map<std::wstring, Core::FileIdentity> fileIdentityCache_;
+        std::unordered_map<std::wstring, Core::ModuleCollectionResult> moduleEvidenceCache_;
+        std::unordered_map<std::wstring, Core::TokenInfo> tokenEvidenceCache_;
+        std::unordered_map<std::wstring, Core::RuntimeInfo> runtimeEvidenceCache_;
+        std::unordered_map<std::wstring, Core::MemoryCollectionResult> memoryEvidenceCache_;
+        std::unordered_map<std::wstring, Core::HandleCollectionResult> handleEvidenceCache_;
         std::unordered_map<std::uint32_t, std::size_t> graphLayoutNodeIndexByPid_;
         ID3D11ShaderResourceView* fallbackIconTexture_ = nullptr;
+        ID3D11ShaderResourceView* appLogoTexture_ = nullptr;
 
         ImGuiID dockspaceId_ = 0;
         ImGuiID leftDockId_ = 0;

@@ -978,4 +978,271 @@ namespace GlassPane::Export
 
         return true;
     }
+
+    bool ExportSnapshotCompareMarkdownReport(
+        const SnapshotCompareMarkdownReportContext& context,
+        const std::wstring& filePath,
+        std::wstring* errorMessage)
+    {
+        if (context.baseline == nullptr || context.current == nullptr || context.result == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Snapshot compare report context is incomplete.";
+            }
+            return false;
+        }
+
+        if (!context.baseline->captured || !context.current->captured ||
+            !context.result->hasBaseline || !context.result->hasCurrent)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Capture both baseline and current snapshots before exporting a compare report.";
+            }
+            return false;
+        }
+
+        std::ofstream output(filePath, std::ios::binary | std::ios::trunc);
+        if (!output)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Could not open the compare report file for writing.";
+            }
+            return false;
+        }
+
+        const Core::SnapshotCompareResult& result = *context.result;
+        const auto endpointText = [](const Core::SnapshotNetworkEndpoint& endpoint, bool remote) {
+            const std::wstring& address = remote ? endpoint.remoteAddress : endpoint.localAddress;
+            const std::uint16_t port = remote ? endpoint.remotePort : endpoint.localPort;
+            if (remote && (endpoint.isListening || endpoint.protocol == L"UDP" || address.empty() || port == 0))
+            {
+                return std::wstring(L"-");
+            }
+            if (address.empty())
+            {
+                return std::wstring(L"(unknown)");
+            }
+            return address + L":" + std::to_wstring(port);
+        };
+
+        const auto writeProcessRows = [&output](const std::vector<Core::SnapshotProcessRecord>& records) {
+            WriteTableHeader(output, { "Process", "PID", "PPID", "Severity", "Path" });
+            for (const Core::SnapshotProcessRecord& process : records)
+            {
+                WriteTableRow(output, {
+                    ValueOr(process.processName, L"(unknown)"),
+                    std::to_wstring(process.pid),
+                    std::to_wstring(process.parentPid),
+                    Core::SeverityToString(process.severity),
+                    ValueOr(process.executablePath, L"(unavailable)")
+                });
+            }
+            output << "\n";
+        };
+
+        output << "# GlassPane Snapshot Compare Report\n\n";
+        output << "- Generated: " << EscapeMarkdownInline(LocalTimestamp()) << "\n";
+        output << "- GlassPane version: " << EscapeMarkdownInline(ValueOr(context.appVersion, L"(unknown)")) << "\n";
+        output << "- Build configuration: " << EscapeMarkdownInline(ValueOr(context.buildConfiguration, L"(unknown)")) << "\n";
+        output << "- Baseline captured: " << EscapeMarkdownInline(ValueOr(context.baseline->captureTimeLocal, L"(missing)")) << "\n";
+        output << "- Current captured: " << EscapeMarkdownInline(ValueOr(context.current->captureTimeLocal, L"(missing)")) << "\n\n";
+
+        output << "## Summary\n\n";
+        WriteTableHeader(output, { "Metric", "Count" });
+        WriteTableRow(output, { L"Baseline processes", std::to_wstring(context.baseline->processes.size()) });
+        WriteTableRow(output, { L"Current processes", std::to_wstring(context.current->processes.size()) });
+        WriteTableRow(output, { L"New processes", std::to_wstring(result.newProcesses.size()) });
+        WriteTableRow(output, { L"Exited processes", std::to_wstring(result.exitedProcesses.size()) });
+        WriteTableRow(output, { L"Changed processes", std::to_wstring(result.changedProcesses.size()) });
+        WriteTableRow(output, { L"New network connections", result.networkCompared ? std::to_wstring(result.newNetworkConnections.size()) : L"Unavailable" });
+        WriteTableRow(output, { L"Closed network connections", result.networkCompared ? std::to_wstring(result.closedNetworkConnections.size()) : L"Unavailable" });
+        WriteTableRow(output, { L"New findings", result.findingsCompared ? std::to_wstring(result.newFindings.size()) : L"Unavailable" });
+        WriteTableRow(output, { L"Changed findings", result.findingsCompared ? std::to_wstring(result.changedFindings.size()) : L"Unavailable" });
+        output << "\n";
+
+        output << "## New Processes\n\n";
+        if (result.newProcesses.empty())
+        {
+            output << "No new processes were observed.\n\n";
+        }
+        else
+        {
+            writeProcessRows(result.newProcesses);
+        }
+
+        output << "## Exited Processes\n\n";
+        if (result.exitedProcesses.empty())
+        {
+            output << "No exited processes were observed.\n\n";
+        }
+        else
+        {
+            writeProcessRows(result.exitedProcesses);
+        }
+
+        output << "## Changed Processes\n\n";
+        if (result.changedProcesses.empty())
+        {
+            output << "No meaningful process attribute changes were observed.\n\n";
+        }
+        else
+        {
+            WriteTableHeader(output, { "Process", "PID", "Field", "Baseline", "Current" });
+            for (const Core::SnapshotProcessChange& change : result.changedProcesses)
+            {
+                for (const Core::SnapshotChangedField& field : change.fields)
+                {
+                    WriteTableRow(output, {
+                        ValueOr(change.current.processName, L"(unknown)"),
+                        std::to_wstring(change.current.pid),
+                        field.field,
+                        field.baselineValue,
+                        field.currentValue
+                    });
+                }
+            }
+            output << "\n";
+        }
+
+        output << "## Network Changes\n\n";
+        if (!result.networkCompared)
+        {
+            output << "Network comparison unavailable because network data was not loaded or did not collect successfully for both snapshots.\n\n";
+        }
+        else if (result.newNetworkConnections.empty() && result.closedNetworkConnections.empty())
+        {
+            output << "No network connection changes were observed in the captured socket ownership data.\n\n";
+        }
+        else
+        {
+            if (!result.newNetworkConnections.empty())
+            {
+                output << "### New Connections\n\n";
+                WriteTableHeader(output, { "Process", "PID", "Protocol", "Local", "Remote", "State" });
+                for (const Core::SnapshotNetworkEndpoint& endpoint : result.newNetworkConnections)
+                {
+                    WriteTableRow(output, {
+                        ValueOr(endpoint.processName, L"(unknown)"),
+                        std::to_wstring(endpoint.owningPid),
+                        ValueOr(endpoint.protocol, L"(unknown)"),
+                        endpointText(endpoint, false),
+                        endpointText(endpoint, true),
+                        ValueOr(endpoint.state, L"-")
+                    });
+                }
+                output << "\n";
+            }
+
+            if (!result.closedNetworkConnections.empty())
+            {
+                output << "### Closed Connections\n\n";
+                WriteTableHeader(output, { "Process", "PID", "Protocol", "Local", "Remote", "State" });
+                for (const Core::SnapshotNetworkEndpoint& endpoint : result.closedNetworkConnections)
+                {
+                    WriteTableRow(output, {
+                        ValueOr(endpoint.processName, L"(unknown)"),
+                        std::to_wstring(endpoint.owningPid),
+                        ValueOr(endpoint.protocol, L"(unknown)"),
+                        endpointText(endpoint, false),
+                        endpointText(endpoint, true),
+                        ValueOr(endpoint.state, L"-")
+                    });
+                }
+                output << "\n";
+            }
+        }
+
+        output << "## Finding Changes\n\n";
+        if (!result.findingsCompared)
+        {
+            output << "Finding comparison unavailable because finding summaries were not captured for both snapshots.\n\n";
+        }
+        else if (result.newFindings.empty() && result.removedFindings.empty() && result.changedFindings.empty())
+        {
+            output << "No finding or process indicator changes were observed.\n\n";
+        }
+        else
+        {
+            if (!result.newFindings.empty())
+            {
+                output << "### New Findings\n\n";
+                WriteTableHeader(output, { "Severity", "Process", "PID", "Finding", "Category" });
+                for (const Core::SnapshotFindingRecord& finding : result.newFindings)
+                {
+                    WriteTableRow(output, {
+                        Core::FindingSeverityToString(finding.severity),
+                        ValueOr(finding.processName, L"(unknown)"),
+                        std::to_wstring(finding.pid),
+                        ValueOr(finding.title, L"(untitled)"),
+                        ValueOr(finding.category, L"(none)")
+                    });
+                }
+                output << "\n";
+            }
+
+            if (!result.changedFindings.empty())
+            {
+                output << "### Changed Findings\n\n";
+                WriteTableHeader(output, { "Process", "PID", "Finding", "Baseline Severity", "Current Severity" });
+                for (const Core::SnapshotFindingChange& change : result.changedFindings)
+                {
+                    WriteTableRow(output, {
+                        ValueOr(change.current.processName, L"(unknown)"),
+                        std::to_wstring(change.current.pid),
+                        ValueOr(change.current.title, L"(untitled)"),
+                        Core::FindingSeverityToString(change.baseline.severity),
+                        Core::FindingSeverityToString(change.current.severity)
+                    });
+                }
+                output << "\n";
+            }
+
+            if (!result.removedFindings.empty())
+            {
+                output << "### Removed Findings\n\n";
+                WriteTableHeader(output, { "Severity", "Process", "PID", "Finding", "Category" });
+                for (const Core::SnapshotFindingRecord& finding : result.removedFindings)
+                {
+                    WriteTableRow(output, {
+                        Core::FindingSeverityToString(finding.severity),
+                        ValueOr(finding.processName, L"(unknown)"),
+                        std::to_wstring(finding.pid),
+                        ValueOr(finding.title, L"(untitled)"),
+                        ValueOr(finding.category, L"(none)")
+                    });
+                }
+                output << "\n";
+            }
+        }
+
+        output << "## Notes and Limitations\n\n";
+        if (result.notes.empty())
+        {
+            output << "- No compare-specific limitations were recorded.\n";
+        }
+        else
+        {
+            for (const std::wstring& note : result.notes)
+            {
+                WriteBullet(output, note);
+            }
+        }
+        output << "- Snapshot compare is local and in-memory for this preview build.\n";
+        output << "- New or changed evidence is context worth reviewing, not proof of malicious activity.\n";
+        output << "- GlassPane performs read-only inspection and does not kill, inject into, tamper with, remediate, or modify processes.\n";
+
+        if (!output)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"An error occurred while writing the compare report.";
+            }
+            return false;
+        }
+
+        return true;
+    }
 }

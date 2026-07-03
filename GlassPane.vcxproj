@@ -154,6 +154,7 @@
     <ClCompile Include="Core\ProcessCollector.cpp" />
     <ClCompile Include="Core\ProcessTree.cpp" />
     <ClCompile Include="Core\RuntimeCollector.cpp" />
+    <ClCompile Include="Core\SnapshotCompare.cpp" />
     <ClCompile Include="Core\SuspicionRules.cpp" />
     <ClCompile Include="Core\TimelineModel.cpp" />
     <ClCompile Include="Core\TokenCollector.cpp" />
@@ -192,6 +193,7 @@
     <ClInclude Include="Core\ProcessTree.h" />
     <ClInclude Include="Core\RuntimeCollector.h" />
     <ClInclude Include="Core\RuntimeInfo.h" />
+    <ClInclude Include="Core\SnapshotCompare.h" />
     <ClInclude Include="Core\SuspicionRules.h" />
     <ClInclude Include="Core\TimelineModel.h" />
     <ClInclude Include="Core\TokenCollector.h" />

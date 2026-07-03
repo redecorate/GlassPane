@@ -2,7 +2,11 @@
 
 > **A read-only Windows process relationship and forensic analysis dashboard.**
 
+<<<<<<< HEAD
 Current preview: **V0.3.1-PBT**
+=======
+Current preview: **V0.4.0-PBT**
+>>>>>>> 558a064 (V0.4.0)
 
 GlassPane is a modern Windows security analysis tool designed to help analysts, researchers, and developers understand **what a process is doing and why it matters**.
 

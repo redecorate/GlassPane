@@ -8,6 +8,7 @@
 #include "../Core/NetworkConnection.h"
 #include "../Core/ProcessInfo.h"
 #include "../Core/RuntimeInfo.h"
+#include "../Core/SnapshotCompare.h"
 #include "../Core/TokenInfo.h"
 
 #include <cstdint>
@@ -50,6 +51,20 @@ namespace GlassPane::Export
 
     bool ExportSelectedProcessMarkdownReport(
         const SelectedProcessMarkdownReportContext& context,
+        const std::wstring& filePath,
+        std::wstring* errorMessage = nullptr);
+
+    struct SnapshotCompareMarkdownReportContext
+    {
+        const Core::ProcessSnapshotCapture* baseline = nullptr;
+        const Core::ProcessSnapshotCapture* current = nullptr;
+        const Core::SnapshotCompareResult* result = nullptr;
+        std::wstring appVersion;
+        std::wstring buildConfiguration;
+    };
+
+    bool ExportSnapshotCompareMarkdownReport(
+        const SnapshotCompareMarkdownReportContext& context,
         const std::wstring& filePath,
         std::wstring* errorMessage = nullptr);
 }
