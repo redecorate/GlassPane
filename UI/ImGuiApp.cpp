@@ -96,6 +96,8 @@ namespace GlassPane::UI
         struct CollectorTimings
         {
             std::uint64_t processSnapshotMs = 0;
+            std::uint64_t graphLayoutMs = 0;
+            std::uint64_t processFilterMs = 0;
             std::uint64_t modulesMs = 0;
             std::uint64_t networkMs = 0;
             std::uint64_t tokenMs = 0;
@@ -197,6 +199,12 @@ namespace GlassPane::UI
             std::size_t processIndex = 0;
             std::size_t depth = 0;
             Core::Severity filterSeverity = Core::Severity::None;
+        };
+
+        struct GraphLayoutNode
+        {
+            std::size_t nodeIndex = 0;
+            ImVec2 worldCenter = ImVec2(0.0f, 0.0f);
         };
 
         struct NetworkSummary
@@ -855,7 +863,7 @@ namespace GlassPane::UI
                 ImGuiTableFlags_SizingStretchProp |
                 ImGuiTableFlags_NoSavedSettings |
                 ImGuiTableFlags_PadOuterX;
-            if (ImGui::BeginTable("field_row", 2, flags))
+            if (ImGui::BeginTable("FieldRowTable##InspectorField", 2, flags))
             {
                 ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, labelWidth);
                 ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
@@ -1544,15 +1552,9 @@ namespace GlassPane::UI
             SameLineIfFits(ChipButtonWidth(nextLabel), spacing);
         }
 
-        std::string AutoSizedTableId(const char* baseId, bool& needsAutoSize, int& generation)
+        void AcknowledgeTableAutoSizeRequest(bool& needsAutoSize)
         {
-            if (needsAutoSize)
-            {
-                ++generation;
-                needsAutoSize = false;
-            }
-
-            return std::string(baseId) + "_" + std::to_string(generation);
+            needsAutoSize = false;
         }
 
         void BeginInspectorCard(const char* id, const char* title, ImFont* headingFont)
@@ -2222,11 +2224,25 @@ namespace GlassPane::UI
             selectedMemoryLoaded_ = false;
             selectedMemoryPid_ = InvalidPid;
             selectedMemoryCreationTime_ = 0;
+            visibleMemoryRegionsDirty_ = true;
+            visibleMemoryRegionIndexes_.clear();
+            visibleMemoryPid_ = InvalidPid;
+            visibleMemoryCreationTime_ = 0;
+            visibleMemorySourceSize_ = 0;
+            visibleMemorySearchText_.clear();
 
             selectedHandles_ = {};
             selectedHandlesLoaded_ = false;
             selectedHandlesPid_ = InvalidPid;
             selectedHandlesCreationTime_ = 0;
+            visibleHandlesDirty_ = true;
+            visibleHandleIndexes_.clear();
+            visibleHandlesPid_ = InvalidPid;
+            visibleHandlesCreationTime_ = 0;
+            visibleHandlesSourceSize_ = 0;
+            visibleHandlesWithIndicatorsCount_ = 0;
+            visibleHandlesNameStatusCount_ = 0;
+            visibleHandlesSearchText_.clear();
 
             InvalidateFindingsCache();
         }
@@ -2537,6 +2553,10 @@ namespace GlassPane::UI
             findingsCachePid_ = InvalidPid;
             findingsCacheCreationTime_ = 0;
             selectedFindingsCache_.clear();
+            selectedHighTriageCacheValid_ = false;
+            selectedHighTriagePid_ = InvalidPid;
+            selectedHighTriageCreationTime_ = 0;
+            selectedHighTriage_ = false;
         }
 
         void MarkAllTablesNeedAutoSize()
@@ -2549,6 +2569,48 @@ namespace GlassPane::UI
             runtimeTableNeedsAutoSize_ = true;
             memoryTableNeedsAutoSize_ = true;
             handlesTableNeedsAutoSize_ = true;
+        }
+
+        void MarkProcessRowsDirty()
+        {
+            visibleProcessRowsDirty_ = true;
+            timelineRowsDirty_ = true;
+            processTableNeedsAutoSize_ = true;
+            timelineTableNeedsAutoSize_ = true;
+        }
+
+        void MarkSnapshotDependentCachesDirty()
+        {
+            ++snapshotGeneration_;
+            visibleProcessRowsDirty_ = true;
+            timelineRowsDirty_ = true;
+            graphLayoutDirty_ = true;
+        }
+
+        bool SetProcessSearchText(std::wstring loweredSearchText)
+        {
+            if (searchText_ == loweredSearchText)
+            {
+                return false;
+            }
+
+            searchText_ = std::move(loweredSearchText);
+            ++processQueryRevision_;
+            MarkProcessRowsDirty();
+            return true;
+        }
+
+        bool SetProcessFilterMode(ProcessFilterMode mode)
+        {
+            if (processFilterMode_ == mode)
+            {
+                return false;
+            }
+
+            processFilterMode_ = mode;
+            ++processQueryRevision_;
+            MarkProcessRowsDirty();
+            return true;
         }
 
         void MarkSelectedEvidenceTablesNeedAutoSize()
@@ -2595,12 +2657,22 @@ namespace GlassPane::UI
                 return false;
             }
 
+            if (selectedHighTriageCacheValid_ &&
+                CacheMatchesProcess(selectedHighTriagePid_, selectedHighTriageCreationTime_, *process))
+            {
+                return selectedHighTriage_;
+            }
+
             const Core::ChainAnalysisResult chain = Core::AnalyzeChain(snapshot_, process->pid);
             const Core::FileIdentity& fileIdentity = CachedFileIdentity(process->executablePath);
             const std::vector<Core::Finding>& findings =
                 FindingsForSelectedProcess(*process, chain, fileIdentity);
-            return !findings.empty() &&
+            selectedHighTriage_ = !findings.empty() &&
                 Core::HighestFindingSeverity(findings) == Core::FindingSeverity::High;
+            selectedHighTriagePid_ = process->pid;
+            selectedHighTriageCreationTime_ = ProcessCacheStamp(*process);
+            selectedHighTriageCacheValid_ = true;
+            return selectedHighTriage_;
         }
 
         std::size_t CountSuspiciousProcesses() const
@@ -2615,13 +2687,22 @@ namespace GlassPane::UI
 
         std::size_t CountVisibleProcesses() const
         {
-            return BuildVisibleProcessRows().size();
+            return visibleProcessRows_.size();
         }
 
-        std::vector<VisibleProcessRow> BuildVisibleProcessRows() const
+        void RebuildVisibleProcessRowsIfNeeded()
         {
+            if (!visibleProcessRowsDirty_ &&
+                visibleProcessRowsSnapshotGeneration_ == snapshotGeneration_ &&
+                visibleProcessRowsQueryRevision_ == processQueryRevision_)
+            {
+                return;
+            }
+
+            const ULONGLONG started = GetTickCount64();
             const std::vector<Core::TreeRow> rows = Core::BuildTreeRows(snapshot_);
-            std::vector<VisibleProcessRow> visibleRows;
+            visibleProcessRows_.clear();
+            visibleProcessRows_.reserve(rows.size());
             for (const Core::TreeRow& row : rows)
             {
                 if (row.processIndex >= snapshot_.processes.size())
@@ -2632,10 +2713,119 @@ namespace GlassPane::UI
                 const Core::ProcessInfo& process = snapshot_.processes[row.processIndex];
                 if (ProcessMatchesFilters(process))
                 {
-                    visibleRows.push_back({ row.processIndex, row.depth, process.severity });
+                    visibleProcessRows_.push_back({ row.processIndex, row.depth, process.severity });
                 }
             }
-            return visibleRows;
+
+            timings_.processFilterMs = ElapsedMs(started);
+            visibleProcessRowsSnapshotGeneration_ = snapshotGeneration_;
+            visibleProcessRowsQueryRevision_ = processQueryRevision_;
+            visibleProcessRowsDirty_ = false;
+        }
+
+        const std::vector<Core::TimelineRow>& TimelineRowsForCurrentFilters()
+        {
+            if (!timelineRowsDirty_ &&
+                timelineRowsSnapshotGeneration_ == snapshotGeneration_ &&
+                timelineRowsQueryRevision_ == processQueryRevision_ &&
+                timelineRowsFilter_ == timelineFilter_)
+            {
+                return cachedTimelineRows_;
+            }
+
+            cachedTimelineRows_.clear();
+            const std::vector<Core::TimelineRow> rows = Core::BuildTimelineRows(snapshot_, timelineFilter_);
+            cachedTimelineRows_.reserve(rows.size());
+            for (const Core::TimelineRow& row : rows)
+            {
+                const Core::ProcessInfo* timelineProcess = Core::FindProcessByPid(snapshot_, row.pid);
+                if (timelineProcess != nullptr && ProcessMatchesFilters(*timelineProcess))
+                {
+                    cachedTimelineRows_.push_back(row);
+                }
+            }
+
+            timelineRowsSnapshotGeneration_ = snapshotGeneration_;
+            timelineRowsQueryRevision_ = processQueryRevision_;
+            timelineRowsFilter_ = timelineFilter_;
+            timelineRowsDirty_ = false;
+            return cachedTimelineRows_;
+        }
+
+        void RebuildVisibleHandlesIfNeeded(const Core::ProcessInfo& process)
+        {
+            const std::uint64_t creationTime = ProcessCacheStamp(process);
+            if (!visibleHandlesDirty_ &&
+                visibleHandlesPid_ == process.pid &&
+                visibleHandlesCreationTime_ == creationTime &&
+                visibleHandlesSourceSize_ == selectedHandles_.handles.size() &&
+                visibleHandlesFilter_ == handleFilter_ &&
+                visibleHandlesSearchText_ == handleSearchText_)
+            {
+                return;
+            }
+
+            visibleHandleIndexes_.clear();
+            visibleHandleIndexes_.reserve(selectedHandles_.handles.size());
+            visibleHandlesWithIndicatorsCount_ = 0;
+            visibleHandlesNameStatusCount_ = 0;
+            for (std::size_t index = 0; index < selectedHandles_.handles.size(); ++index)
+            {
+                const Core::HandleInfo& handle = selectedHandles_.handles[index];
+                if (!handle.indicators.empty())
+                {
+                    ++visibleHandlesWithIndicatorsCount_;
+                }
+                if (!HandleStatusText(handle).empty())
+                {
+                    ++visibleHandlesNameStatusCount_;
+                }
+                if (HandleMatchesFilter(handle, handleFilter_) &&
+                    HandleMatchesSearch(handle, handleSearchText_))
+                {
+                    visibleHandleIndexes_.push_back(index);
+                }
+            }
+
+            visibleHandlesPid_ = process.pid;
+            visibleHandlesCreationTime_ = creationTime;
+            visibleHandlesSourceSize_ = selectedHandles_.handles.size();
+            visibleHandlesFilter_ = handleFilter_;
+            visibleHandlesSearchText_ = handleSearchText_;
+            visibleHandlesDirty_ = false;
+        }
+
+        void RebuildVisibleMemoryRegionsIfNeeded(const Core::ProcessInfo& process)
+        {
+            const std::uint64_t creationTime = ProcessCacheStamp(process);
+            if (!visibleMemoryRegionsDirty_ &&
+                visibleMemoryPid_ == process.pid &&
+                visibleMemoryCreationTime_ == creationTime &&
+                visibleMemorySourceSize_ == selectedMemory_.regions.size() &&
+                visibleMemoryFilter_ == memoryFilter_ &&
+                visibleMemorySearchText_ == memorySearchText_)
+            {
+                return;
+            }
+
+            visibleMemoryRegionIndexes_.clear();
+            visibleMemoryRegionIndexes_.reserve(selectedMemory_.regions.size());
+            for (std::size_t index = 0; index < selectedMemory_.regions.size(); ++index)
+            {
+                const Core::MemoryRegionInfo& region = selectedMemory_.regions[index];
+                if (MemoryMatchesFilter(region, memoryFilter_) &&
+                    MemoryMatchesSearch(region, memorySearchText_))
+                {
+                    visibleMemoryRegionIndexes_.push_back(index);
+                }
+            }
+
+            visibleMemoryPid_ = process.pid;
+            visibleMemoryCreationTime_ = creationTime;
+            visibleMemorySourceSize_ = selectedMemory_.regions.size();
+            visibleMemoryFilter_ = memoryFilter_;
+            visibleMemorySearchText_ = memorySearchText_;
+            visibleMemoryRegionsDirty_ = false;
         }
 
         void RefreshSnapshot()
@@ -2651,6 +2841,7 @@ namespace GlassPane::UI
             const ULONGLONG started = GetTickCount64();
             snapshot_ = Core::CollectProcessSnapshot();
             timings_.processSnapshotMs = ElapsedMs(started);
+            MarkSnapshotDependentCachesDirty();
             ClearSelectedProcessEvidence();
             lastRefreshTime_ = LocalTimestamp();
             suspiciousCount_ = CountSuspiciousProcesses();
@@ -2691,14 +2882,18 @@ namespace GlassPane::UI
 
             RefreshToken(false);
             RefreshRuntime(false);
-            focusedGraph_ = Core::BuildFocusedTree(snapshot_, selectedPid_, 2);
+            RebuildFocusedGraph("snapshot-refresh");
             RequestGraphFit();
+            RebuildVisibleProcessRowsIfNeeded();
+            RebuildGraphWorldLayoutIfNeeded();
             InvalidateFindingsCache();
             AddLog(
                 suspiciousCount_ == 0 ? LogLevel::Info : LogLevel::Warning,
                 "Snapshot loaded: " + std::to_string(snapshot_.processes.size()) +
                     " processes, " + std::to_string(suspiciousCount_) +
-                    " suspicious in " + std::to_string(timings_.processSnapshotMs) + " ms.");
+                    " suspicious in " + std::to_string(timings_.processSnapshotMs) +
+                    " ms. Filter " + std::to_string(timings_.processFilterMs) +
+                    " ms, graph layout " + std::to_string(timings_.graphLayoutMs) + " ms.");
         }
 
         void RefreshHandlesForSelectionChange(const Core::ProcessInfo& process)
@@ -2767,6 +2962,143 @@ namespace GlassPane::UI
             graphFitPid_ = focusedGraph_.focusPid;
         }
 
+        void RebuildFocusedGraph(const char*)
+        {
+            const ULONGLONG started = GetTickCount64();
+            focusedGraph_ = Core::BuildFocusedTree(snapshot_, selectedPid_, 2);
+            timings_.graphLayoutMs = ElapsedMs(started);
+            graphLayoutDirty_ = true;
+        }
+
+        void RebuildGraphWorldLayoutIfNeeded()
+        {
+            if (!graphLayoutDirty_ &&
+                graphLayoutFocusPid_ == focusedGraph_.focusPid &&
+                graphLayoutNodeCount_ == focusedGraph_.nodes.size() &&
+                graphLayoutEdgeCount_ == focusedGraph_.edges.size() &&
+                graphLayoutCachedMode_ == graphLayoutMode_)
+            {
+                return;
+            }
+
+            const ULONGLONG started = GetTickCount64();
+            graphLayoutNodes_.clear();
+            graphLayoutNodeIndexByPid_.clear();
+            graphLayoutHasWorldBounds_ = false;
+            graphLayoutSingleNode_ = focusedGraph_.nodes.size() == 1;
+            graphLayoutSmallGraph_ = focusedGraph_.nodes.size() >= 2 && focusedGraph_.nodes.size() <= 5;
+            graphLayoutBaseNodeSize_ = graphLayoutSingleNode_
+                ? ImVec2(342.0f, 126.0f)
+                : (graphLayoutSmallGraph_ ? ImVec2(318.0f, 112.0f) : ImVec2(302.0f, 106.0f));
+
+            std::unordered_map<std::size_t, std::vector<std::size_t>> levels;
+            std::size_t maxDepth = 0;
+            for (std::size_t nodeIndex = 0; nodeIndex < focusedGraph_.nodes.size(); ++nodeIndex)
+            {
+                const Core::FocusedGraphNode& node = focusedGraph_.nodes[nodeIndex];
+                levels[node.depth].push_back(nodeIndex);
+                maxDepth = std::max(maxDepth, node.depth);
+            }
+
+            graphLayoutNodes_.resize(focusedGraph_.nodes.size());
+            const float siblingSpacing = graphLayoutSingleNode_ ? 0.0f : (graphLayoutSmallGraph_ ? 170.0f : 190.0f);
+            const float levelSpacing = graphLayoutMode_ == GraphLayoutMode::LeftToRight ? 166.0f : 132.0f;
+            for (std::size_t depth = 0; depth <= maxDepth; ++depth)
+            {
+                auto level = levels.find(depth);
+                if (level == levels.end())
+                {
+                    continue;
+                }
+
+                std::vector<std::size_t>& nodeIndexes = level->second;
+                std::sort(nodeIndexes.begin(), nodeIndexes.end(), [this](std::size_t leftIndex, std::size_t rightIndex) {
+                    if (leftIndex >= focusedGraph_.nodes.size() || rightIndex >= focusedGraph_.nodes.size())
+                    {
+                        return leftIndex < rightIndex;
+                    }
+                    return focusedGraph_.nodes[leftIndex].pid < focusedGraph_.nodes[rightIndex].pid;
+                });
+
+                const float count = static_cast<float>(nodeIndexes.size());
+                if (graphLayoutMode_ == GraphLayoutMode::LeftToRight)
+                {
+                    const float totalHeight =
+                        count * graphLayoutBaseNodeSize_.y + std::max(0.0f, count - 1.0f) * siblingSpacing;
+                    const float startY = -totalHeight * 0.5f + graphLayoutBaseNodeSize_.y * 0.5f;
+                    const float x = static_cast<float>(depth) * (graphLayoutBaseNodeSize_.x + levelSpacing);
+                    for (std::size_t index = 0; index < nodeIndexes.size(); ++index)
+                    {
+                        const std::size_t nodeIndex = nodeIndexes[index];
+                        if (nodeIndex >= graphLayoutNodes_.size())
+                        {
+                            continue;
+                        }
+                        graphLayoutNodes_[nodeIndex].nodeIndex = nodeIndex;
+                        graphLayoutNodes_[nodeIndex].worldCenter = ImVec2(
+                            x,
+                            startY + static_cast<float>(index) * (graphLayoutBaseNodeSize_.y + siblingSpacing));
+                    }
+                }
+                else
+                {
+                    const float totalWidth =
+                        count * graphLayoutBaseNodeSize_.x + std::max(0.0f, count - 1.0f) * siblingSpacing;
+                    const float startX = -totalWidth * 0.5f + graphLayoutBaseNodeSize_.x * 0.5f;
+                    const float y = static_cast<float>(depth) * (graphLayoutBaseNodeSize_.y + levelSpacing);
+                    for (std::size_t index = 0; index < nodeIndexes.size(); ++index)
+                    {
+                        const std::size_t nodeIndex = nodeIndexes[index];
+                        if (nodeIndex >= graphLayoutNodes_.size())
+                        {
+                            continue;
+                        }
+                        graphLayoutNodes_[nodeIndex].nodeIndex = nodeIndex;
+                        graphLayoutNodes_[nodeIndex].worldCenter = ImVec2(
+                            startX + static_cast<float>(index) * (graphLayoutBaseNodeSize_.x + siblingSpacing),
+                            y);
+                    }
+                }
+            }
+
+            for (std::size_t layoutIndex = 0; layoutIndex < graphLayoutNodes_.size(); ++layoutIndex)
+            {
+                const GraphLayoutNode& visual = graphLayoutNodes_[layoutIndex];
+                if (visual.nodeIndex >= focusedGraph_.nodes.size())
+                {
+                    continue;
+                }
+
+                graphLayoutNodeIndexByPid_[focusedGraph_.nodes[visual.nodeIndex].pid] = layoutIndex;
+                const ImVec2 min(
+                    visual.worldCenter.x - graphLayoutBaseNodeSize_.x * 0.5f,
+                    visual.worldCenter.y - graphLayoutBaseNodeSize_.y * 0.5f);
+                const ImVec2 max(
+                    visual.worldCenter.x + graphLayoutBaseNodeSize_.x * 0.5f,
+                    visual.worldCenter.y + graphLayoutBaseNodeSize_.y * 0.5f);
+                if (!graphLayoutHasWorldBounds_)
+                {
+                    graphLayoutWorldMin_ = min;
+                    graphLayoutWorldMax_ = max;
+                    graphLayoutHasWorldBounds_ = true;
+                }
+                else
+                {
+                    graphLayoutWorldMin_.x = std::min(graphLayoutWorldMin_.x, min.x);
+                    graphLayoutWorldMin_.y = std::min(graphLayoutWorldMin_.y, min.y);
+                    graphLayoutWorldMax_.x = std::max(graphLayoutWorldMax_.x, max.x);
+                    graphLayoutWorldMax_.y = std::max(graphLayoutWorldMax_.y, max.y);
+                }
+            }
+
+            graphLayoutFocusPid_ = focusedGraph_.focusPid;
+            graphLayoutNodeCount_ = focusedGraph_.nodes.size();
+            graphLayoutEdgeCount_ = focusedGraph_.edges.size();
+            graphLayoutCachedMode_ = graphLayoutMode_;
+            graphLayoutDirty_ = false;
+            timings_.graphLayoutMs = ElapsedMs(started);
+        }
+
         void ResetGraphView()
         {
             graphZoom_ = 1.0f;
@@ -2803,7 +3135,7 @@ namespace GlassPane::UI
             }
             if (focusGraph)
             {
-                focusedGraph_ = Core::BuildFocusedTree(snapshot_, selectedPid_, 2);
+                RebuildFocusedGraph("selection");
                 if (changed)
                 {
                     RequestGraphFit();
@@ -3093,15 +3425,6 @@ namespace GlassPane::UI
                     " (PID " + std::to_string(selectedProcess->pid) + ").");
         }
 
-        void LogFilterState()
-        {
-            AddLog(
-                LogLevel::Info,
-                "Filters changed: visible=" + std::to_string(CountVisibleProcesses()) +
-                    ", search=\"" + WideToUtf8(searchText_) +
-                    "\", active=" + ActiveChipLabel() + ".");
-        }
-
         void ShowSelectedProcessInFilters()
         {
             const Core::ProcessInfo* selectedProcess = Core::FindProcessByPid(snapshot_, selectedPid_);
@@ -3112,13 +3435,11 @@ namespace GlassPane::UI
             }
 
             const std::uint32_t preservedSelectedPid = selectedPid_;
-            processFilterMode_ = ProcessFilterMode::All;
-            searchText_.clear();
+            SetProcessFilterMode(ProcessFilterMode::All);
             searchBuffer_.fill('\0');
-            processTableNeedsAutoSize_ = true;
-            timelineTableNeedsAutoSize_ = true;
+            SetProcessSearchText({});
             selectedPid_ = preservedSelectedPid;
-            focusedGraph_ = Core::BuildFocusedTree(snapshot_, selectedPid_, 2);
+            RebuildFocusedGraph("show-selected");
             RequestGraphFit();
             scrollSelectedProcessIntoView_ = true;
 
@@ -3523,7 +3844,7 @@ namespace GlassPane::UI
             const float contentTop = ImGui::GetCursorPosY();
             const float centeredRowY = contentTop + std::max(0.0f, (ImGui::GetContentRegionAvail().y - rowHeight) * 0.5f);
 
-            if (ImGui::BeginTable("header_layout", 3, ImGuiTableFlags_SizingStretchProp))
+            if (ImGui::BeginTable("HeaderLayoutTable##TopToolbar", 3, ImGuiTableFlags_SizingStretchProp))
             {
                 ImGui::TableSetupColumn("brand", ImGuiTableColumnFlags_WidthFixed, brandWidth);
                 ImGui::TableSetupColumn("controls", ImGuiTableColumnFlags_WidthStretch);
@@ -3597,12 +3918,9 @@ namespace GlassPane::UI
                 ImGui::TextColored(MutedText(), "Search");
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(searchWidth);
-                if (ImGui::InputTextWithHint("##search", "name, path, command line, PID, indicator", searchBuffer_.data(), searchBuffer_.size()))
+                if (ImGui::InputTextWithHint("##ProcessPanelSearch", "name, path, command line, PID, indicator", searchBuffer_.data(), searchBuffer_.size()))
                 {
-                    searchText_ = ToLower(Utf8ToWide(searchBuffer_.data()));
-                    processTableNeedsAutoSize_ = true;
-                    timelineTableNeedsAutoSize_ = true;
-                    LogFilterState();
+                    SetProcessSearchText(ToLower(Utf8ToWide(searchBuffer_.data())));
                 }
                 ImGui::EndGroup();
 
@@ -3653,45 +3971,32 @@ namespace GlassPane::UI
             }
             PopFontIfPushed(pushedProcessHelperFont);
 
-            if (ChipButton("All", processFilterMode_ == ProcessFilterMode::All, AccentBlue()))
+            ImGui::PushID("process_filter_chips");
+            if (ChipButton("All##ProcessFilter", processFilterMode_ == ProcessFilterMode::All, AccentBlue()))
             {
-                processFilterMode_ = ProcessFilterMode::All;
-                processTableNeedsAutoSize_ = true;
-                timelineTableNeedsAutoSize_ = true;
-                LogFilterState();
+                SetProcessFilterMode(ProcessFilterMode::All);
             }
             SameLineIfChipFits("Suspicious");
-            if (ChipButton("Suspicious", processFilterMode_ == ProcessFilterMode::Suspicious, SeverityColor(Core::Severity::High)))
+            if (ChipButton("Suspicious##ProcessFilter", processFilterMode_ == ProcessFilterMode::Suspicious, SeverityColor(Core::Severity::High)))
             {
-                processFilterMode_ = ProcessFilterMode::Suspicious;
-                processTableNeedsAutoSize_ = true;
-                timelineTableNeedsAutoSize_ = true;
-                LogFilterState();
+                SetProcessFilterMode(ProcessFilterMode::Suspicious);
             }
             SameLineIfChipFits("Low");
-            if (ChipButton("Low", processFilterMode_ == ProcessFilterMode::Low, SeverityColor(Core::Severity::Low)))
+            if (ChipButton("Low##ProcessFilter", processFilterMode_ == ProcessFilterMode::Low, SeverityColor(Core::Severity::Low)))
             {
-                processFilterMode_ = ProcessFilterMode::Low;
-                processTableNeedsAutoSize_ = true;
-                timelineTableNeedsAutoSize_ = true;
-                LogFilterState();
+                SetProcessFilterMode(ProcessFilterMode::Low);
             }
             SameLineIfChipFits("Medium");
-            if (ChipButton("Medium", processFilterMode_ == ProcessFilterMode::Medium, SeverityColor(Core::Severity::Medium)))
+            if (ChipButton("Medium##ProcessFilter", processFilterMode_ == ProcessFilterMode::Medium, SeverityColor(Core::Severity::Medium)))
             {
-                processFilterMode_ = ProcessFilterMode::Medium;
-                processTableNeedsAutoSize_ = true;
-                timelineTableNeedsAutoSize_ = true;
-                LogFilterState();
+                SetProcessFilterMode(ProcessFilterMode::Medium);
             }
             SameLineIfChipFits("High");
-            if (ChipButton("High", processFilterMode_ == ProcessFilterMode::High, SeverityColor(Core::Severity::High)))
+            if (ChipButton("High##ProcessFilter", processFilterMode_ == ProcessFilterMode::High, SeverityColor(Core::Severity::High)))
             {
-                processFilterMode_ = ProcessFilterMode::High;
-                processTableNeedsAutoSize_ = true;
-                timelineTableNeedsAutoSize_ = true;
-                LogFilterState();
+                SetProcessFilterMode(ProcessFilterMode::High);
             }
+            ImGui::PopID();
             ImGui::TextDisabled("Active: %s", ActiveChipLabel().c_str());
             ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
@@ -3702,7 +4007,8 @@ namespace GlassPane::UI
                 ImGuiTableFlags_SizingStretchProp |
                 ImGuiTableFlags_NoSavedSettings;
 
-            const std::vector<VisibleProcessRow> visibleRows = BuildVisibleProcessRows();
+            RebuildVisibleProcessRowsIfNeeded();
+            const std::vector<VisibleProcessRow>& visibleRows = visibleProcessRows_;
             const float footerHeight = ImGui::GetFrameHeightWithSpacing() + 12.0f;
             if (visibleRows.empty())
             {
@@ -3716,9 +4022,8 @@ namespace GlassPane::UI
             }
             else
             {
-                const std::string processTableId =
-                    AutoSizedTableId("process_table", processTableNeedsAutoSize_, processTableGeneration_);
-                if (ImGui::BeginTable(processTableId.c_str(), 4, flags, ImVec2(0.0f, -footerHeight)))
+                AcknowledgeTableAutoSizeRequest(processTableNeedsAutoSize_);
+                if (ImGui::BeginTable("ProcessesTable##ProcessPanel", 4, flags, ImVec2(0.0f, -footerHeight)))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Process", ImGuiTableColumnFlags_WidthStretch, 0.0f, 0);
@@ -4107,27 +4412,27 @@ namespace GlassPane::UI
             EndInspectorCard();
 
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 6.0f));
-            if (ChipButton("All", triageFilter_ == TriageFilter::All, AccentBlue()))
+            if (ChipButton("All##TriageFilter", triageFilter_ == TriageFilter::All, AccentBlue()))
             {
                 triageFilter_ = TriageFilter::All;
             }
             SameLineIfChipFits("Info");
-            if (ChipButton("Info", triageFilter_ == TriageFilter::Info, FindingSeverityColor(Core::FindingSeverity::Info)))
+            if (ChipButton("Info##TriageFilter", triageFilter_ == TriageFilter::Info, FindingSeverityColor(Core::FindingSeverity::Info)))
             {
                 triageFilter_ = TriageFilter::Info;
             }
             SameLineIfChipFits("Low");
-            if (ChipButton("Low", triageFilter_ == TriageFilter::Low, FindingSeverityColor(Core::FindingSeverity::Low)))
+            if (ChipButton("Low##TriageFilter", triageFilter_ == TriageFilter::Low, FindingSeverityColor(Core::FindingSeverity::Low)))
             {
                 triageFilter_ = TriageFilter::Low;
             }
             SameLineIfChipFits("Medium");
-            if (ChipButton("Medium", triageFilter_ == TriageFilter::Medium, FindingSeverityColor(Core::FindingSeverity::Medium)))
+            if (ChipButton("Medium##TriageFilter", triageFilter_ == TriageFilter::Medium, FindingSeverityColor(Core::FindingSeverity::Medium)))
             {
                 triageFilter_ = TriageFilter::Medium;
             }
             SameLineIfChipFits("High");
-            if (ChipButton("High", triageFilter_ == TriageFilter::High, FindingSeverityColor(Core::FindingSeverity::High)))
+            if (ChipButton("High##TriageFilter", triageFilter_ == TriageFilter::High, FindingSeverityColor(Core::FindingSeverity::High)))
             {
                 triageFilter_ = TriageFilter::High;
             }
@@ -4567,9 +4872,8 @@ namespace GlassPane::UI
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
                 ImGuiTableFlags_NoSavedSettings;
-            const std::string modulesTableId =
-                AutoSizedTableId("modules_table", modulesTableNeedsAutoSize_, modulesTableGeneration_);
-            if (ImGui::BeginTable(modulesTableId.c_str(), 4, flags))
+            AcknowledgeTableAutoSizeRequest(modulesTableNeedsAutoSize_);
+            if (ImGui::BeginTable("ModulesTable##ModulesPanel", 4, flags))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, 155.0f);
@@ -4706,7 +5010,7 @@ namespace GlassPane::UI
 
             BeginInspectorCard("token_summary", "Token Summary", fonts_.bold);
             if (ImGui::BeginTable(
-                "token_summary_grid",
+                "TokenSummaryGrid##TokenPanel",
                 2,
                 ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings | ImGuiTableFlags_PadOuterX))
             {
@@ -4838,9 +5142,8 @@ namespace GlassPane::UI
                     ImGuiTableFlags_Resizable |
                     ImGuiTableFlags_SizingStretchProp |
                     ImGuiTableFlags_NoSavedSettings;
-                    const std::string tokenTableId =
-                        AutoSizedTableId("token_privileges_table", tokenTableNeedsAutoSize_, tokenTableGeneration_);
-                if (ImGui::BeginTable(tokenTableId.c_str(), 3, flags))
+                    AcknowledgeTableAutoSizeRequest(tokenTableNeedsAutoSize_);
+                if (ImGui::BeginTable("TokenPrivilegesTable##TokenPanel", 3, flags))
                 {
                     ImGui::TableSetupColumn("Privilege", ImGuiTableColumnFlags_WidthFixed, 172.0f);
                     ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 104.0f);
@@ -4948,96 +5251,114 @@ namespace GlassPane::UI
             BeginInspectorCard("handles_filters", "Filters", fonts_.bold);
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (ImGui::InputTextWithHint(
-                "##handle_search",
+                "##HandlesPanelSearch",
                 "Search handle, type, target, access, indicator",
                 handleSearchBuffer_.data(),
                 handleSearchBuffer_.size()))
             {
-                handleSearchText_ = ToLower(Utf8ToWide(handleSearchBuffer_.data()));
-                handlesTableNeedsAutoSize_ = true;
+                const std::wstring loweredSearch = ToLower(Utf8ToWide(handleSearchBuffer_.data()));
+                if (handleSearchText_ != loweredSearch)
+                {
+                    handleSearchText_ = loweredSearch;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
 
-            if (ChipButton("All", handleFilter_ == HandleFilter::All, AccentBlue()))
+            if (ChipButton("All##HandleFilter", handleFilter_ == HandleFilter::All, AccentBlue()))
             {
-                handleFilter_ = HandleFilter::All;
-                handlesTableNeedsAutoSize_ = true;
+                if (handleFilter_ != HandleFilter::All)
+                {
+                    handleFilter_ = HandleFilter::All;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
             SameLineIfChipFits("Sensitive");
-            if (ChipButton("Sensitive", handleFilter_ == HandleFilter::Sensitive, SeverityColor(Core::Severity::Medium)))
+            if (ChipButton("Sensitive##HandleFilter", handleFilter_ == HandleFilter::Sensitive, SeverityColor(Core::Severity::Medium)))
             {
-                handleFilter_ = HandleFilter::Sensitive;
-                handlesTableNeedsAutoSize_ = true;
+                if (handleFilter_ != HandleFilter::Sensitive)
+                {
+                    handleFilter_ = HandleFilter::Sensitive;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
             SameLineIfChipFits("Process");
-            if (ChipButton("Process", handleFilter_ == HandleFilter::Process, AccentBlue()))
+            if (ChipButton("Process##HandleFilter", handleFilter_ == HandleFilter::Process, AccentBlue()))
             {
-                handleFilter_ = HandleFilter::Process;
-                handlesTableNeedsAutoSize_ = true;
+                if (handleFilter_ != HandleFilter::Process)
+                {
+                    handleFilter_ = HandleFilter::Process;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
             SameLineIfChipFits("Token");
-            if (ChipButton("Token", handleFilter_ == HandleFilter::Token, AccentBlue()))
+            if (ChipButton("Token##HandleFilter", handleFilter_ == HandleFilter::Token, AccentBlue()))
             {
-                handleFilter_ = HandleFilter::Token;
-                handlesTableNeedsAutoSize_ = true;
+                if (handleFilter_ != HandleFilter::Token)
+                {
+                    handleFilter_ = HandleFilter::Token;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
             SameLineIfChipFits("File");
-            if (ChipButton("File", handleFilter_ == HandleFilter::File, AccentBlue()))
+            if (ChipButton("File##HandleFilter", handleFilter_ == HandleFilter::File, AccentBlue()))
             {
-                handleFilter_ = HandleFilter::File;
-                handlesTableNeedsAutoSize_ = true;
+                if (handleFilter_ != HandleFilter::File)
+                {
+                    handleFilter_ = HandleFilter::File;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
             SameLineIfChipFits("Registry");
-            if (ChipButton("Registry", handleFilter_ == HandleFilter::Registry, AccentBlue()))
+            if (ChipButton("Registry##HandleFilter", handleFilter_ == HandleFilter::Registry, AccentBlue()))
             {
-                handleFilter_ = HandleFilter::Registry;
-                handlesTableNeedsAutoSize_ = true;
+                if (handleFilter_ != HandleFilter::Registry)
+                {
+                    handleFilter_ = HandleFilter::Registry;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
             SameLineIfChipFits("Named Objects");
-            if (ChipButton("Named Objects", handleFilter_ == HandleFilter::NamedObjects, AccentBlue()))
+            if (ChipButton("Named Objects##HandleFilter", handleFilter_ == HandleFilter::NamedObjects, AccentBlue()))
             {
-                handleFilter_ = HandleFilter::NamedObjects;
-                handlesTableNeedsAutoSize_ = true;
+                if (handleFilter_ != HandleFilter::NamedObjects)
+                {
+                    handleFilter_ = HandleFilter::NamedObjects;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
             SameLineIfChipFits("With Indicators");
-            if (ChipButton("With Indicators", handleFilter_ == HandleFilter::WithIndicators, SeverityColor(Core::Severity::Low)))
+            if (ChipButton("With Indicators##HandleFilter", handleFilter_ == HandleFilter::WithIndicators, SeverityColor(Core::Severity::Low)))
             {
-                handleFilter_ = HandleFilter::WithIndicators;
-                handlesTableNeedsAutoSize_ = true;
+                if (handleFilter_ != HandleFilter::WithIndicators)
+                {
+                    handleFilter_ = HandleFilter::WithIndicators;
+                    visibleHandlesDirty_ = true;
+                    handlesTableNeedsAutoSize_ = true;
+                }
             }
             EndInspectorCard();
 
-            std::size_t withIndicatorsCount = 0;
-            std::size_t nameStatusCount = 0;
-            std::vector<const Core::HandleInfo*> visibleHandles;
-            visibleHandles.reserve(selectedHandles_.handles.size());
-            for (const Core::HandleInfo& handle : selectedHandles_.handles)
-            {
-                if (!handle.indicators.empty())
-                {
-                    ++withIndicatorsCount;
-                }
-                if (!HandleStatusText(handle).empty())
-                {
-                    ++nameStatusCount;
-                }
-                if (HandleMatchesFilter(handle, handleFilter_) &&
-                    HandleMatchesSearch(handle, handleSearchText_))
-                {
-                    visibleHandles.push_back(&handle);
-                }
-            }
+            RebuildVisibleHandlesIfNeeded(*process);
 
             BeginInspectorCard("handles_summary", "Handle Summary", fonts_.bold);
             LabelValue("Total Loaded", std::to_wstring(selectedHandles_.handles.size()));
-            LabelValue("Visible", std::to_wstring(visibleHandles.size()));
+            LabelValue("Visible", std::to_wstring(visibleHandleIndexes_.size()));
             LabelValue("Sensitive", std::to_wstring(selectedHandles_.sensitiveCount));
-            LabelValue("With Indicators", std::to_wstring(withIndicatorsCount));
-            LabelValue("Name Unavail/Skipped", std::to_wstring(nameStatusCount));
+            LabelValue("With Indicators", std::to_wstring(visibleHandlesWithIndicatorsCount_));
+            LabelValue("Name Unavail/Skipped", std::to_wstring(visibleHandlesNameStatusCount_));
             ImGui::TextDisabled("Status");
             WrappedTextDisabled(selectedHandles_.statusMessage.empty() ? L"(no status)" : selectedHandles_.statusMessage);
             EndInspectorCard();
 
-            if (visibleHandles.empty())
+            if (visibleHandleIndexes_.empty())
             {
                 BeginInspectorCard("handles_filter_empty", "Handles", fonts_.bold);
                 WrappedTextDisabled("No handles match the current filters.");
@@ -5052,9 +5373,8 @@ namespace GlassPane::UI
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
                 ImGuiTableFlags_NoSavedSettings;
-            const std::string handlesTableId =
-                AutoSizedTableId("handles_table", handlesTableNeedsAutoSize_, handlesTableGeneration_);
-            if (ImGui::BeginTable(handlesTableId.c_str(), 5, flags))
+            AcknowledgeTableAutoSizeRequest(handlesTableNeedsAutoSize_);
+            if (ImGui::BeginTable("HandlesTable##HandlesPanel", 5, flags))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Handle", ImGuiTableColumnFlags_WidthFixed, 76.0f);
@@ -5065,13 +5385,18 @@ namespace GlassPane::UI
                 ImGui::TableHeadersRow();
 
                 ImGuiListClipper clipper;
-                clipper.Begin(static_cast<int>(visibleHandles.size()));
+                clipper.Begin(static_cast<int>(visibleHandleIndexes_.size()));
                 while (clipper.Step())
                 {
                     for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
                     {
-                        const std::size_t handleIndex = static_cast<std::size_t>(rowIndex);
-                        const Core::HandleInfo& handle = *visibleHandles[handleIndex];
+                        const std::size_t visibleIndex = static_cast<std::size_t>(rowIndex);
+                        const std::size_t handleIndex = visibleHandleIndexes_[visibleIndex];
+                        if (handleIndex >= selectedHandles_.handles.size())
+                        {
+                            continue;
+                        }
+                        const Core::HandleInfo& handle = selectedHandles_.handles[handleIndex];
                         ImGui::TableNextRow();
                         if (handle.isSensitive)
                         {
@@ -5238,9 +5563,8 @@ namespace GlassPane::UI
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
                 ImGuiTableFlags_NoSavedSettings;
-            const std::string networkTableId =
-                AutoSizedTableId("network_table", networkTableNeedsAutoSize_, networkTableGeneration_);
-            if (ImGui::BeginTable(networkTableId.c_str(), 5, flags))
+            AcknowledgeTableAutoSizeRequest(networkTableNeedsAutoSize_);
+            if (ImGui::BeginTable("NetworkTable##NetworkPanel", 5, flags))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Protocol", ImGuiTableColumnFlags_WidthFixed, 76.0f);
@@ -5436,9 +5760,8 @@ namespace GlassPane::UI
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
                 ImGuiTableFlags_NoSavedSettings;
-            const std::string runtimeTableId =
-                AutoSizedTableId("runtime_threads_table", runtimeTableNeedsAutoSize_, runtimeTableGeneration_);
-            if (ImGui::BeginTable(runtimeTableId.c_str(), 5, flags, ImVec2(0.0f, 270.0f)))
+            AcknowledgeTableAutoSizeRequest(runtimeTableNeedsAutoSize_);
+            if (ImGui::BeginTable("RuntimeThreadsTable##RuntimePanel", 5, flags, ImVec2(0.0f, 270.0f)))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Thread ID", ImGuiTableColumnFlags_WidthFixed, 88.0f);
@@ -5560,72 +5883,96 @@ namespace GlassPane::UI
             BeginInspectorCard("memory_filters", "Filters", fonts_.bold);
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (ImGui::InputTextWithHint(
-                "##memory_search",
+                "##MemoryPanelSearch",
                 "Search address, protection, type, mapped file, indicator",
                 memorySearchBuffer_.data(),
                 memorySearchBuffer_.size()))
             {
-                memorySearchText_ = ToLower(Utf8ToWide(memorySearchBuffer_.data()));
-                memoryTableNeedsAutoSize_ = true;
-            }
-
-            if (ChipButton("All", memoryFilter_ == MemoryFilter::All, AccentBlue()))
-            {
-                memoryFilter_ = MemoryFilter::All;
-                memoryTableNeedsAutoSize_ = true;
-            }
-            SameLineIfChipFits("Executable");
-            if (ChipButton("Executable", memoryFilter_ == MemoryFilter::Executable, AccentBlue()))
-            {
-                memoryFilter_ = MemoryFilter::Executable;
-                memoryTableNeedsAutoSize_ = true;
-            }
-            SameLineIfChipFits("Writable");
-            if (ChipButton("Writable", memoryFilter_ == MemoryFilter::Writable, SeverityColor(Core::Severity::Low)))
-            {
-                memoryFilter_ = MemoryFilter::Writable;
-                memoryTableNeedsAutoSize_ = true;
-            }
-            SameLineIfChipFits("Private");
-            if (ChipButton("Private", memoryFilter_ == MemoryFilter::Private, AccentBlue()))
-            {
-                memoryFilter_ = MemoryFilter::Private;
-                memoryTableNeedsAutoSize_ = true;
-            }
-            SameLineIfChipFits("Image");
-            if (ChipButton("Image", memoryFilter_ == MemoryFilter::Image, AccentBlue()))
-            {
-                memoryFilter_ = MemoryFilter::Image;
-                memoryTableNeedsAutoSize_ = true;
-            }
-            SameLineIfChipFits("Suspicious");
-            if (ChipButton("Suspicious", memoryFilter_ == MemoryFilter::Suspicious, SeverityColor(Core::Severity::Medium)))
-            {
-                memoryFilter_ = MemoryFilter::Suspicious;
-                memoryTableNeedsAutoSize_ = true;
-            }
-            SameLineIfChipFits("RWX");
-            if (ChipButton("RWX", memoryFilter_ == MemoryFilter::Rwx, SeverityColor(Core::Severity::Medium)))
-            {
-                memoryFilter_ = MemoryFilter::Rwx;
-                memoryTableNeedsAutoSize_ = true;
-            }
-            EndInspectorCard();
-
-            std::vector<const Core::MemoryRegionInfo*> visibleRegions;
-            visibleRegions.reserve(memory.regions.size());
-            for (const Core::MemoryRegionInfo& region : memory.regions)
-            {
-                if (MemoryMatchesFilter(region, memoryFilter_) &&
-                    MemoryMatchesSearch(region, memorySearchText_))
+                const std::wstring loweredSearch = ToLower(Utf8ToWide(memorySearchBuffer_.data()));
+                if (memorySearchText_ != loweredSearch)
                 {
-                    visibleRegions.push_back(&region);
+                    memorySearchText_ = loweredSearch;
+                    visibleMemoryRegionsDirty_ = true;
+                    memoryTableNeedsAutoSize_ = true;
                 }
             }
 
+            if (ChipButton("All##MemoryFilter", memoryFilter_ == MemoryFilter::All, AccentBlue()))
+            {
+                if (memoryFilter_ != MemoryFilter::All)
+                {
+                    memoryFilter_ = MemoryFilter::All;
+                    visibleMemoryRegionsDirty_ = true;
+                    memoryTableNeedsAutoSize_ = true;
+                }
+            }
+            SameLineIfChipFits("Executable");
+            if (ChipButton("Executable##MemoryFilter", memoryFilter_ == MemoryFilter::Executable, AccentBlue()))
+            {
+                if (memoryFilter_ != MemoryFilter::Executable)
+                {
+                    memoryFilter_ = MemoryFilter::Executable;
+                    visibleMemoryRegionsDirty_ = true;
+                    memoryTableNeedsAutoSize_ = true;
+                }
+            }
+            SameLineIfChipFits("Writable");
+            if (ChipButton("Writable##MemoryFilter", memoryFilter_ == MemoryFilter::Writable, SeverityColor(Core::Severity::Low)))
+            {
+                if (memoryFilter_ != MemoryFilter::Writable)
+                {
+                    memoryFilter_ = MemoryFilter::Writable;
+                    visibleMemoryRegionsDirty_ = true;
+                    memoryTableNeedsAutoSize_ = true;
+                }
+            }
+            SameLineIfChipFits("Private");
+            if (ChipButton("Private##MemoryFilter", memoryFilter_ == MemoryFilter::Private, AccentBlue()))
+            {
+                if (memoryFilter_ != MemoryFilter::Private)
+                {
+                    memoryFilter_ = MemoryFilter::Private;
+                    visibleMemoryRegionsDirty_ = true;
+                    memoryTableNeedsAutoSize_ = true;
+                }
+            }
+            SameLineIfChipFits("Image");
+            if (ChipButton("Image##MemoryFilter", memoryFilter_ == MemoryFilter::Image, AccentBlue()))
+            {
+                if (memoryFilter_ != MemoryFilter::Image)
+                {
+                    memoryFilter_ = MemoryFilter::Image;
+                    visibleMemoryRegionsDirty_ = true;
+                    memoryTableNeedsAutoSize_ = true;
+                }
+            }
+            SameLineIfChipFits("Suspicious");
+            if (ChipButton("Suspicious##MemoryFilter", memoryFilter_ == MemoryFilter::Suspicious, SeverityColor(Core::Severity::Medium)))
+            {
+                if (memoryFilter_ != MemoryFilter::Suspicious)
+                {
+                    memoryFilter_ = MemoryFilter::Suspicious;
+                    visibleMemoryRegionsDirty_ = true;
+                    memoryTableNeedsAutoSize_ = true;
+                }
+            }
+            SameLineIfChipFits("RWX");
+            if (ChipButton("RWX##MemoryFilter", memoryFilter_ == MemoryFilter::Rwx, SeverityColor(Core::Severity::Medium)))
+            {
+                if (memoryFilter_ != MemoryFilter::Rwx)
+                {
+                    memoryFilter_ = MemoryFilter::Rwx;
+                    visibleMemoryRegionsDirty_ = true;
+                    memoryTableNeedsAutoSize_ = true;
+                }
+            }
+            EndInspectorCard();
+
+            RebuildVisibleMemoryRegionsIfNeeded(*process);
+
             BeginInspectorCard("memory_regions", "Regions", fonts_.bold);
-            LabelValue("Visible", std::to_wstring(visibleRegions.size()));
-            if (visibleRegions.empty())
+            LabelValue("Visible", std::to_wstring(visibleMemoryRegionIndexes_.size()));
+            if (visibleMemoryRegionIndexes_.empty())
             {
                 WrappedTextDisabled("No memory regions match the current filters.");
                 EndInspectorCard();
@@ -5639,9 +5986,8 @@ namespace GlassPane::UI
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
                 ImGuiTableFlags_NoSavedSettings;
-            const std::string memoryTableId =
-                AutoSizedTableId("memory_regions_table", memoryTableNeedsAutoSize_, memoryTableGeneration_);
-            if (ImGui::BeginTable(memoryTableId.c_str(), 7, flags, ImVec2(0.0f, 340.0f)))
+            AcknowledgeTableAutoSizeRequest(memoryTableNeedsAutoSize_);
+            if (ImGui::BeginTable("MemoryRegionsTable##MemoryPanel", 7, flags, ImVec2(0.0f, 340.0f)))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, 124.0f);
@@ -5654,12 +6000,18 @@ namespace GlassPane::UI
                 ImGui::TableHeadersRow();
 
                 ImGuiListClipper clipper;
-                clipper.Begin(static_cast<int>(visibleRegions.size()));
+                clipper.Begin(static_cast<int>(visibleMemoryRegionIndexes_.size()));
                 while (clipper.Step())
                 {
                     for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
                     {
-                        const Core::MemoryRegionInfo& region = *visibleRegions[static_cast<std::size_t>(rowIndex)];
+                        const std::size_t visibleIndex = static_cast<std::size_t>(rowIndex);
+                        const std::size_t regionIndex = visibleMemoryRegionIndexes_[visibleIndex];
+                        if (regionIndex >= memory.regions.size())
+                        {
+                            continue;
+                        }
+                        const Core::MemoryRegionInfo& region = memory.regions[regionIndex];
                         ImGui::TableNextRow();
                         if (region.isSuspicious)
                         {
@@ -5743,7 +6095,7 @@ namespace GlassPane::UI
 
             if (ImGui::Button("Focus"))
             {
-                focusedGraph_ = Core::BuildFocusedTree(snapshot_, selectedPid_, 2);
+                RebuildFocusedGraph("graph-focus-button");
                 RequestGraphFit();
                 AddLog(LogLevel::Info, "Graph focused on selected process.");
             }
@@ -5756,7 +6108,7 @@ namespace GlassPane::UI
             ImGui::SameLine();
             if (ImGui::Button("Refresh"))
             {
-                focusedGraph_ = Core::BuildFocusedTree(snapshot_, selectedPid_, 2);
+                RebuildFocusedGraph("graph-refresh-button");
                 RequestGraphFit();
                 AddLog(LogLevel::Info, "Graph refreshed.");
             }
@@ -5888,6 +6240,8 @@ namespace GlassPane::UI
                 return;
             }
 
+            RebuildGraphWorldLayoutIfNeeded();
+
             struct GraphVisualNode
             {
                 std::size_t nodeIndex = 0;
@@ -5897,115 +6251,25 @@ namespace GlassPane::UI
                 Core::Severity displaySeverity = Core::Severity::None;
             };
 
-            std::unordered_map<std::uint32_t, std::size_t> nodeIndexByPid;
-            std::unordered_map<std::size_t, std::vector<std::size_t>> levels;
-            std::size_t maxDepth = 0;
-            for (std::size_t nodeIndex = 0; nodeIndex < focusedGraph_.nodes.size(); ++nodeIndex)
+            const bool singleNodeGraph = graphLayoutSingleNode_;
+            const bool smallGraph = graphLayoutSmallGraph_;
+            const ImVec2 baseNodeSize = graphLayoutBaseNodeSize_;
+            std::vector<GraphVisualNode> visualNodes(graphLayoutNodes_.size());
+            for (std::size_t layoutIndex = 0; layoutIndex < graphLayoutNodes_.size(); ++layoutIndex)
             {
-                const Core::FocusedGraphNode& node = focusedGraph_.nodes[nodeIndex];
-                levels[node.depth].push_back(nodeIndex);
-                nodeIndexByPid[node.pid] = nodeIndex;
-                maxDepth = std::max(maxDepth, node.depth);
+                visualNodes[layoutIndex].nodeIndex = graphLayoutNodes_[layoutIndex].nodeIndex;
+                visualNodes[layoutIndex].worldCenter = graphLayoutNodes_[layoutIndex].worldCenter;
             }
 
-            const bool singleNodeGraph = focusedGraph_.nodes.size() == 1;
-            const bool smallGraph = focusedGraph_.nodes.size() >= 2 && focusedGraph_.nodes.size() <= 5;
-            const ImVec2 baseNodeSize = singleNodeGraph
-                ? ImVec2(342.0f, 126.0f)
-                : (smallGraph ? ImVec2(318.0f, 112.0f) : ImVec2(302.0f, 106.0f));
-            const float siblingSpacing = singleNodeGraph ? 0.0f : (smallGraph ? 170.0f : 190.0f);
-            const float levelSpacing = graphLayoutMode_ == GraphLayoutMode::LeftToRight ? 166.0f : 132.0f;
-
-            std::vector<GraphVisualNode> visualNodes(focusedGraph_.nodes.size());
-            for (std::size_t depth = 0; depth <= maxDepth; ++depth)
-            {
-                auto level = levels.find(depth);
-                if (level == levels.end())
-                {
-                    continue;
-                }
-
-                std::vector<std::size_t>& nodeIndexes = level->second;
-                std::sort(nodeIndexes.begin(), nodeIndexes.end(), [this](std::size_t leftIndex, std::size_t rightIndex) {
-                    if (leftIndex >= focusedGraph_.nodes.size() || rightIndex >= focusedGraph_.nodes.size())
-                    {
-                        return leftIndex < rightIndex;
-                    }
-                    return focusedGraph_.nodes[leftIndex].pid < focusedGraph_.nodes[rightIndex].pid;
-                });
-
-                const float count = static_cast<float>(nodeIndexes.size());
-                if (graphLayoutMode_ == GraphLayoutMode::LeftToRight)
-                {
-                    const float totalHeight =
-                        count * baseNodeSize.y + std::max(0.0f, count - 1.0f) * siblingSpacing;
-                    const float startY = -totalHeight * 0.5f + baseNodeSize.y * 0.5f;
-                    const float x = static_cast<float>(depth) * (baseNodeSize.x + levelSpacing);
-                    for (std::size_t index = 0; index < nodeIndexes.size(); ++index)
-                    {
-                        const std::size_t nodeIndex = nodeIndexes[index];
-                        if (nodeIndex >= visualNodes.size())
-                        {
-                            continue;
-                        }
-                        visualNodes[nodeIndex].nodeIndex = nodeIndex;
-                        visualNodes[nodeIndex].worldCenter = ImVec2(
-                            x,
-                            startY + static_cast<float>(index) * (baseNodeSize.y + siblingSpacing));
-                    }
-                }
-                else
-                {
-                    const float totalWidth =
-                        count * baseNodeSize.x + std::max(0.0f, count - 1.0f) * siblingSpacing;
-                    const float startX = -totalWidth * 0.5f + baseNodeSize.x * 0.5f;
-                    const float y = static_cast<float>(depth) * (baseNodeSize.y + levelSpacing);
-                    for (std::size_t index = 0; index < nodeIndexes.size(); ++index)
-                    {
-                        const std::size_t nodeIndex = nodeIndexes[index];
-                        if (nodeIndex >= visualNodes.size())
-                        {
-                            continue;
-                        }
-                        visualNodes[nodeIndex].nodeIndex = nodeIndex;
-                        visualNodes[nodeIndex].worldCenter = ImVec2(
-                            startX + static_cast<float>(index) * (baseNodeSize.x + siblingSpacing),
-                            y);
-                    }
-                }
-            }
-
-            ImVec2 worldMin(0.0f, 0.0f);
-            ImVec2 worldMax(0.0f, 0.0f);
-            bool hasWorldBounds = false;
-            for (const GraphVisualNode& visual : visualNodes)
-            {
-                const ImVec2 min(visual.worldCenter.x - baseNodeSize.x * 0.5f, visual.worldCenter.y - baseNodeSize.y * 0.5f);
-                const ImVec2 max(visual.worldCenter.x + baseNodeSize.x * 0.5f, visual.worldCenter.y + baseNodeSize.y * 0.5f);
-                if (!hasWorldBounds)
-                {
-                    worldMin = min;
-                    worldMax = max;
-                    hasWorldBounds = true;
-                }
-                else
-                {
-                    worldMin.x = std::min(worldMin.x, min.x);
-                    worldMin.y = std::min(worldMin.y, min.y);
-                    worldMax.x = std::max(worldMax.x, max.x);
-                    worldMax.y = std::max(worldMax.y, max.y);
-                }
-            }
-
-            if (hasWorldBounds &&
+            if (graphLayoutHasWorldBounds_ &&
                 (graphFitRequested_ ||
                     graphFitPid_ != focusedGraph_.focusPid ||
                     graphFitNodeCount_ != focusedGraph_.nodes.size() ||
                     graphFitLayoutMode_ != graphLayoutMode_))
             {
                 const float padding = singleNodeGraph ? 120.0f : 74.0f;
-                const float worldWidth = std::max(1.0f, worldMax.x - worldMin.x);
-                const float worldHeight = std::max(1.0f, worldMax.y - worldMin.y);
+                const float worldWidth = std::max(1.0f, graphLayoutWorldMax_.x - graphLayoutWorldMin_.x);
+                const float worldHeight = std::max(1.0f, graphLayoutWorldMax_.y - graphLayoutWorldMin_.y);
                 const float fitX = std::max(1.0f, canvasSize.x - padding * 2.0f) / worldWidth;
                 const float fitY = std::max(1.0f, canvasSize.y - padding * 2.0f) / worldHeight;
                 const float maxFitZoom = singleNodeGraph ? 1.28f : (smallGraph ? 1.16f : 1.0f);
@@ -6017,8 +6281,8 @@ namespace GlassPane::UI
                 else
                 {
                     const ImVec2 worldCenter(
-                        (worldMin.x + worldMax.x) * 0.5f,
-                        (worldMin.y + worldMax.y) * 0.5f);
+                        (graphLayoutWorldMin_.x + graphLayoutWorldMax_.x) * 0.5f,
+                        (graphLayoutWorldMin_.y + graphLayoutWorldMax_.y) * 0.5f);
                     graphPan_ = ImVec2(
                         canvasSize.x * 0.5f - worldCenter.x * graphZoom_,
                         canvasSize.y * 0.5f - worldCenter.y * graphZoom_);
@@ -6106,8 +6370,8 @@ namespace GlassPane::UI
             }
 
             auto edgeAnchor = [&](std::uint32_t pid, bool parentSide) -> ImVec2 {
-                const auto nodeIndex = nodeIndexByPid.find(pid);
-                if (nodeIndex == nodeIndexByPid.end() || nodeIndex->second >= visualNodes.size())
+                const auto nodeIndex = graphLayoutNodeIndexByPid_.find(pid);
+                if (nodeIndex == graphLayoutNodeIndexByPid_.end() || nodeIndex->second >= visualNodes.size())
                 {
                     return ImVec2(0.0f, 0.0f);
                 }
@@ -6127,8 +6391,8 @@ namespace GlassPane::UI
 
             for (const Core::FocusedGraphEdge& edge : focusedGraph_.edges)
             {
-                if (nodeIndexByPid.find(edge.parentPid) == nodeIndexByPid.end() ||
-                    nodeIndexByPid.find(edge.childPid) == nodeIndexByPid.end())
+                if (graphLayoutNodeIndexByPid_.find(edge.parentPid) == graphLayoutNodeIndexByPid_.end() ||
+                    graphLayoutNodeIndexByPid_.find(edge.childPid) == graphLayoutNodeIndexByPid_.end())
                 {
                     continue;
                 }
@@ -6478,33 +6742,35 @@ namespace GlassPane::UI
             int filterValue = static_cast<int>(timelineFilter_);
             if (ImGui::RadioButton("All", filterValue == static_cast<int>(Core::TimelineFilter::All)))
             {
-                timelineFilter_ = Core::TimelineFilter::All;
-                timelineTableNeedsAutoSize_ = true;
+                if (timelineFilter_ != Core::TimelineFilter::All)
+                {
+                    timelineFilter_ = Core::TimelineFilter::All;
+                    timelineRowsDirty_ = true;
+                    timelineTableNeedsAutoSize_ = true;
+                }
             }
             ImGui::SameLine();
             if (ImGui::RadioButton("Suspicious only", filterValue == static_cast<int>(Core::TimelineFilter::SuspiciousOnly)))
             {
-                timelineFilter_ = Core::TimelineFilter::SuspiciousOnly;
-                timelineTableNeedsAutoSize_ = true;
+                if (timelineFilter_ != Core::TimelineFilter::SuspiciousOnly)
+                {
+                    timelineFilter_ = Core::TimelineFilter::SuspiciousOnly;
+                    timelineRowsDirty_ = true;
+                    timelineTableNeedsAutoSize_ = true;
+                }
             }
             ImGui::SameLine();
             if (ImGui::RadioButton("High severity only", filterValue == static_cast<int>(Core::TimelineFilter::HighSeverityOnly)))
             {
-                timelineFilter_ = Core::TimelineFilter::HighSeverityOnly;
-                timelineTableNeedsAutoSize_ = true;
-            }
-
-            const std::vector<Core::TimelineRow> rows = Core::BuildTimelineRows(snapshot_, timelineFilter_);
-            std::vector<const Core::TimelineRow*> visibleTimelineRows;
-            visibleTimelineRows.reserve(rows.size());
-            for (const Core::TimelineRow& row : rows)
-            {
-                const Core::ProcessInfo* timelineProcess = Core::FindProcessByPid(snapshot_, row.pid);
-                if (timelineProcess != nullptr && ProcessMatchesFilters(*timelineProcess))
+                if (timelineFilter_ != Core::TimelineFilter::HighSeverityOnly)
                 {
-                    visibleTimelineRows.push_back(&row);
+                    timelineFilter_ = Core::TimelineFilter::HighSeverityOnly;
+                    timelineRowsDirty_ = true;
+                    timelineTableNeedsAutoSize_ = true;
                 }
             }
+
+            const std::vector<Core::TimelineRow>& visibleTimelineRows = TimelineRowsForCurrentFilters();
             const ImGuiTableFlags flags =
                 ImGuiTableFlags_BordersInnerV |
                 ImGuiTableFlags_RowBg |
@@ -6519,9 +6785,8 @@ namespace GlassPane::UI
                 return;
             }
 
-            const std::string timelineTableId =
-                AutoSizedTableId("timeline_table", timelineTableNeedsAutoSize_, timelineTableGeneration_);
-            if (ImGui::BeginTable(timelineTableId.c_str(), 6, flags))
+            AcknowledgeTableAutoSizeRequest(timelineTableNeedsAutoSize_);
+            if (ImGui::BeginTable("TimelineTable##TimelinePanel", 6, flags))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Timestamp", ImGuiTableColumnFlags_WidthFixed, 150.0f);
@@ -6538,7 +6803,7 @@ namespace GlassPane::UI
                 {
                     for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
                     {
-                        const Core::TimelineRow& row = *visibleTimelineRows[static_cast<std::size_t>(rowIndex)];
+                        const Core::TimelineRow& row = visibleTimelineRows[static_cast<std::size_t>(rowIndex)];
 
                         ImGui::TableNextRow();
                         if (row.pid == selectedPid_)
@@ -6736,7 +7001,7 @@ namespace GlassPane::UI
 
         bool MatchesSearch(const Core::ProcessInfo& process) const
         {
-            const std::wstring query = ToLower(searchText_);
+            const std::wstring& query = searchText_;
             if (query.empty())
             {
                 return true;
@@ -6966,6 +7231,12 @@ namespace GlassPane::UI
                 selectedMemoryLoaded_ = false;
                 selectedMemoryPid_ = InvalidPid;
                 selectedMemoryCreationTime_ = 0;
+                visibleMemoryRegionsDirty_ = true;
+                visibleMemoryRegionIndexes_.clear();
+                visibleMemoryPid_ = InvalidPid;
+                visibleMemoryCreationTime_ = 0;
+                visibleMemorySourceSize_ = 0;
+                visibleMemorySearchText_.clear();
                 InvalidateFindingsCache();
                 if (logActivity)
                 {
@@ -6981,6 +7252,7 @@ namespace GlassPane::UI
             memoryTableNeedsAutoSize_ = true;
             selectedMemoryPid_ = process->pid;
             selectedMemoryCreationTime_ = ProcessCacheStamp(*process);
+            visibleMemoryRegionsDirty_ = true;
             InvalidateFindingsCache();
 
             if (logActivity)
@@ -7004,6 +7276,14 @@ namespace GlassPane::UI
                 selectedHandlesLoaded_ = false;
                 selectedHandlesPid_ = InvalidPid;
                 selectedHandlesCreationTime_ = 0;
+                visibleHandlesDirty_ = true;
+                visibleHandleIndexes_.clear();
+                visibleHandlesPid_ = InvalidPid;
+                visibleHandlesCreationTime_ = 0;
+                visibleHandlesSourceSize_ = 0;
+                visibleHandlesWithIndicatorsCount_ = 0;
+                visibleHandlesNameStatusCount_ = 0;
+                visibleHandlesSearchText_.clear();
                 InvalidateFindingsCache();
                 if (logActivity)
                 {
@@ -7019,6 +7299,7 @@ namespace GlassPane::UI
             handlesTableNeedsAutoSize_ = true;
             selectedHandlesPid_ = process->pid;
             selectedHandlesCreationTime_ = ProcessCacheStamp(*process);
+            visibleHandlesDirty_ = true;
             InvalidateFindingsCache();
 
             if (logActivity)
@@ -7251,14 +7532,6 @@ namespace GlassPane::UI
         std::uint64_t selectedHandlesCreationTime_ = 0;
         std::uint64_t findingsCacheCreationTime_ = 0;
         int networkTableAutoFitGeneration_ = 0;
-        int processTableGeneration_ = 0;
-        int timelineTableGeneration_ = 0;
-        int modulesTableGeneration_ = 0;
-        int networkTableGeneration_ = 0;
-        int tokenTableGeneration_ = 0;
-        int runtimeTableGeneration_ = 0;
-        int memoryTableGeneration_ = 0;
-        int handlesTableGeneration_ = 0;
         std::size_t selectedModuleIndex_ = 0;
         bool selectedModulesLoaded_ = false;
         bool selectedTokenLoaded_ = false;
@@ -7302,20 +7575,64 @@ namespace GlassPane::UI
         std::size_t suspiciousCount_ = 0;
         CollectorTimings timings_;
         bool findingsCacheValid_ = false;
+        bool selectedHighTriageCacheValid_ = false;
         bool graphFitRequested_ = true;
+        bool graphLayoutDirty_ = true;
         bool graphLeftCanvasPanActive_ = false;
         bool graphLeftMouseDownStartedOnNode_ = false;
+        bool visibleProcessRowsDirty_ = true;
+        bool timelineRowsDirty_ = true;
+        bool visibleHandlesDirty_ = true;
+        bool visibleMemoryRegionsDirty_ = true;
+        bool graphLayoutHasWorldBounds_ = false;
+        bool graphLayoutSingleNode_ = false;
+        bool graphLayoutSmallGraph_ = false;
         std::uint32_t findingsCachePid_ = InvalidPid;
+        std::uint32_t selectedHighTriagePid_ = InvalidPid;
         std::uint32_t graphFitPid_ = InvalidPid;
+        std::uint32_t graphLayoutFocusPid_ = InvalidPid;
+        std::uint32_t visibleHandlesPid_ = InvalidPid;
+        std::uint32_t visibleMemoryPid_ = InvalidPid;
         std::size_t graphFitNodeCount_ = 0;
+        std::size_t graphLayoutNodeCount_ = 0;
+        std::size_t graphLayoutEdgeCount_ = 0;
+        std::size_t visibleHandlesSourceSize_ = 0;
+        std::size_t visibleMemorySourceSize_ = 0;
+        std::size_t visibleHandlesWithIndicatorsCount_ = 0;
+        std::size_t visibleHandlesNameStatusCount_ = 0;
+        std::uint64_t selectedHighTriageCreationTime_ = 0;
+        std::uint64_t snapshotGeneration_ = 0;
+        std::uint64_t processQueryRevision_ = 0;
+        std::uint64_t visibleProcessRowsSnapshotGeneration_ = 0;
+        std::uint64_t visibleProcessRowsQueryRevision_ = 0;
+        std::uint64_t timelineRowsSnapshotGeneration_ = 0;
+        std::uint64_t timelineRowsQueryRevision_ = 0;
+        std::uint64_t visibleHandlesCreationTime_ = 0;
+        std::uint64_t visibleMemoryCreationTime_ = 0;
+        bool selectedHighTriage_ = false;
         float graphZoom_ = 1.0f;
         ImVec2 graphPan_ = ImVec2(0.0f, 0.0f);
+        ImVec2 graphLayoutBaseNodeSize_ = ImVec2(302.0f, 106.0f);
+        ImVec2 graphLayoutWorldMin_ = ImVec2(0.0f, 0.0f);
+        ImVec2 graphLayoutWorldMax_ = ImVec2(0.0f, 0.0f);
+        Core::TimelineFilter timelineRowsFilter_ = Core::TimelineFilter::All;
+        HandleFilter visibleHandlesFilter_ = HandleFilter::All;
+        MemoryFilter visibleMemoryFilter_ = MemoryFilter::All;
         GraphLayoutMode graphFitLayoutMode_ = GraphLayoutMode::TopDown;
         GraphLayoutMode graphLayoutMode_ = GraphLayoutMode::TopDown;
+        GraphLayoutMode graphLayoutCachedMode_ = GraphLayoutMode::TopDown;
+        std::wstring visibleHandlesSearchText_;
+        std::wstring visibleMemorySearchText_;
+        std::vector<VisibleProcessRow> visibleProcessRows_;
+        std::vector<Core::TimelineRow> cachedTimelineRows_;
+        std::vector<GraphLayoutNode> graphLayoutNodes_;
+        std::vector<std::size_t> visibleHandleIndexes_;
+        std::vector<std::size_t> visibleMemoryRegionIndexes_;
         std::vector<Core::Finding> selectedFindingsCache_;
         std::vector<LogEntry> logs_;
         std::unordered_map<std::wstring, CachedIconTexture> iconCache_;
         std::unordered_map<std::wstring, Core::FileIdentity> fileIdentityCache_;
+        std::unordered_map<std::uint32_t, std::size_t> graphLayoutNodeIndexByPid_;
         ID3D11ShaderResourceView* fallbackIconTexture_ = nullptr;
 
         ImGuiID dockspaceId_ = 0;
