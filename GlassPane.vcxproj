@@ -145,10 +145,12 @@
     <ClCompile Include="Core\FileIdentity.cpp" />
     <ClCompile Include="Core\GraphModel.cpp" />
     <ClCompile Include="Core\HandleCollector.cpp" />
+    <ClCompile Include="Core\MemoryCollector.cpp" />
     <ClCompile Include="Core\ModuleCollector.cpp" />
     <ClCompile Include="Core\NetworkCollector.cpp" />
     <ClCompile Include="Core\ProcessCollector.cpp" />
     <ClCompile Include="Core\ProcessTree.cpp" />
+    <ClCompile Include="Core\RuntimeCollector.cpp" />
     <ClCompile Include="Core\SuspicionRules.cpp" />
     <ClCompile Include="Core\TimelineModel.cpp" />
     <ClCompile Include="Core\TokenCollector.cpp" />
@@ -176,6 +178,8 @@
     <ClInclude Include="Core\GraphModel.h" />
     <ClInclude Include="Core\HandleCollector.h" />
     <ClInclude Include="Core\HandleInfo.h" />
+    <ClInclude Include="Core\MemoryCollector.h" />
+    <ClInclude Include="Core\MemoryRegionInfo.h" />
     <ClInclude Include="Core\ModuleCollector.h" />
     <ClInclude Include="Core\ModuleInfo.h" />
     <ClInclude Include="Core\NetworkCollector.h" />
@@ -183,6 +187,8 @@
     <ClInclude Include="Core\ProcessCollector.h" />
     <ClInclude Include="Core\ProcessInfo.h" />
     <ClInclude Include="Core\ProcessTree.h" />
+    <ClInclude Include="Core\RuntimeCollector.h" />
+    <ClInclude Include="Core\RuntimeInfo.h" />
     <ClInclude Include="Core\SuspicionRules.h" />
     <ClInclude Include="Core\TimelineModel.h" />
     <ClInclude Include="Core\TokenCollector.h" />

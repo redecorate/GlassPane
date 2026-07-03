@@ -1,6 +1,7 @@
 #include "TimelineModel.h"
 
 #include "ChainAnalysis.h"
+#include "ProcessTree.h"
 
 #include <algorithm>
 
@@ -37,7 +38,10 @@ namespace GlassPane::Core
                 continue;
             }
 
-            const ProcessInfo* parent = FindProcessByPid(snapshot, process.parentPid);
+            const ProcessInfo* parent =
+                IsUsableParentRelationship(GetParentRelationshipStatus(snapshot, process))
+                    ? FindProcessByPid(snapshot, process.parentPid)
+                    : nullptr;
             TimelineRow row;
             row.pid = process.pid;
             row.parentPid = process.parentPid;

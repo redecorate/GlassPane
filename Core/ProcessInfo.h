@@ -64,8 +64,12 @@ namespace GlassPane::Core
         std::optional<std::uint32_t> sessionId;
         std::wstring architecture = L"Unknown";
         std::wstring creationTimeLocal;
+        std::uint64_t creationTimeFileTime = 0;
         bool hasCreationTime = false;
         std::vector<std::uint32_t> children;
+        bool parentRelationshipVerified = false;
+        bool parentRelationshipUnverified = false;
+        bool parentPidReuseSuspected = false;
         bool suspicious = false;
         Severity severity = Severity::None;
         std::vector<std::wstring> indicators;

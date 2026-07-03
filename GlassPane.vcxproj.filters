@@ -72,6 +72,9 @@
     <ClCompile Include="Core\HandleCollector.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
+    <ClCompile Include="Core\MemoryCollector.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
     <ClCompile Include="Core\ModuleCollector.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
@@ -159,6 +162,12 @@
       <Filter>Header Files\Core</Filter>
     </ClInclude>
     <ClInclude Include="Core\HandleInfo.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\MemoryCollector.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\MemoryRegionInfo.h">
       <Filter>Header Files\Core</Filter>
     </ClInclude>
     <ClInclude Include="Core\ModuleCollector.h">

@@ -1,5 +1,7 @@
 #include "SuspicionRules.h"
 
+#include "ProcessTree.h"
+
 #include <algorithm>
 #include <cwctype>
 #include <string>
@@ -40,6 +42,11 @@ namespace GlassPane::Core
 
         const ProcessInfo* FindParent(const ProcessSnapshot& snapshot, const ProcessInfo& process)
         {
+            if (!IsUsableParentRelationship(GetParentRelationshipStatus(snapshot, process)))
+            {
+                return nullptr;
+            }
+
             const auto it = snapshot.indexByPid.find(process.parentPid);
             if (it == snapshot.indexByPid.end())
             {

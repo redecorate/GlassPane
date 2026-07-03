@@ -1,5 +1,7 @@
 #include "ChainAnalysis.h"
 
+#include "ProcessTree.h"
+
 #include <algorithm>
 #include <cwctype>
 #include <sstream>
@@ -109,6 +111,11 @@ namespace GlassPane::Core
             chain.push_back(current);
 
             if (current->parentPid == 0 || current->parentPid == current->pid)
+            {
+                break;
+            }
+
+            if (!IsUsableParentRelationship(GetParentRelationshipStatus(snapshot, *current)))
             {
                 break;
             }

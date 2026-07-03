@@ -3,9 +3,11 @@
 #include "../Core/FileIdentity.h"
 #include "../Core/Finding.h"
 #include "../Core/HandleInfo.h"
+#include "../Core/MemoryRegionInfo.h"
 #include "../Core/ModuleInfo.h"
 #include "../Core/NetworkConnection.h"
 #include "../Core/ProcessInfo.h"
+#include "../Core/RuntimeInfo.h"
 #include "../Core/TokenInfo.h"
 
 #include <cstdint>
@@ -35,6 +37,12 @@ namespace GlassPane::Export
 
         bool tokenLoaded = false;
         const Core::TokenInfo* token = nullptr;
+
+        bool runtimeLoaded = false;
+        const Core::RuntimeInfo* runtime = nullptr;
+
+        bool memoryLoaded = false;
+        const Core::MemoryCollectionResult* memory = nullptr;
 
         bool handlesLoaded = false;
         const Core::HandleCollectionResult* handles = nullptr;

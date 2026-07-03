@@ -44,6 +44,14 @@ namespace GlassPane::Core
             return ProcessLess(snapshot, left.pid, right.pid);
         }
 
+        void AddContextNote(ProcessInfo& process, const std::wstring& note)
+        {
+            if (std::find(process.contextNotes.begin(), process.contextNotes.end(), note) == process.contextNotes.end())
+            {
+                process.contextNotes.push_back(note);
+            }
+        }
+
         void AppendTreeRows(
             const ProcessSnapshot& snapshot,
             std::uint32_t pid,
@@ -68,6 +76,57 @@ namespace GlassPane::Core
         }
     }
 
+    ParentRelationshipStatus ValidateParentChildRelationship(
+        const ProcessInfo& parent,
+        const ProcessInfo& child)
+    {
+        if (child.parentPid == 0 || child.parentPid == child.pid)
+        {
+            return ParentRelationshipStatus::NoParent;
+        }
+        if (parent.pid != child.parentPid)
+        {
+            return ParentRelationshipStatus::MissingParent;
+        }
+        if (parent.pid == child.pid)
+        {
+            return ParentRelationshipStatus::NoParent;
+        }
+
+        if (parent.hasCreationTime && child.hasCreationTime)
+        {
+            return parent.creationTimeFileTime <= child.creationTimeFileTime
+                ? ParentRelationshipStatus::Verified
+                : ParentRelationshipStatus::InvalidPidReuse;
+        }
+
+        return ParentRelationshipStatus::Unverified;
+    }
+
+    ParentRelationshipStatus GetParentRelationshipStatus(
+        const ProcessSnapshot& snapshot,
+        const ProcessInfo& child)
+    {
+        if (child.parentPid == 0 || child.parentPid == child.pid)
+        {
+            return ParentRelationshipStatus::NoParent;
+        }
+
+        const auto parentIt = snapshot.indexByPid.find(child.parentPid);
+        if (parentIt == snapshot.indexByPid.end() || parentIt->second >= snapshot.processes.size())
+        {
+            return ParentRelationshipStatus::MissingParent;
+        }
+
+        return ValidateParentChildRelationship(snapshot.processes[parentIt->second], child);
+    }
+
+    bool IsUsableParentRelationship(ParentRelationshipStatus status)
+    {
+        return status == ParentRelationshipStatus::Verified ||
+            status == ParentRelationshipStatus::Unverified;
+    }
+
     void BuildProcessTree(ProcessSnapshot& snapshot)
     {
         snapshot.Reindex();
@@ -76,6 +135,9 @@ namespace GlassPane::Core
         for (ProcessInfo& process : snapshot.processes)
         {
             process.children.clear();
+            process.parentRelationshipVerified = false;
+            process.parentRelationshipUnverified = false;
+            process.parentPidReuseSuspected = false;
         }
 
         for (ProcessInfo& process : snapshot.processes)
@@ -87,7 +149,27 @@ namespace GlassPane::Core
             if (hasValidParent)
             {
                 ProcessInfo& parent = snapshot.processes[snapshot.indexByPid[process.parentPid]];
-                parent.children.push_back(process.pid);
+                const ParentRelationshipStatus relationshipStatus =
+                    ValidateParentChildRelationship(parent, process);
+                if (IsUsableParentRelationship(relationshipStatus))
+                {
+                    parent.children.push_back(process.pid);
+                    process.parentRelationshipVerified =
+                        relationshipStatus == ParentRelationshipStatus::Verified;
+                    process.parentRelationshipUnverified =
+                        relationshipStatus == ParentRelationshipStatus::Unverified;
+                }
+                else
+                {
+                    process.parentPidReuseSuspected =
+                        relationshipStatus == ParentRelationshipStatus::InvalidPidReuse;
+                    if (process.parentPidReuseSuspected)
+                    {
+                        AddContextNote(process, L"Parent PID may be stale due to PID reuse.");
+                        AddContextNote(process, L"Parent relationship could not be validated; PID reuse suspected.");
+                    }
+                    snapshot.roots.push_back(snapshot.indexByPid[process.pid]);
+                }
             }
             else
             {

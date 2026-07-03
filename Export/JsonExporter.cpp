@@ -11,6 +11,7 @@
 #include "../Core/CorrelationEngine.h"
 #include "../Core/FileIdentity.h"
 #include "../Core/HandleInfo.h"
+#include "../Core/RuntimeInfo.h"
 #include "../Core/TokenCollector.h"
 
 #include <Windows.h>
@@ -487,6 +488,192 @@ namespace GlassPane::Export
             output << indent << "}";
         }
 
+        void WriteRuntimeObject(
+            std::ostream& output,
+            const Core::RuntimeInfo* runtime,
+            const std::string& indent)
+        {
+            output << "{\n";
+            output << indent << "  \"loaded\": " << (runtime != nullptr ? "true" : "false") << ",\n";
+            output << indent << "  \"success\": " << (runtime != nullptr && runtime->success ? "true" : "false") << ",\n";
+            output << indent << "  \"errorMessage\": ";
+            WriteJsonString(output, runtime != nullptr ? runtime->errorMessage : L"Runtime data was not loaded before export.");
+            output << ",\n";
+            output << indent << "  \"processId\": " << (runtime != nullptr ? runtime->processId : 0) << ",\n";
+            output << indent << "  \"priorityClassRaw\": " << (runtime != nullptr ? runtime->priorityClassRaw : 0) << ",\n";
+            output << indent << "  \"priorityClassName\": ";
+            WriteJsonString(output, runtime != nullptr ? runtime->priorityClassName : L"");
+            output << ",\n";
+            output << indent << "  \"basePriority\": " << (runtime != nullptr ? runtime->basePriority : 0) << ",\n";
+            output << indent << "  \"processAffinityMask\": " << (runtime != nullptr ? runtime->processAffinityMask : 0) << ",\n";
+            output << indent << "  \"systemAffinityMask\": " << (runtime != nullptr ? runtime->systemAffinityMask : 0) << ",\n";
+            output << indent << "  \"affinityMaskString\": ";
+            WriteJsonString(output, runtime != nullptr ? runtime->affinityMaskString : L"");
+            output << ",\n";
+            output << indent << "  \"processorGroup\": ";
+            WriteJsonString(output, runtime != nullptr ? runtime->processorGroup : L"");
+            output << ",\n";
+            output << indent << "  \"threadCount\": " << (runtime != nullptr ? runtime->threadCount : 0) << ",\n";
+            output << indent << "  \"handleCount\": " << (runtime != nullptr ? runtime->handleCount : 0) << ",\n";
+            output << indent << "  \"workingSetSize\": " << (runtime != nullptr ? runtime->workingSetSize : 0) << ",\n";
+            output << indent << "  \"peakWorkingSetSize\": " << (runtime != nullptr ? runtime->peakWorkingSetSize : 0) << ",\n";
+            output << indent << "  \"privateBytes\": " << (runtime != nullptr ? runtime->privateBytes : 0) << ",\n";
+            output << indent << "  \"pagefileUsage\": " << (runtime != nullptr ? runtime->pagefileUsage : 0) << ",\n";
+            output << indent << "  \"peakPagefileUsage\": " << (runtime != nullptr ? runtime->peakPagefileUsage : 0) << ",\n";
+            output << indent << "  \"userCpuTime\": ";
+            WriteJsonString(output, runtime != nullptr ? runtime->userCpuTime : L"");
+            output << ",\n";
+            output << indent << "  \"kernelCpuTime\": ";
+            WriteJsonString(output, runtime != nullptr ? runtime->kernelCpuTime : L"");
+            output << ",\n";
+            output << indent << "  \"totalCpuTime\": ";
+            WriteJsonString(output, runtime != nullptr ? runtime->totalCpuTime : L"");
+            output << ",\n";
+            output << indent << "  \"userCpuTime100ns\": " << (runtime != nullptr ? runtime->userCpuTime100ns : 0) << ",\n";
+            output << indent << "  \"kernelCpuTime100ns\": " << (runtime != nullptr ? runtime->kernelCpuTime100ns : 0) << ",\n";
+            output << indent << "  \"totalCpuTime100ns\": " << (runtime != nullptr ? runtime->totalCpuTime100ns : 0) << ",\n";
+            output << indent << "  \"architecture\": ";
+            WriteJsonString(output, runtime != nullptr ? runtime->architecture : L"");
+            output << ",\n";
+            output << indent << "  \"isWow64\": " << (runtime != nullptr && runtime->isWow64 ? "true" : "false") << ",\n";
+            output << indent << "  \"contextNotes\": ";
+            if (runtime != nullptr)
+            {
+                WriteJsonStringArray(output, runtime->contextNotes);
+            }
+            else
+            {
+                output << "[]";
+            }
+            output << ",\n";
+            output << indent << "  \"threads\": [";
+            if (runtime != nullptr && !runtime->threads.empty())
+            {
+                output << '\n';
+                for (std::size_t index = 0; index < runtime->threads.size(); ++index)
+                {
+                    const Core::ThreadInfo& thread = runtime->threads[index];
+                    output << indent << "    {\n";
+                    output << indent << "      \"threadId\": " << thread.threadId << ",\n";
+                    output << indent << "      \"ownerProcessId\": " << thread.ownerProcessId << ",\n";
+                    output << indent << "      \"basePriority\": " << thread.basePriority << ",\n";
+                    output << indent << "      \"currentPriority\": ";
+                    if (thread.hasCurrentPriority)
+                    {
+                        output << thread.currentPriority;
+                    }
+                    else
+                    {
+                        output << "null";
+                    }
+                    output << ",\n";
+                    output << indent << "      \"startAddress\": ";
+                    WriteJsonString(output, thread.startAddress);
+                    output << ",\n";
+                    output << indent << "      \"startAddressResolvedModule\": ";
+                    WriteJsonString(output, thread.startAddressResolvedModule);
+                    output << ",\n";
+                    output << indent << "      \"state\": ";
+                    WriteJsonString(output, thread.state);
+                    output << ",\n";
+                    output << indent << "      \"errorMessage\": ";
+                    WriteJsonString(output, thread.errorMessage);
+                    output << "\n";
+                    output << indent << "    }";
+                    if (index + 1 < runtime->threads.size())
+                    {
+                        output << ',';
+                    }
+                    output << '\n';
+                }
+                output << indent << "  ";
+            }
+            output << "]\n";
+            output << indent << "}";
+        }
+
+        void WriteMemoryObject(
+            std::ostream& output,
+            const Core::MemoryCollectionResult* memory,
+            const std::string& indent)
+        {
+            output << "{\n";
+            output << indent << "  \"loaded\": " << (memory != nullptr ? "true" : "false") << ",\n";
+            output << indent << "  \"pid\": " << (memory != nullptr ? memory->pid : 0) << ",\n";
+            output << indent << "  \"success\": " << (memory != nullptr && memory->success ? "true" : "false") << ",\n";
+            output << indent << "  \"statusMessage\": ";
+            WriteJsonString(output, memory != nullptr ? memory->statusMessage : L"Memory data was not loaded before export.");
+            output << ",\n";
+            output << indent << "  \"totalRegions\": " << (memory != nullptr ? memory->totalRegions : 0) << ",\n";
+            output << indent << "  \"executableRegions\": " << (memory != nullptr ? memory->executableRegions : 0) << ",\n";
+            output << indent << "  \"privateExecutableRegions\": " << (memory != nullptr ? memory->privateExecutableRegions : 0) << ",\n";
+            output << indent << "  \"rwxRegions\": " << (memory != nullptr ? memory->rwxRegions : 0) << ",\n";
+            output << indent << "  \"suspiciousRegions\": " << (memory != nullptr ? memory->suspiciousRegions : 0) << ",\n";
+            output << indent << "  \"guardRegions\": " << (memory != nullptr ? memory->guardRegions : 0) << ",\n";
+            output << indent << "  \"memoryRegions\": [";
+            if (memory != nullptr && !memory->regions.empty())
+            {
+                output << '\n';
+                for (std::size_t index = 0; index < memory->regions.size(); ++index)
+                {
+                    const Core::MemoryRegionInfo& region = memory->regions[index];
+                    output << indent << "    {\n";
+                    output << indent << "      \"baseAddress\": " << region.baseAddress << ",\n";
+                    output << indent << "      \"baseAddressString\": ";
+                    WriteJsonString(output, region.baseAddressString);
+                    output << ",\n";
+                    output << indent << "      \"allocationBase\": " << region.allocationBase << ",\n";
+                    output << indent << "      \"allocationBaseString\": ";
+                    WriteJsonString(output, region.allocationBaseString);
+                    output << ",\n";
+                    output << indent << "      \"regionSize\": " << region.regionSize << ",\n";
+                    output << indent << "      \"regionSizeString\": ";
+                    WriteJsonString(output, region.regionSizeString);
+                    output << ",\n";
+                    output << indent << "      \"stateRaw\": " << region.stateRaw << ",\n";
+                    output << indent << "      \"stateName\": ";
+                    WriteJsonString(output, region.stateName);
+                    output << ",\n";
+                    output << indent << "      \"typeRaw\": " << region.typeRaw << ",\n";
+                    output << indent << "      \"typeName\": ";
+                    WriteJsonString(output, region.typeName);
+                    output << ",\n";
+                    output << indent << "      \"protectRaw\": " << region.protectRaw << ",\n";
+                    output << indent << "      \"protectName\": ";
+                    WriteJsonString(output, region.protectName);
+                    output << ",\n";
+                    output << indent << "      \"allocationProtectRaw\": " << region.allocationProtectRaw << ",\n";
+                    output << indent << "      \"allocationProtectName\": ";
+                    WriteJsonString(output, region.allocationProtectName);
+                    output << ",\n";
+                    output << indent << "      \"mappedFilePath\": ";
+                    WriteJsonString(output, region.mappedFilePath);
+                    output << ",\n";
+                    output << indent << "      \"isReadable\": " << (region.isReadable ? "true" : "false") << ",\n";
+                    output << indent << "      \"isWritable\": " << (region.isWritable ? "true" : "false") << ",\n";
+                    output << indent << "      \"isExecutable\": " << (region.isExecutable ? "true" : "false") << ",\n";
+                    output << indent << "      \"isCopyOnWrite\": " << (region.isCopyOnWrite ? "true" : "false") << ",\n";
+                    output << indent << "      \"isGuard\": " << (region.isGuard ? "true" : "false") << ",\n";
+                    output << indent << "      \"isPrivate\": " << (region.isPrivate ? "true" : "false") << ",\n";
+                    output << indent << "      \"isImage\": " << (region.isImage ? "true" : "false") << ",\n";
+                    output << indent << "      \"isMapped\": " << (region.isMapped ? "true" : "false") << ",\n";
+                    output << indent << "      \"isSuspicious\": " << (region.isSuspicious ? "true" : "false") << ",\n";
+                    output << indent << "      \"indicators\": ";
+                    WriteJsonStringArray(output, region.indicators);
+                    output << "\n";
+                    output << indent << "    }";
+                    if (index + 1 < memory->regions.size())
+                    {
+                        output << ',';
+                    }
+                    output << '\n';
+                }
+                output << indent << "  ";
+            }
+            output << "]\n";
+            output << indent << "}";
+        }
+
         std::size_t CountListeningConnections(const std::vector<Core::NetworkConnection>& connections)
         {
             return static_cast<std::size_t>(std::count_if(
@@ -578,9 +765,13 @@ namespace GlassPane::Export
             WriteJsonString(output, process.architecture);
             output << ",\n";
             output << "      \"hasCreationTime\": " << (process.hasCreationTime ? "true" : "false") << ",\n";
+            output << "      \"creationTimeFileTime\": " << process.creationTimeFileTime << ",\n";
             output << "      \"creationTimeLocal\": ";
             WriteJsonString(output, process.creationTimeLocal);
             output << ",\n";
+            output << "      \"parentRelationshipVerified\": " << (process.parentRelationshipVerified ? "true" : "false") << ",\n";
+            output << "      \"parentRelationshipUnverified\": " << (process.parentRelationshipUnverified ? "true" : "false") << ",\n";
+            output << "      \"parentPidReuseSuspected\": " << (process.parentPidReuseSuspected ? "true" : "false") << ",\n";
             output << "      \"suspicious\": " << (process.IsSuspicious() ? "true" : "false") << ",\n";
             output << "      \"severity\": ";
             WriteJsonString(output, Core::SeverityToString(process.severity));
@@ -675,6 +866,51 @@ namespace GlassPane::Export
         const std::wstring& filePath,
         std::wstring* errorMessage)
     {
+        return ExportSelectedProcessDetailsToJson(
+            snapshot,
+            pid,
+            modules,
+            networkConnections,
+            handles,
+            nullptr,
+            nullptr,
+            filePath,
+            errorMessage);
+    }
+
+    bool ExportSelectedProcessDetailsToJson(
+        const Core::ProcessSnapshot& snapshot,
+        std::uint32_t pid,
+        const Core::ModuleCollectionResult& modules,
+        const std::vector<Core::NetworkConnection>& networkConnections,
+        const Core::HandleCollectionResult* handles,
+        const Core::RuntimeInfo* runtime,
+        const std::wstring& filePath,
+        std::wstring* errorMessage)
+    {
+        return ExportSelectedProcessDetailsToJson(
+            snapshot,
+            pid,
+            modules,
+            networkConnections,
+            handles,
+            runtime,
+            nullptr,
+            filePath,
+            errorMessage);
+    }
+
+    bool ExportSelectedProcessDetailsToJson(
+        const Core::ProcessSnapshot& snapshot,
+        std::uint32_t pid,
+        const Core::ModuleCollectionResult& modules,
+        const std::vector<Core::NetworkConnection>& networkConnections,
+        const Core::HandleCollectionResult* handles,
+        const Core::RuntimeInfo* runtime,
+        const Core::MemoryCollectionResult* memory,
+        const std::wstring& filePath,
+        std::wstring* errorMessage)
+    {
         const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot, pid);
         if (process == nullptr)
         {
@@ -703,6 +939,14 @@ namespace GlassPane::Export
         const Core::HandleCollectionResult* selectedHandles =
             handles != nullptr && handles->pid == process->pid
                 ? handles
+                : nullptr;
+        const Core::RuntimeInfo* selectedRuntime =
+            runtime != nullptr && runtime->processId == process->pid
+                ? runtime
+                : nullptr;
+        const Core::MemoryCollectionResult* selectedMemory =
+            memory != nullptr && memory->pid == process->pid
+                ? memory
                 : nullptr;
         const std::size_t listeningNetworkCount = CountListeningConnections(networkConnections);
         const std::size_t publicRemoteNetworkCount = CountPublicRemoteConnections(networkConnections);
@@ -739,6 +983,8 @@ namespace GlassPane::Export
         correlationContext.fileIdentity = &processFileIdentity;
         correlationContext.token = &tokenInfo;
         correlationContext.handles = selectedHandles;
+        correlationContext.runtime = selectedRuntime;
+        correlationContext.memory = selectedMemory;
         const std::vector<Core::Finding> findings = Core::CorrelateFindings(correlationContext);
         const std::wstring highestFindingSeverity = findings.empty()
             ? L"None"
@@ -779,9 +1025,13 @@ namespace GlassPane::Export
         WriteJsonString(output, process->architecture);
         output << ",\n";
         output << "    \"hasCreationTime\": " << (process->hasCreationTime ? "true" : "false") << ",\n";
+        output << "    \"creationTimeFileTime\": " << process->creationTimeFileTime << ",\n";
         output << "    \"creationTimeLocal\": ";
         WriteJsonString(output, process->creationTimeLocal);
         output << ",\n";
+        output << "    \"parentRelationshipVerified\": " << (process->parentRelationshipVerified ? "true" : "false") << ",\n";
+        output << "    \"parentRelationshipUnverified\": " << (process->parentRelationshipUnverified ? "true" : "false") << ",\n";
+        output << "    \"parentPidReuseSuspected\": " << (process->parentPidReuseSuspected ? "true" : "false") << ",\n";
         output << "    \"suspicious\": " << (process->IsSuspicious() ? "true" : "false") << ",\n";
         output << "    \"severity\": ";
         WriteJsonString(output, Core::SeverityToString(process->severity));
@@ -822,6 +1072,12 @@ namespace GlassPane::Export
         output << ",\n";
         output << "  \"handleInspection\": ";
         WriteHandleInspectionObject(output, selectedHandles, "  ");
+        output << ",\n";
+        output << "  \"runtimeInfo\": ";
+        WriteRuntimeObject(output, selectedRuntime, "  ");
+        output << ",\n";
+        output << "  \"memoryInspection\": ";
+        WriteMemoryObject(output, selectedMemory, "  ");
         output << ",\n";
         output << "  \"moduleInspection\": {\n";
         output << "    \"pid\": " << modules.pid << ",\n";

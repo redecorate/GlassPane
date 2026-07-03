@@ -305,6 +305,66 @@ namespace GlassPane::Core
             return (handle.grantedAccessRaw & SensitiveMask) != 0;
         }
 
+        bool HasSingleBit(std::uint64_t value)
+        {
+            return value != 0 && (value & (value - 1)) == 0;
+        }
+
+        bool IsHighPriorityClass(std::uint32_t priorityClassRaw)
+        {
+            constexpr std::uint32_t HighPriorityClass = 0x00000080;
+            constexpr std::uint32_t RealtimePriorityClass = 0x00000100;
+            return priorityClassRaw == HighPriorityClass ||
+                priorityClassRaw == RealtimePriorityClass;
+        }
+
+        bool HasHighRuntimeCounts(const RuntimeInfo& runtime)
+        {
+            constexpr std::uint32_t HighThreadCount = 80;
+            constexpr std::uint32_t HighHandleCount = 1000;
+            return runtime.threadCount >= HighThreadCount ||
+                runtime.handleCount >= HighHandleCount;
+        }
+
+        std::wstring MemoryRegionEvidenceText(const MemoryRegionInfo& region)
+        {
+            std::wstringstream stream;
+            stream << L"Base " << (region.baseAddressString.empty() ? L"(unknown)" : region.baseAddressString)
+                   << L", size " << (region.regionSizeString.empty() ? std::to_wstring(region.regionSize) + L" bytes" : region.regionSizeString)
+                   << L", protection " << (region.protectName.empty() ? L"(unknown)" : region.protectName)
+                   << L", type " << (region.typeName.empty() ? L"(unknown)" : region.typeName);
+            if (!region.mappedFilePath.empty())
+            {
+                stream << L", mapped file " << region.mappedFilePath;
+            }
+            else
+            {
+                stream << L", mapped file (none)";
+            }
+            stream << L".";
+            return stream.str();
+        }
+
+        void AddMemoryEvidence(
+            std::vector<std::wstring>& evidence,
+            const std::vector<const MemoryRegionInfo*>& regions)
+        {
+            constexpr std::size_t MaxMemoryEvidence = 5;
+            const std::size_t count = std::min(regions.size(), MaxMemoryEvidence);
+            for (std::size_t index = 0; index < count; ++index)
+            {
+                evidence.push_back(MemoryRegionEvidenceText(*regions[index]));
+                for (const std::wstring& indicator : regions[index]->indicators)
+                {
+                    evidence.push_back(L"Memory indicator: " + indicator);
+                }
+            }
+            if (regions.size() > MaxMemoryEvidence)
+            {
+                evidence.push_back(L"Additional matching memory regions: " + std::to_wstring(regions.size() - MaxMemoryEvidence) + L".");
+            }
+        }
+
         std::vector<const HandleInfo*> MatchingHandles(
             const HandleCollectionResult* handles,
             bool (*predicate)(const HandleInfo&))
@@ -756,6 +816,168 @@ namespace GlassPane::Core
                 evidence,
                 L"Execution Chain"
             });
+        }
+
+        if (context.runtime != nullptr && context.runtime->success)
+        {
+            const RuntimeInfo& runtime = *context.runtime;
+            const bool suspiciousProcess = HasSuspiciousProcessEvidence(process);
+
+            if (IsHighPriorityClass(runtime.priorityClassRaw) && suspiciousProcess)
+            {
+                AddFinding(findings, {
+                    FindingSeverity::Medium,
+                    L"Suspicious process running with high priority",
+                    L"The selected process already has suspicious context and is running with a high or realtime priority class.",
+                    {
+                        ProcessSeverityEvidence(process.severity),
+                        L"Priority class: " + (runtime.priorityClassName.empty() ? L"(unknown)" : runtime.priorityClassName) + L"."
+                    },
+                    L"Runtime"
+                });
+            }
+
+            if (HasSingleBit(runtime.processAffinityMask))
+            {
+                AddFinding(findings, {
+                    FindingSeverity::Info,
+                    L"Single-core affinity",
+                    L"The process affinity mask is constrained to one logical processor. This is context only and may be expected.",
+                    {
+                        L"Affinity mask: " + (runtime.affinityMaskString.empty() ? L"(unavailable)" : runtime.affinityMaskString) + L"."
+                    },
+                    L"Runtime"
+                });
+            }
+
+            if (HasHighRuntimeCounts(runtime))
+            {
+                const bool elevatedContext =
+                    context.token != nullptr &&
+                    context.token->success &&
+                    (context.token->isElevated || IsHighIntegrity(*context.token));
+                if (suspiciousProcess || elevatedContext)
+                {
+                    AddFinding(findings, {
+                        suspiciousProcess ? FindingSeverity::Low : FindingSeverity::Info,
+                        L"High runtime object count",
+                        L"The selected process has a high thread or handle count in an elevated or suspicious context.",
+                        {
+                            L"Thread count: " + std::to_wstring(runtime.threadCount) + L".",
+                            L"Handle count: " + std::to_wstring(runtime.handleCount) + L".",
+                            suspiciousProcess
+                                ? L"Selected process already has suspicious context."
+                                : L"Selected process is elevated or high-integrity."
+                        },
+                        L"Runtime"
+                    });
+                }
+            }
+        }
+
+        if (context.memory != nullptr && context.memory->success)
+        {
+            const MemoryCollectionResult& memory = *context.memory;
+            const bool suspiciousProcess = HasSuspiciousProcessEvidence(process);
+            std::vector<const MemoryRegionInfo*> rwxRegions;
+            std::vector<const MemoryRegionInfo*> privateExecutableRegions;
+            std::vector<const MemoryRegionInfo*> executableUnbackedRegions;
+            std::vector<const MemoryRegionInfo*> guardRegions;
+
+            for (const MemoryRegionInfo& region : memory.regions)
+            {
+                if (region.isExecutable && region.isWritable)
+                {
+                    rwxRegions.push_back(&region);
+                }
+                if (region.isPrivate && region.isExecutable)
+                {
+                    privateExecutableRegions.push_back(&region);
+                }
+                if (region.isExecutable && !region.isImage && !region.isMapped && region.mappedFilePath.empty())
+                {
+                    executableUnbackedRegions.push_back(&region);
+                }
+                if (region.isGuard)
+                {
+                    guardRegions.push_back(&region);
+                }
+            }
+
+            if (!rwxRegions.empty())
+            {
+                std::vector<std::wstring> evidence = {
+                    L"Memory metadata inspection found " + std::to_wstring(rwxRegions.size()) + L" RWX region(s)."
+                };
+                AddMemoryEvidence(evidence, rwxRegions);
+                AddFinding(findings, {
+                    FindingSeverity::Medium,
+                    L"Process has RWX memory region",
+                    L"At least one committed memory region is both writable and executable. This can be legitimate but warrants review.",
+                    evidence,
+                    L"Memory"
+                });
+            }
+
+            if (suspiciousProcess && !privateExecutableRegions.empty())
+            {
+                std::vector<std::wstring> evidence = {
+                    ProcessSeverityEvidence(process.severity),
+                    L"Memory metadata inspection found private executable region(s)."
+                };
+                AddMemoryEvidence(evidence, privateExecutableRegions);
+                AddFinding(findings, {
+                    FindingSeverity::High,
+                    L"Suspicious process has private executable memory",
+                    L"Existing process indicators plus private executable memory create a high-priority triage context.",
+                    evidence,
+                    L"Memory"
+                });
+            }
+            else if (!privateExecutableRegions.empty())
+            {
+                std::vector<std::wstring> evidence = {
+                    L"Memory metadata inspection found " + std::to_wstring(privateExecutableRegions.size()) + L" private executable region(s)."
+                };
+                AddMemoryEvidence(evidence, privateExecutableRegions);
+                AddFinding(findings, {
+                    FindingSeverity::Medium,
+                    L"Process has private executable memory",
+                    L"At least one executable memory region is private. This can occur in normal runtimes but is useful triage context.",
+                    evidence,
+                    L"Memory"
+                });
+            }
+
+            if (!executableUnbackedRegions.empty())
+            {
+                std::vector<std::wstring> evidence = {
+                    L"Memory metadata inspection found executable region(s) without image or mapped-file backing."
+                };
+                AddMemoryEvidence(evidence, executableUnbackedRegions);
+                AddFinding(findings, {
+                    FindingSeverity::Medium,
+                    L"Executable memory not backed by image or mapped file",
+                    L"Executable memory without image or mapped-file backing is useful evidence for triage, but is not proof of malicious activity.",
+                    evidence,
+                    L"Memory"
+                });
+            }
+
+            if (!guardRegions.empty())
+            {
+                std::vector<std::wstring> evidence = {
+                    L"Memory metadata inspection found " + std::to_wstring(guardRegions.size()) + L" guarded region(s)."
+                };
+                AddMemoryEvidence(evidence, guardRegions);
+                AddFinding(findings, {
+                    FindingSeverity::Info,
+                    L"Guarded memory regions present",
+                    L"One or more memory regions use guard-page protection. This is context only and may be expected.",
+                    evidence,
+                    L"Memory"
+                });
+            }
         }
 
         if (context.modules != nullptr)

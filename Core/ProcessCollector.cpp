@@ -105,11 +105,16 @@ namespace GlassPane::Core
                 return;
             }
 
+            ULARGE_INTEGER creation = {};
+            creation.LowPart = creationTime.dwLowDateTime;
+            creation.HighPart = creationTime.dwHighDateTime;
+            info.creationTimeFileTime = creation.QuadPart;
+            info.hasCreationTime = true;
+
             const std::wstring formatted = FormatLocalTimestamp(creationTime);
             if (!formatted.empty())
             {
                 info.creationTimeLocal = formatted;
-                info.hasCreationTime = true;
             }
         }
 
@@ -297,8 +302,9 @@ namespace GlassPane::Core
 
         CloseHandle(toolhelp);
 
-        BuildProcessTree(snapshot);
+        snapshot.Reindex();
         ApplySuspiciousRules(snapshot);
+        BuildProcessTree(snapshot);
         return snapshot;
     }
 }

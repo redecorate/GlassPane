@@ -9,6 +9,7 @@
 
 #include "../Core/ChainAnalysis.h"
 #include "../Core/CorrelationEngine.h"
+#include "../Core/ProcessTree.h"
 
 #include <Windows.h>
 
@@ -84,6 +85,24 @@ namespace GlassPane::Export
         std::wstring YesNo(bool value)
         {
             return value ? L"Yes" : L"No";
+        }
+
+        std::wstring ParentRelationshipStatusText(Core::ParentRelationshipStatus status)
+        {
+            switch (status)
+            {
+            case Core::ParentRelationshipStatus::Verified:
+                return L"Validated by creation time";
+            case Core::ParentRelationshipStatus::Unverified:
+                return L"Unverified; creation time unavailable";
+            case Core::ParentRelationshipStatus::InvalidPidReuse:
+                return L"Invalid; PID reuse suspected";
+            case Core::ParentRelationshipStatus::MissingParent:
+                return L"Parent PID not present in snapshot";
+            case Core::ParentRelationshipStatus::NoParent:
+            default:
+                return L"(none)";
+            }
         }
 
         std::wstring FileSizeText(std::uint64_t bytes)
@@ -165,6 +184,25 @@ namespace GlassPane::Export
             std::wstringstream stream;
             stream << L"0x" << std::uppercase << std::hex << handleValue;
             return stream.str();
+        }
+
+        std::wstring JoinMemoryIndicators(const Core::MemoryRegionInfo& region)
+        {
+            if (region.indicators.empty())
+            {
+                return L"(none)";
+            }
+
+            std::wstring joined;
+            for (std::size_t index = 0; index < region.indicators.size(); ++index)
+            {
+                if (index > 0)
+                {
+                    joined += L"; ";
+                }
+                joined += region.indicators[index];
+            }
+            return joined;
         }
 
         std::wstring NetworkEndpoint(const Core::NetworkConnection& connection, bool remote)
@@ -478,6 +516,7 @@ namespace GlassPane::Export
         WriteTableRow(output, { L"Name", ValueOr(process->name, L"(unknown)") });
         WriteTableRow(output, { L"PID", std::to_wstring(process->pid) });
         WriteTableRow(output, { L"Parent PID", std::to_wstring(process->parentPid) });
+        WriteTableRow(output, { L"Parent Link", ParentRelationshipStatusText(Core::GetParentRelationshipStatus(*context.snapshot, *process)) });
         WriteTableRow(output, { L"Architecture", ValueOr(process->architecture, L"(unknown)") });
         WriteTableRow(output, { L"Session", process->sessionId.has_value() ? std::to_wstring(process->sessionId.value()) : L"(unknown)" });
         WriteTableRow(output, { L"Start Time", process->hasCreationTime ? process->creationTimeLocal : L"(unavailable)" });
@@ -599,6 +638,150 @@ namespace GlassPane::Export
                 output << "- No important enabled privileges were observed in the loaded token metadata.\n";
             }
             output << "\n";
+        }
+
+        if (!context.runtimeLoaded || context.runtime == nullptr)
+        {
+            output << "## Runtime\n\n";
+            output << "Runtime data was not loaded for this process.\n\n";
+        }
+        else
+        {
+            const Core::RuntimeInfo& runtime = *context.runtime;
+            output << "## Runtime\n\n";
+            if (!runtime.success)
+            {
+                output << "Runtime data unavailable: "
+                       << EscapeMarkdownInline(ValueOr(runtime.errorMessage, L"access denied or process exited"))
+                       << "\n\n";
+            }
+            else
+            {
+                output << "### Scheduling\n\n";
+                WriteTableHeader(output, { "Field", "Value" });
+                WriteTableRow(output, { L"Priority class", ValueOr(runtime.priorityClassName, L"(unavailable)") });
+                WriteTableRow(output, { L"Base priority", std::to_wstring(runtime.basePriority) });
+                WriteTableRow(output, { L"Affinity mask", ValueOr(runtime.affinityMaskString, L"(unavailable)") });
+                WriteTableRow(output, { L"Processor group", ValueOr(runtime.processorGroup, L"(unavailable)") });
+                WriteTableRow(output, { L"Architecture", ValueOr(runtime.architecture, L"(unknown)") });
+                WriteTableRow(output, { L"WOW64", YesNo(runtime.isWow64) });
+                output << "\n### CPU Time\n\n";
+                WriteTableHeader(output, { "Field", "Value" });
+                WriteTableRow(output, { L"User", ValueOr(runtime.userCpuTime, L"(unavailable)") });
+                WriteTableRow(output, { L"Kernel", ValueOr(runtime.kernelCpuTime, L"(unavailable)") });
+                WriteTableRow(output, { L"Total", ValueOr(runtime.totalCpuTime, L"(unavailable)") });
+                output << "\n### Memory\n\n";
+                WriteTableHeader(output, { "Field", "Value" });
+                WriteTableRow(output, { L"Working set", FileSizeText(runtime.workingSetSize) });
+                WriteTableRow(output, { L"Peak working set", FileSizeText(runtime.peakWorkingSetSize) });
+                WriteTableRow(output, { L"Private bytes", FileSizeText(runtime.privateBytes) });
+                WriteTableRow(output, { L"Pagefile usage", FileSizeText(runtime.pagefileUsage) });
+                WriteTableRow(output, { L"Peak pagefile usage", FileSizeText(runtime.peakPagefileUsage) });
+                output << "\n### Counts\n\n";
+                WriteTableHeader(output, { "Field", "Value" });
+                WriteTableRow(output, { L"Threads", std::to_wstring(runtime.threadCount) });
+                WriteTableRow(output, { L"Handles", std::to_wstring(runtime.handleCount) });
+                output << "\n";
+                if (!runtime.contextNotes.empty())
+                {
+                    output << "Runtime context notes:\n";
+                    for (const std::wstring& note : runtime.contextNotes)
+                    {
+                        WriteBullet(output, note);
+                    }
+                    output << "\n";
+                }
+            }
+
+            output << "### Thread Summary\n\n";
+            if (runtime.threads.empty())
+            {
+                output << "No thread metadata returned for this process.\n\n";
+            }
+            else
+            {
+                WriteTableHeader(output, { "Thread ID", "Base", "Current", "Start Address", "Module" });
+                constexpr std::size_t MaxThreadRows = 25;
+                const std::size_t threadRows = std::min(runtime.threads.size(), MaxThreadRows);
+                for (std::size_t index = 0; index < threadRows; ++index)
+                {
+                    const Core::ThreadInfo& thread = runtime.threads[index];
+                    WriteTableRow(output, {
+                        std::to_wstring(thread.threadId),
+                        std::to_wstring(thread.basePriority),
+                        thread.hasCurrentPriority ? std::to_wstring(thread.currentPriority) : L"Unavailable",
+                        ValueOr(thread.startAddress, L"Unavailable"),
+                        ValueOr(thread.startAddressResolvedModule, L"(unresolved)")
+                    });
+                }
+                if (runtime.threads.size() > MaxThreadRows)
+                {
+                    output << "\nAdditional thread rows omitted: " << (runtime.threads.size() - MaxThreadRows) << ".\n";
+                }
+                output << "\n";
+            }
+        }
+
+        output << "## Memory Regions\n\n";
+        if (!context.memoryLoaded || context.memory == nullptr)
+        {
+            output << "Memory data was not loaded for this process.\n\n";
+        }
+        else if (!context.memory->success)
+        {
+            output << "Memory data unavailable: "
+                   << EscapeMarkdownInline(ValueOr(context.memory->statusMessage, L"access denied, protected process, or process exited"))
+                   << "\n\n";
+        }
+        else
+        {
+            const Core::MemoryCollectionResult& memory = *context.memory;
+            WriteTableHeader(output, { "Field", "Value" });
+            WriteTableRow(output, { L"Total regions", std::to_wstring(memory.totalRegions) });
+            WriteTableRow(output, { L"Executable regions", std::to_wstring(memory.executableRegions) });
+            WriteTableRow(output, { L"Private executable regions", std::to_wstring(memory.privateExecutableRegions) });
+            WriteTableRow(output, { L"RWX regions", std::to_wstring(memory.rwxRegions) });
+            WriteTableRow(output, { L"Suspicious regions", std::to_wstring(memory.suspiciousRegions) });
+            WriteTableRow(output, { L"Guard regions", std::to_wstring(memory.guardRegions) });
+            output << "\n";
+
+            std::vector<const Core::MemoryRegionInfo*> interestingRegions;
+            for (const Core::MemoryRegionInfo& region : memory.regions)
+            {
+                if (region.isSuspicious || !region.indicators.empty())
+                {
+                    interestingRegions.push_back(&region);
+                }
+            }
+
+            if (interestingRegions.empty())
+            {
+                output << "No suspicious or indicator-bearing memory regions were observed in the loaded metadata.\n\n";
+            }
+            else
+            {
+                output << "Suspicious/indicator-bearing memory regions:\n\n";
+                WriteTableHeader(output, { "Base", "Size", "Type", "Protection", "Mapped File", "Indicators" });
+                constexpr std::size_t MaxMemoryRows = 40;
+                const std::size_t rowsToWrite = std::min(interestingRegions.size(), MaxMemoryRows);
+                for (std::size_t index = 0; index < rowsToWrite; ++index)
+                {
+                    const Core::MemoryRegionInfo& region = *interestingRegions[index];
+                    WriteTableRow(output, {
+                        ValueOr(region.baseAddressString, L"(unknown)"),
+                        ValueOr(region.regionSizeString, L"(unknown)"),
+                        ValueOr(region.typeName, L"(unknown)"),
+                        ValueOr(region.protectName, L"(unknown)"),
+                        ValueOr(region.mappedFilePath, L"(none)"),
+                        JoinMemoryIndicators(region)
+                    });
+                }
+                if (interestingRegions.size() > MaxMemoryRows)
+                {
+                    output << "\nAdditional memory rows omitted: " << (interestingRegions.size() - MaxMemoryRows) << ".\n";
+                }
+                output << "\n";
+            }
         }
 
         output << "## Network Connections\n\n";
