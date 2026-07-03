@@ -1,0 +1,4 @@
+#pragma once
+
+#define IDI_GLASSPANE_ICON 101
+#define IDB_GLASSPANE_LOGO_PNG 201

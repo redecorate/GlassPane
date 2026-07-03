@@ -85,7 +85,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
        <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -102,7 +102,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
        <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -117,7 +117,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
        <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -134,11 +134,14 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
        <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
 
+  <ItemGroup>
+    <ResourceCompile Include="GlassPane.rc" />
+  </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Core\ChainAnalysis.cpp" />
     <ClCompile Include="Core\CorrelationEngine.cpp" />
@@ -195,6 +198,7 @@
     <ClInclude Include="Core\TokenInfo.h" />
     <ClInclude Include="Export\JsonExporter.h" />
     <ClInclude Include="Export\MarkdownReportExporter.h" />
+    <ClInclude Include="resource.h" />
     <ClInclude Include="third_party\imgui\backends\imgui_impl_dx11.h" />
     <ClInclude Include="third_party\imgui\backends\imgui_impl_win32.h" />
     <ClInclude Include="third_party\imgui\imconfig.h" />
@@ -208,6 +212,10 @@
     <ClInclude Include="UI\MainWindow.h" />
     <ClInclude Include="UI\Theme.h" />
     <ClInclude Include="UI\TreeViewPanel.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="res\GlassPane-Logo.ico" />
+    <Image Include="res\GlassPane-Logo.png" />
   </ItemGroup>
   <ItemGroup>
     <None Include="README.md" />

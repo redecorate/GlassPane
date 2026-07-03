@@ -13,6 +13,7 @@
 #include "../Core/ProcessCollector.h"
 #include "../Core/ProcessTree.h"
 #include "../Export/JsonExporter.h"
+#include "../resource.h"
 
 #include <CommCtrl.h>
 #include <commdlg.h>
@@ -128,6 +129,18 @@ namespace GlassPane::UI
         {
             ListView_SetItemText(listView, row, column, const_cast<wchar_t*>(text.c_str()));
         }
+
+        HICON LoadGlassPaneIcon(HINSTANCE instance, int width, int height)
+        {
+            HICON icon = reinterpret_cast<HICON>(LoadImageW(
+                instance,
+                MAKEINTRESOURCEW(IDI_GLASSPANE_ICON),
+                IMAGE_ICON,
+                width,
+                height,
+                LR_DEFAULTCOLOR | LR_SHARED));
+            return icon != nullptr ? icon : LoadIconW(nullptr, IDI_APPLICATION);
+        }
     }
 
     int RunApp(HINSTANCE instance, int showCommand)
@@ -156,8 +169,8 @@ namespace GlassPane::UI
         windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         windowClass.lpszClassName = L"GlassPaneMainWindow";
-        windowClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-        windowClass.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
+        windowClass.hIcon = LoadGlassPaneIcon(instance_, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+        windowClass.hIconSm = LoadGlassPaneIcon(instance_, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
 
         if (RegisterClassExW(&windowClass) == 0)
         {
@@ -182,6 +195,8 @@ namespace GlassPane::UI
         {
             return false;
         }
+        SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(windowClass.hIcon));
+        SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(windowClass.hIconSm));
 
         ShowWindow(hwnd_, showCommand);
         UpdateWindow(hwnd_);

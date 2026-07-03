@@ -1,0 +1,4 @@
+#include "resource.h"
+
+IDI_GLASSPANE_ICON ICON "res\\GlassPane-Logo.ico"
+IDB_GLASSPANE_LOGO_PNG RCDATA "res\\GlassPane-Logo.png"
