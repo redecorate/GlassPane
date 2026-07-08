@@ -242,10 +242,10 @@
     <Image Include="res\GlassPane-Logo.png" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="Indicators\network-indicators.json">
+    <None Include="Indicators\network-indicators.json" Condition="Exists('Indicators\network-indicators.json')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <None Include="Indicators\network-indicators.sha256">
+    <None Include="Indicators\network-indicators.sha256" Condition="Exists('Indicators\network-indicators.sha256')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="README.md" />
