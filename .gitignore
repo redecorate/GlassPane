@@ -5,6 +5,7 @@ Release/
 GlassPane/x64/
 GlassPane/Debug/
 GlassPane/Release/
+Indicators/
 
 *.user
 *.suo
