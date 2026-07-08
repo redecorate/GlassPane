@@ -1,17 +1,14 @@
 #include "Fonts.h"
 
-#ifdef GLASSPANE_ENABLE_IMGUI
 #include "imgui.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
-#endif
 
 namespace GlassPane::UI
 {
-#ifdef GLASSPANE_ENABLE_IMGUI
     namespace
     {
         bool FontFileExists(const wchar_t* path)
@@ -35,11 +32,9 @@ namespace GlassPane::UI
             return ImGui::GetIO().Fonts->AddFontFromFileTTF(imguiPath, sizePixels, &config);
         }
     }
-#endif
 
     void FontSet::Load()
     {
-#ifdef GLASSPANE_ENABLE_IMGUI
         ImGuiIO& io = ImGui::GetIO();
         io.Fonts->Clear();
 
@@ -96,12 +91,5 @@ namespace GlassPane::UI
         }
 
         io.FontDefault = ui;
-#else
-        ui = nullptr;
-        smallUi = nullptr;
-        bold = nullptr;
-        title = nullptr;
-        monospace = nullptr;
-#endif
     }
 }

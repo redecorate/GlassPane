@@ -1,14 +1,11 @@
 #include "Theme.h"
 
-#ifdef GLASSPANE_ENABLE_IMGUI
 #include "imgui.h"
-#endif
 
 namespace GlassPane::UI
 {
     void ApplyGlassPaneTheme()
     {
-#ifdef GLASSPANE_ENABLE_IMGUI
         ImGuiIO& io = ImGui::GetIO();
         io.FontGlobalScale = 1.00f;
 
@@ -86,6 +83,5 @@ namespace GlassPane::UI
         colors[ImGuiCol_TableRowBg] = ImVec4(0.024f, 0.032f, 0.046f, 1.00f);
         colors[ImGuiCol_TableRowBgAlt] = ImVec4(0.031f, 0.041f, 0.058f, 1.00f);
         colors[ImGuiCol_TextSelectedBg] = ImVec4(0.18f, 0.31f, 0.46f, 0.50f);
-#endif
     }
 }

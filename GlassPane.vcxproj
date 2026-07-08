@@ -85,7 +85,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Winhttp.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
        <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -95,14 +95,14 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WIN32_LEAN_AND_MEAN;NOMINMAX;GLASSPANE_ENABLE_IMGUI;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_WINDOWS;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Winhttp.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
        <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -110,14 +110,14 @@
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>_DEBUG;_WINDOWS;WIN32_LEAN_AND_MEAN;NOMINMAX;GLASSPANE_ENABLE_IMGUI;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_DEBUG;_WINDOWS;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Winhttp.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
        <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -127,14 +127,14 @@
       <FunctionLevelLinking>true</FunctionLevelLinking>
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
-      <PreprocessorDefinitions>NDEBUG;_WINDOWS;WIN32_LEAN_AND_MEAN;NOMINMAX;GLASSPANE_ENABLE_IMGUI;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>NDEBUG;_WINDOWS;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)third_party\imgui;$(ProjectDir)third_party\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Winhttp.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
        <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -151,6 +151,8 @@
     <ClCompile Include="Core\MemoryCollector.cpp" />
     <ClCompile Include="Core\ModuleCollector.cpp" />
     <ClCompile Include="Core\NetworkCollector.cpp" />
+    <ClCompile Include="Core\NetworkIndicatorMatcher.cpp" />
+    <ClCompile Include="Core\NetworkIndicatorUpdater.cpp" />
     <ClCompile Include="Core\ProcessCollector.cpp" />
     <ClCompile Include="Core\ProcessTree.cpp" />
     <ClCompile Include="Core\RuntimeCollector.cpp" />
@@ -160,19 +162,23 @@
     <ClCompile Include="Core\TokenCollector.cpp" />
     <ClCompile Include="Export\JsonExporter.cpp" />
     <ClCompile Include="Export\MarkdownReportExporter.cpp" />
-    <ClCompile Include="main.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_dx11.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="third_party\imgui\imgui.cpp" />
     <ClCompile Include="third_party\imgui\imgui_draw.cpp" />
     <ClCompile Include="third_party\imgui\imgui_tables.cpp" />
     <ClCompile Include="third_party\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="UI\ComparePanel.cpp" />
     <ClCompile Include="UI\Fonts.cpp" />
+    <ClCompile Include="UI\HeaderPanel.cpp" />
     <ClCompile Include="UI\ImGuiApp.cpp" />
     <ClCompile Include="UI\ImGuiMain.cpp" />
-    <ClCompile Include="UI\MainWindow.cpp" />
+    <ClCompile Include="UI\LogsPanel.cpp" />
+    <ClCompile Include="UI\Modals.cpp" />
+    <ClCompile Include="UI\ProcessPanel.cpp" />
     <ClCompile Include="UI\Theme.cpp" />
-    <ClCompile Include="UI\TreeViewPanel.cpp" />
+    <ClCompile Include="UI\TimelinePanel.cpp" />
+    <ClCompile Include="UI\UiHelpers.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Core\ChainAnalysis.h" />
@@ -188,6 +194,10 @@
     <ClInclude Include="Core\ModuleInfo.h" />
     <ClInclude Include="Core\NetworkCollector.h" />
     <ClInclude Include="Core\NetworkConnection.h" />
+    <ClInclude Include="Core\NetworkIndicator.h" />
+    <ClInclude Include="Core\NetworkIndicatorFeed.h" />
+    <ClInclude Include="Core\NetworkIndicatorMatcher.h" />
+    <ClInclude Include="Core\NetworkIndicatorUpdater.h" />
     <ClInclude Include="Core\ProcessCollector.h" />
     <ClInclude Include="Core\ProcessInfo.h" />
     <ClInclude Include="Core\ProcessTree.h" />
@@ -209,18 +219,43 @@
     <ClInclude Include="third_party\imgui\imstb_rectpack.h" />
     <ClInclude Include="third_party\imgui\imstb_textedit.h" />
     <ClInclude Include="third_party\imgui\imstb_truetype.h" />
+    <ClInclude Include="UI\AppActions.h" />
+    <ClInclude Include="UI\ComparePanel.h" />
+    <ClInclude Include="UI\EvidenceCacheActions.h" />
     <ClInclude Include="UI\Fonts.h" />
+    <ClInclude Include="UI\GraphPanel.h" />
+    <ClInclude Include="UI\HeaderPanel.h" />
     <ClInclude Include="UI\ImGuiApp.h" />
-    <ClInclude Include="UI\MainWindow.h" />
+    <ClInclude Include="UI\InspectorViews.h" />
+    <ClInclude Include="UI\LogsPanel.h" />
+    <ClInclude Include="UI\Modals.h" />
+    <ClInclude Include="UI\PickWindowActions.h" />
+    <ClInclude Include="UI\ProcessPanel.h" />
+    <ClInclude Include="UI\RenderDeviceActions.h" />
+    <ClInclude Include="UI\SnapshotCompareActions.h" />
     <ClInclude Include="UI\Theme.h" />
-    <ClInclude Include="UI\TreeViewPanel.h" />
+    <ClInclude Include="UI\TimelinePanel.h" />
+    <ClInclude Include="UI\UiHelpers.h" />
   </ItemGroup>
   <ItemGroup>
     <Image Include="res\GlassPane-Logo.ico" />
     <Image Include="res\GlassPane-Logo.png" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="Indicators\network-indicators.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="Indicators\network-indicators.sha256">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
     <None Include="README.md" />
+    <None Include="UI\AppActions.cpp" />
+    <None Include="UI\EvidenceCacheActions.cpp" />
+    <None Include="UI\GraphPanel.cpp" />
+    <None Include="UI\InspectorViews.cpp" />
+    <None Include="UI\PickWindowActions.cpp" />
+    <None Include="UI\RenderDeviceActions.cpp" />
+    <None Include="UI\SnapshotCompareActions.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

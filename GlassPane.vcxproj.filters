@@ -56,9 +56,6 @@
     </ResourceCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="main.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="Core\ProcessCollector.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
@@ -86,6 +83,12 @@
     <ClCompile Include="Core\NetworkCollector.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
+    <ClCompile Include="Core\NetworkIndicatorMatcher.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Core\NetworkIndicatorUpdater.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
     <ClCompile Include="Core\ProcessTree.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
@@ -101,9 +104,6 @@
     <ClCompile Include="Core\SnapshotCompare.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
-    <ClCompile Include="UI\MainWindow.cpp">
-      <Filter>Source Files\UI</Filter>
-    </ClCompile>
     <ClCompile Include="UI\ImGuiApp.cpp">
       <Filter>Source Files\UI</Filter>
     </ClCompile>
@@ -116,7 +116,25 @@
     <ClCompile Include="UI\Theme.cpp">
       <Filter>Source Files\UI</Filter>
     </ClCompile>
-    <ClCompile Include="UI\TreeViewPanel.cpp">
+    <ClCompile Include="UI\ComparePanel.cpp">
+      <Filter>Source Files\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\Modals.cpp">
+      <Filter>Source Files\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\LogsPanel.cpp">
+      <Filter>Source Files\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\HeaderPanel.cpp">
+      <Filter>Source Files\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\ProcessPanel.cpp">
+      <Filter>Source Files\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\TimelinePanel.cpp">
+      <Filter>Source Files\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="UI\UiHelpers.cpp">
       <Filter>Source Files\UI</Filter>
     </ClCompile>
     <ClCompile Include="Export\JsonExporter.cpp">
@@ -190,6 +208,18 @@
     <ClInclude Include="Core\NetworkConnection.h">
       <Filter>Header Files\Core</Filter>
     </ClInclude>
+    <ClInclude Include="Core\NetworkIndicator.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\NetworkIndicatorFeed.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\NetworkIndicatorMatcher.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\NetworkIndicatorUpdater.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
     <ClInclude Include="Core\ProcessTree.h">
       <Filter>Header Files\Core</Filter>
     </ClInclude>
@@ -208,9 +238,6 @@
     <ClInclude Include="Core\SnapshotCompare.h">
       <Filter>Header Files\Core</Filter>
     </ClInclude>
-    <ClInclude Include="UI\MainWindow.h">
-      <Filter>Header Files\UI</Filter>
-    </ClInclude>
     <ClInclude Include="UI\ImGuiApp.h">
       <Filter>Header Files\UI</Filter>
     </ClInclude>
@@ -220,7 +247,46 @@
     <ClInclude Include="UI\Theme.h">
       <Filter>Header Files\UI</Filter>
     </ClInclude>
-    <ClInclude Include="UI\TreeViewPanel.h">
+    <ClInclude Include="UI\ComparePanel.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\Modals.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\LogsPanel.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\HeaderPanel.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\AppActions.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\EvidenceCacheActions.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\GraphPanel.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\InspectorViews.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\ProcessPanel.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\TimelinePanel.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\PickWindowActions.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\RenderDeviceActions.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\SnapshotCompareActions.h">
+      <Filter>Header Files\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="UI\UiHelpers.h">
       <Filter>Header Files\UI</Filter>
     </ClInclude>
     <ClInclude Include="Export\JsonExporter.h">
@@ -266,6 +332,33 @@
     </Image>
   </ItemGroup>
   <ItemGroup>
+    <None Include="Indicators\network-indicators.json">
+      <Filter>Resource Files</Filter>
+    </None>
+    <None Include="Indicators\network-indicators.sha256">
+      <Filter>Resource Files</Filter>
+    </None>
     <None Include="README.md" />
+    <None Include="UI\AppActions.cpp">
+      <Filter>Source Files\UI</Filter>
+    </None>
+    <None Include="UI\EvidenceCacheActions.cpp">
+      <Filter>Source Files\UI</Filter>
+    </None>
+    <None Include="UI\GraphPanel.cpp">
+      <Filter>Source Files\UI</Filter>
+    </None>
+    <None Include="UI\InspectorViews.cpp">
+      <Filter>Source Files\UI</Filter>
+    </None>
+    <None Include="UI\PickWindowActions.cpp">
+      <Filter>Source Files\UI</Filter>
+    </None>
+    <None Include="UI\RenderDeviceActions.cpp">
+      <Filter>Source Files\UI</Filter>
+    </None>
+    <None Include="UI\SnapshotCompareActions.cpp">
+      <Filter>Source Files\UI</Filter>
+    </None>
   </ItemGroup>
 </Project>

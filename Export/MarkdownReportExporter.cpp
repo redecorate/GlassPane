@@ -259,6 +259,19 @@ namespace GlassPane::Export
             return joined;
         }
 
+        std::wstring NetworkIntelEndpoint(const Core::NetworkIndicatorMatch& match)
+        {
+            if (match.connection.remoteAddress.empty())
+            {
+                return L"(remote unavailable)";
+            }
+            if (match.connection.remotePort == 0)
+            {
+                return match.connection.remoteAddress;
+            }
+            return match.connection.remoteAddress + L":" + std::to_wstring(match.connection.remotePort);
+        }
+
         std::wstring ToLower(std::wstring value)
         {
             std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
@@ -830,6 +843,56 @@ namespace GlassPane::Export
             }
         }
 
+        output << "## Network Intelligence Matches\n\n";
+        if (!context.networkIntelFeedLoaded)
+        {
+            output << "Network intelligence feed was not loaded.\n\n";
+        }
+        else if (context.networkIndicatorMatches == nullptr)
+        {
+            output << "Network intelligence match data was not included in this report context.\n\n";
+        }
+        else if (context.networkIndicatorMatches->empty())
+        {
+            output << "No network intelligence matches were found for loaded network data.\n\n";
+        }
+        else
+        {
+            if (context.networkIndicatorFeed != nullptr)
+            {
+                output << "Feed: "
+                       << EscapeMarkdownInline(ValueOr(context.networkIndicatorFeed->metadata.feedName, L"(unnamed feed)"))
+                       << " ("
+                       << context.networkIndicatorFeed->indicators.size()
+                       << " indicator";
+                if (context.networkIndicatorFeed->indicators.size() != 1)
+                {
+                    output << "s";
+                }
+                output << ")\n\n";
+            }
+            else if (!context.networkIntelStatusMessage.empty())
+            {
+                output << EscapeMarkdownInline(context.networkIntelStatusMessage) << "\n\n";
+            }
+
+            WriteTableHeader(output, { "Remote Endpoint", "Category", "Severity", "Confidence", "Source", "Last Seen", "Description" });
+            for (const Core::NetworkIndicatorMatch& match : *context.networkIndicatorMatches)
+            {
+                WriteTableRow(output, {
+                    NetworkIntelEndpoint(match),
+                    ValueOr(match.indicator.category, L"(unspecified)"),
+                    ValueOr(match.indicator.severity, L"(unspecified)"),
+                    ValueOr(match.indicator.confidence, L"(unspecified)"),
+                    ValueOr(match.indicator.source, L"(unspecified)"),
+                    ValueOr(match.indicator.lastSeen, L"(unknown)"),
+                    ValueOr(match.indicator.description, L"")
+                });
+            }
+            output << "\n";
+            output << "Network intelligence matches mean the endpoint appears in the local indicator feed. They are evidence worth reviewing, not proof of malicious activity.\n\n";
+        }
+
         output << "## Modules\n\n";
         if (!context.modulesLoaded || context.modules == nullptr)
         {
@@ -1028,11 +1091,31 @@ namespace GlassPane::Export
             return address + L":" + std::to_wstring(port);
         };
 
-        const auto writeProcessRows = [&output](const std::vector<Core::SnapshotProcessRecord>& records) {
-            WriteTableHeader(output, { "Process", "PID", "PPID", "Severity", "Path" });
-            for (const Core::SnapshotProcessRecord& process : records)
+        constexpr std::size_t MaxCompareReportRows = 200;
+
+        const auto writeTruncationNote = [&output](std::size_t written, std::size_t total) {
+            if (total > written)
             {
+                output << "\n_Report section truncated. "
+                       << (total - written)
+                       << " additional row(s) omitted._\n";
+            }
+        };
+
+        const auto cappedCount = [MaxCompareReportRows](std::size_t total) {
+            return std::min<std::size_t>(MaxCompareReportRows, total);
+        };
+
+        const auto writeProcessRows = [&output, &writeTruncationNote, &cappedCount](
+            const std::vector<Core::SnapshotProcessRecord>& records,
+            const wchar_t* observation) {
+            WriteTableHeader(output, { "Observation", "Process", "PID", "PPID", "Severity", "Path" });
+            const std::size_t rowsToWrite = cappedCount(records.size());
+            for (std::size_t index = 0; index < rowsToWrite; ++index)
+            {
+                const Core::SnapshotProcessRecord& process = records[index];
                 WriteTableRow(output, {
+                    observation,
                     ValueOr(process.processName, L"(unknown)"),
                     std::to_wstring(process.pid),
                     std::to_wstring(process.parentPid),
@@ -1040,6 +1123,7 @@ namespace GlassPane::Export
                     ValueOr(process.executablePath, L"(unavailable)")
                 });
             }
+            writeTruncationNote(rowsToWrite, records.size());
             output << "\n";
         };
 
@@ -1059,8 +1143,12 @@ namespace GlassPane::Export
         WriteTableRow(output, { L"Changed processes", std::to_wstring(result.changedProcesses.size()) });
         WriteTableRow(output, { L"New network connections", result.networkCompared ? std::to_wstring(result.newNetworkConnections.size()) : L"Unavailable" });
         WriteTableRow(output, { L"Closed network connections", result.networkCompared ? std::to_wstring(result.closedNetworkConnections.size()) : L"Unavailable" });
-        WriteTableRow(output, { L"New findings", result.findingsCompared ? std::to_wstring(result.newFindings.size()) : L"Unavailable" });
-        WriteTableRow(output, { L"Changed findings", result.findingsCompared ? std::to_wstring(result.changedFindings.size()) : L"Unavailable" });
+        WriteTableRow(output, {
+            L"Finding changes",
+            result.findingsCompared
+                ? std::to_wstring(result.newFindings.size() + result.removedFindings.size() + result.changedFindings.size())
+                : L"Unavailable"
+        });
         output << "\n";
 
         output << "## New Processes\n\n";
@@ -1070,7 +1158,7 @@ namespace GlassPane::Export
         }
         else
         {
-            writeProcessRows(result.newProcesses);
+            writeProcessRows(result.newProcesses, L"New process observed");
         }
 
         output << "## Exited Processes\n\n";
@@ -1080,7 +1168,7 @@ namespace GlassPane::Export
         }
         else
         {
-            writeProcessRows(result.exitedProcesses);
+            writeProcessRows(result.exitedProcesses, L"Process exited");
         }
 
         output << "## Changed Processes\n\n";
@@ -1091,10 +1179,15 @@ namespace GlassPane::Export
         else
         {
             WriteTableHeader(output, { "Process", "PID", "Field", "Baseline", "Current" });
+            std::size_t writtenRows = 0;
             for (const Core::SnapshotProcessChange& change : result.changedProcesses)
             {
                 for (const Core::SnapshotChangedField& field : change.fields)
                 {
+                    if (writtenRows >= MaxCompareReportRows)
+                    {
+                        break;
+                    }
                     WriteTableRow(output, {
                         ValueOr(change.current.processName, L"(unknown)"),
                         std::to_wstring(change.current.pid),
@@ -1102,8 +1195,20 @@ namespace GlassPane::Export
                         field.baselineValue,
                         field.currentValue
                     });
+                    ++writtenRows;
+                }
+
+                if (writtenRows >= MaxCompareReportRows)
+                {
+                    break;
                 }
             }
+            std::size_t totalRows = 0;
+            for (const Core::SnapshotProcessChange& change : result.changedProcesses)
+            {
+                totalRows += change.fields.size();
+            }
+            writeTruncationNote(writtenRows, totalRows);
             output << "\n";
         }
 
@@ -1121,10 +1226,13 @@ namespace GlassPane::Export
             if (!result.newNetworkConnections.empty())
             {
                 output << "### New Connections\n\n";
-                WriteTableHeader(output, { "Process", "PID", "Protocol", "Local", "Remote", "State" });
-                for (const Core::SnapshotNetworkEndpoint& endpoint : result.newNetworkConnections)
+                WriteTableHeader(output, { "Observation", "Process", "PID", "Protocol", "Local", "Remote", "State" });
+                const std::size_t rowsToWrite = cappedCount(result.newNetworkConnections.size());
+                for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
+                    const Core::SnapshotNetworkEndpoint& endpoint = result.newNetworkConnections[index];
                     WriteTableRow(output, {
+                        L"Network connection appeared",
                         ValueOr(endpoint.processName, L"(unknown)"),
                         std::to_wstring(endpoint.owningPid),
                         ValueOr(endpoint.protocol, L"(unknown)"),
@@ -1133,16 +1241,20 @@ namespace GlassPane::Export
                         ValueOr(endpoint.state, L"-")
                     });
                 }
+                writeTruncationNote(rowsToWrite, result.newNetworkConnections.size());
                 output << "\n";
             }
 
             if (!result.closedNetworkConnections.empty())
             {
                 output << "### Closed Connections\n\n";
-                WriteTableHeader(output, { "Process", "PID", "Protocol", "Local", "Remote", "State" });
-                for (const Core::SnapshotNetworkEndpoint& endpoint : result.closedNetworkConnections)
+                WriteTableHeader(output, { "Observation", "Process", "PID", "Protocol", "Local", "Remote", "State" });
+                const std::size_t rowsToWrite = cappedCount(result.closedNetworkConnections.size());
+                for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
+                    const Core::SnapshotNetworkEndpoint& endpoint = result.closedNetworkConnections[index];
                     WriteTableRow(output, {
+                        L"Network connection closed",
                         ValueOr(endpoint.processName, L"(unknown)"),
                         std::to_wstring(endpoint.owningPid),
                         ValueOr(endpoint.protocol, L"(unknown)"),
@@ -1151,6 +1263,7 @@ namespace GlassPane::Export
                         ValueOr(endpoint.state, L"-")
                     });
                 }
+                writeTruncationNote(rowsToWrite, result.closedNetworkConnections.size());
                 output << "\n";
             }
         }
@@ -1169,10 +1282,13 @@ namespace GlassPane::Export
             if (!result.newFindings.empty())
             {
                 output << "### New Findings\n\n";
-                WriteTableHeader(output, { "Severity", "Process", "PID", "Finding", "Category" });
-                for (const Core::SnapshotFindingRecord& finding : result.newFindings)
+                WriteTableHeader(output, { "Observation", "Severity", "Process", "PID", "Finding", "Category" });
+                const std::size_t rowsToWrite = cappedCount(result.newFindings.size());
+                for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
+                    const Core::SnapshotFindingRecord& finding = result.newFindings[index];
                     WriteTableRow(output, {
+                        L"Finding changed",
                         Core::FindingSeverityToString(finding.severity),
                         ValueOr(finding.processName, L"(unknown)"),
                         std::to_wstring(finding.pid),
@@ -1180,6 +1296,7 @@ namespace GlassPane::Export
                         ValueOr(finding.category, L"(none)")
                     });
                 }
+                writeTruncationNote(rowsToWrite, result.newFindings.size());
                 output << "\n";
             }
 
@@ -1187,8 +1304,10 @@ namespace GlassPane::Export
             {
                 output << "### Changed Findings\n\n";
                 WriteTableHeader(output, { "Process", "PID", "Finding", "Baseline Severity", "Current Severity" });
-                for (const Core::SnapshotFindingChange& change : result.changedFindings)
+                const std::size_t rowsToWrite = cappedCount(result.changedFindings.size());
+                for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
+                    const Core::SnapshotFindingChange& change = result.changedFindings[index];
                     WriteTableRow(output, {
                         ValueOr(change.current.processName, L"(unknown)"),
                         std::to_wstring(change.current.pid),
@@ -1197,16 +1316,20 @@ namespace GlassPane::Export
                         Core::FindingSeverityToString(change.current.severity)
                     });
                 }
+                writeTruncationNote(rowsToWrite, result.changedFindings.size());
                 output << "\n";
             }
 
             if (!result.removedFindings.empty())
             {
                 output << "### Removed Findings\n\n";
-                WriteTableHeader(output, { "Severity", "Process", "PID", "Finding", "Category" });
-                for (const Core::SnapshotFindingRecord& finding : result.removedFindings)
+                WriteTableHeader(output, { "Observation", "Severity", "Process", "PID", "Finding", "Category" });
+                const std::size_t rowsToWrite = cappedCount(result.removedFindings.size());
+                for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
+                    const Core::SnapshotFindingRecord& finding = result.removedFindings[index];
                     WriteTableRow(output, {
+                        L"Finding changed",
                         Core::FindingSeverityToString(finding.severity),
                         ValueOr(finding.processName, L"(unknown)"),
                         std::to_wstring(finding.pid),
@@ -1214,6 +1337,7 @@ namespace GlassPane::Export
                         ValueOr(finding.category, L"(none)")
                     });
                 }
+                writeTruncationNote(rowsToWrite, result.removedFindings.size());
                 output << "\n";
             }
         }

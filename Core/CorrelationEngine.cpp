@@ -171,6 +171,24 @@ namespace GlassPane::Core
             }
         }
 
+        FindingSeverity FindingSeverityFromIndicatorSeverity(const std::wstring& severity)
+        {
+            const std::wstring lowered = ToLower(severity);
+            if (lowered == L"high")
+            {
+                return FindingSeverity::High;
+            }
+            if (lowered == L"medium")
+            {
+                return FindingSeverity::Medium;
+            }
+            if (lowered == L"low")
+            {
+                return FindingSeverity::Low;
+            }
+            return FindingSeverity::Info;
+        }
+
         std::wstring ProcessSeverityEvidence(Severity severity)
         {
             return L"Process severity is " + std::wstring(SeverityToString(severity)) + L".";
@@ -440,6 +458,25 @@ namespace GlassPane::Core
             }
         }
 
+        std::wstring MatchEndpointText(const NetworkIndicatorMatch& match)
+        {
+            std::wstringstream text;
+            text << L"Remote endpoint: ";
+            if (!match.connection.remoteAddress.empty())
+            {
+                text << match.connection.remoteAddress;
+                if (match.connection.remotePort != 0)
+                {
+                    text << L":" << match.connection.remotePort;
+                }
+            }
+            else
+            {
+                text << L"(remote address unavailable)";
+            }
+            return text.str();
+        }
+
         void AddFinding(std::vector<Finding>& findings, Finding finding)
         {
             findings.push_back(std::move(finding));
@@ -496,6 +533,46 @@ namespace GlassPane::Core
                 L"Existing local indicators plus a public outbound connection create a suspicious context that warrants investigation.",
                 evidence,
                 L"Network"
+            });
+        }
+
+        if (context.networkIndicatorMatches != nullptr &&
+            !context.networkIndicatorMatches->empty())
+        {
+            const NetworkIndicatorMatch& firstMatch = context.networkIndicatorMatches->front();
+            FindingSeverity findingSeverity =
+                FindingSeverityFromIndicatorSeverity(firstMatch.indicator.severity);
+            std::vector<std::wstring> evidence = {
+                L"Selected process: " + (process.name.empty() ? L"(unknown)" : process.name) +
+                    L" (PID " + std::to_wstring(process.pid) + L").",
+                MatchEndpointText(firstMatch),
+                L"Indicator category: " + (firstMatch.indicator.category.empty() ? L"(unspecified)" : firstMatch.indicator.category) + L".",
+                L"Indicator severity: " + (firstMatch.indicator.severity.empty() ? L"(unspecified)" : firstMatch.indicator.severity) + L".",
+                L"Confidence: " + (firstMatch.indicator.confidence.empty() ? L"(unspecified)" : firstMatch.indicator.confidence) + L".",
+                L"Source: " + (firstMatch.indicator.source.empty() ? L"(unspecified)" : firstMatch.indicator.source) + L"."
+            };
+            if (!firstMatch.indicator.lastSeen.empty())
+            {
+                evidence.push_back(L"Last seen: " + firstMatch.indicator.lastSeen + L".");
+            }
+            if (!firstMatch.indicator.description.empty())
+            {
+                evidence.push_back(L"Description: " + firstMatch.indicator.description);
+            }
+            if (context.networkIndicatorMatches->size() > 1)
+            {
+                evidence.push_back(
+                    L"Additional local network indicator matches: " +
+                    std::to_wstring(context.networkIndicatorMatches->size() - 1) +
+                    L".");
+            }
+
+            AddFinding(findings, {
+                findingSeverity,
+                L"Remote endpoint matched local network indicator",
+                L"A remote endpoint used by this process appears in the local network indicator feed. This is evidence worth reviewing, not proof of compromise.",
+                evidence,
+                L"Network Intelligence"
             });
         }
 

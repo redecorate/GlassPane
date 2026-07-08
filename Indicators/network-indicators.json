@@ -1,0 +1,19 @@
+{
+  "feed_name": "GlassPane Network Indicators",
+  "schema_version": 1,
+  "generated_at": "2026-07-06T00:00:00Z",
+  "expires_at": "2026-07-13T00:00:00Z",
+  "indicators": [
+    {
+      "type": "ip",
+      "value": "203.0.113.10",
+      "category": "c2",
+      "severity": "high",
+      "confidence": "high",
+      "source": "local-test",
+      "description": "Test indicator for GlassPane development",
+      "first_seen": "2026-07-01T00:00:00Z",
+      "last_seen": "2026-07-06T00:00:00Z"
+    }
+  ]
+}

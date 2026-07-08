@@ -6,6 +6,7 @@
 #include "../Core/MemoryRegionInfo.h"
 #include "../Core/ModuleInfo.h"
 #include "../Core/NetworkConnection.h"
+#include "../Core/NetworkIndicatorFeed.h"
 #include "../Core/ProcessInfo.h"
 #include "../Core/RuntimeInfo.h"
 #include "../Core/SnapshotCompare.h"
@@ -35,6 +36,10 @@ namespace GlassPane::Export
         bool networkSuccess = false;
         std::wstring networkStatusMessage;
         const std::vector<Core::NetworkConnection>* networkConnections = nullptr;
+        bool networkIntelFeedLoaded = false;
+        std::wstring networkIntelStatusMessage;
+        const Core::NetworkIndicatorFeed* networkIndicatorFeed = nullptr;
+        const std::vector<Core::NetworkIndicatorMatch>* networkIndicatorMatches = nullptr;
 
         bool tokenLoaded = false;
         const Core::TokenInfo* token = nullptr;

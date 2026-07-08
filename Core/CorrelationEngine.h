@@ -7,6 +7,7 @@
 #include "MemoryRegionInfo.h"
 #include "ModuleInfo.h"
 #include "NetworkConnection.h"
+#include "NetworkIndicator.h"
 #include "ProcessInfo.h"
 #include "RuntimeInfo.h"
 #include "TokenInfo.h"
@@ -22,6 +23,7 @@ namespace GlassPane::Core
         const ChainAnalysisResult* chain = nullptr;
         const ModuleCollectionResult* modules = nullptr;
         const std::vector<NetworkConnection>* networkConnections = nullptr;
+        const std::vector<NetworkIndicatorMatch>* networkIndicatorMatches = nullptr;
         const FileIdentity* fileIdentity = nullptr;
         const TokenInfo* token = nullptr;
         const HandleCollectionResult* handles = nullptr;
