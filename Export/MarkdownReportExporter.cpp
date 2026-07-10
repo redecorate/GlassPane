@@ -489,7 +489,7 @@ namespace GlassPane::Export
 
         output << "# GlassPane Selected Process Report\n\n";
         output << "- Generated: " << EscapeMarkdownInline(LocalTimestamp()) << "\n";
-        output << "- GlassPane version: " << EscapeMarkdownInline(ValueOr(context.appVersion, L"(unknown)")) << "\n";
+        output << "- GlassPane version: " << WideToUtf8(ValueOr(context.appVersion, L"(unknown)")) << "\n";
         output << "- Build configuration: " << EscapeMarkdownInline(ValueOr(context.buildConfiguration, L"(unknown)")) << "\n\n";
 
         output << "## Summary\n\n";
@@ -1129,7 +1129,7 @@ namespace GlassPane::Export
 
         output << "# GlassPane Snapshot Compare Report\n\n";
         output << "- Generated: " << EscapeMarkdownInline(LocalTimestamp()) << "\n";
-        output << "- GlassPane version: " << EscapeMarkdownInline(ValueOr(context.appVersion, L"(unknown)")) << "\n";
+        output << "- GlassPane version: " << WideToUtf8(ValueOr(context.appVersion, L"(unknown)")) << "\n";
         output << "- Build configuration: " << EscapeMarkdownInline(ValueOr(context.buildConfiguration, L"(unknown)")) << "\n";
         output << "- Baseline captured: " << EscapeMarkdownInline(ValueOr(context.baseline->captureTimeLocal, L"(missing)")) << "\n";
         output << "- Current captured: " << EscapeMarkdownInline(ValueOr(context.current->captureTimeLocal, L"(missing)")) << "\n\n";

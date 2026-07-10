@@ -35,8 +35,8 @@
             graphLayoutSingleNode_ = focusedGraph_.nodes.size() == 1;
             graphLayoutSmallGraph_ = focusedGraph_.nodes.size() >= 2 && focusedGraph_.nodes.size() <= 5;
             graphLayoutBaseNodeSize_ = graphLayoutSingleNode_
-                ? ImVec2(342.0f, 126.0f)
-                : (graphLayoutSmallGraph_ ? ImVec2(318.0f, 112.0f) : ImVec2(302.0f, 106.0f));
+                ? ImVec2(246.0f, 88.0f)
+                : (graphLayoutSmallGraph_ ? ImVec2(218.0f, 76.0f) : ImVec2(194.0f, 66.0f));
 
             std::unordered_map<std::size_t, std::vector<std::size_t>> levels;
             std::size_t maxDepth = 0;
@@ -48,8 +48,8 @@
             }
 
             graphLayoutNodes_.resize(focusedGraph_.nodes.size());
-            const float siblingSpacing = graphLayoutSingleNode_ ? 0.0f : (graphLayoutSmallGraph_ ? 170.0f : 190.0f);
-            const float levelSpacing = graphLayoutMode_ == GraphLayoutMode::LeftToRight ? 166.0f : 132.0f;
+            const float siblingSpacing = graphLayoutSingleNode_ ? 0.0f : (graphLayoutSmallGraph_ ? 96.0f : 112.0f);
+            const float levelSpacing = graphLayoutMode_ == GraphLayoutMode::LeftToRight ? 118.0f : 92.0f;
             for (std::size_t depth = 0; depth <= maxDepth; ++depth)
             {
                 auto level = levels.find(depth);
@@ -161,38 +161,41 @@
             const auto layoutLabel = [](GraphLayoutMode mode) {
                 return mode == GraphLayoutMode::LeftToRight ? "Left To Right" : "Top Down";
             };
+            const auto graphToolbarButton = [](const char* label) {
+                PushGlassButtonStyle();
+                const bool clicked = ImGui::Button(label);
+                PopGlassButtonStyle();
+                return clicked;
+            };
 
+            const ImGuiStyle& style = ImGui::GetStyle();
+            const float headerStartX = ImGui::GetCursorPosX();
             const bool pushedHeadingFont = PushFontIfAvailable(fonts_.bold);
+            ImGui::AlignTextToFramePadding();
             ImGui::TextColored(AccentBlue(), "Process Graph");
             PopFontIfPushed(pushedHeadingFont);
-            ImGui::SameLine();
-            ImGui::TextColored(MutedText(), "focused process relationships");
 
-            const float toolbarWidth = 612.0f;
-            const float toolbarX = ImGui::GetCursorPosX() + std::max(0.0f, ImGui::GetContentRegionAvail().x - toolbarWidth);
+            const float refreshWidth = ImGui::CalcTextSize("Refresh").x + style.FramePadding.x * 2.0f;
+            const float layoutLabelWidth = ImGui::CalcTextSize("Layout").x;
+            const float layoutComboWidth = 124.0f;
+            const float toolbarWidth =
+                refreshWidth +
+                layoutLabelWidth +
+                layoutComboWidth +
+                style.ItemSpacing.x * 2.0f;
+            const float toolbarX =
+                ImGui::GetCursorPosX() +
+                std::max(0.0f, ImGui::GetContentRegionAvail().x - toolbarWidth);
             if (ImGui::GetContentRegionAvail().x > toolbarWidth + 12.0f)
             {
                 ImGui::SameLine(toolbarX);
             }
             else
             {
-                ImGui::Spacing();
+                ImGui::SameLine();
             }
 
-            if (ImGui::Button("Focus"))
-            {
-                RebuildFocusedGraph("graph-focus-button");
-                RequestGraphFit();
-                AddLog(LogLevel::Info, "Graph focused on selected process.");
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Fit"))
-            {
-                RequestGraphFit();
-                AddLog(LogLevel::Info, "Graph fit requested.");
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Refresh"))
+            if (graphToolbarButton("Refresh"))
             {
                 RebuildFocusedGraph("graph-refresh-button");
                 RequestGraphFit();
@@ -202,7 +205,9 @@
             ImGui::TextDisabled("Layout");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(124.0f);
-            if (ImGui::BeginCombo("##graph_layout", layoutLabel(graphLayoutMode_)))
+            const bool layoutComboOpen = ImGui::BeginCombo("##graph_layout", layoutLabel(graphLayoutMode_));
+            const bool layoutComboHovered = ImGui::IsItemHovered();
+            if (layoutComboOpen)
             {
                 const bool topDownSelected = graphLayoutMode_ == GraphLayoutMode::TopDown;
                 if (ImGui::Selectable("Top Down", topDownSelected))
@@ -227,28 +232,27 @@
                 }
                 ImGui::EndCombo();
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Zoom -"))
+            if (layoutComboHovered)
             {
-                graphZoom_ = clampZoom(graphZoom_ * 0.86f);
+                RenderWrappedTooltip("Choose the direction used to arrange process relationships.", 360.0f);
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Zoom +"))
+
+            ImGui::SetCursorPosX(headerStartX);
+            const ImVec2 separatorStart = ImGui::GetCursorScreenPos();
+            const float separatorWidth = ImGui::GetContentRegionAvail().x;
+            if (separatorWidth > 1.0f)
             {
-                graphZoom_ = clampZoom(graphZoom_ * 1.16f);
+                ImGui::GetWindowDrawList()->AddLine(
+                    separatorStart,
+                    ImVec2(separatorStart.x + separatorWidth, separatorStart.y),
+                    ColorU32(ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.24f)),
+                    1.0f);
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Reset"))
-            {
-                ResetGraphView();
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("%.0f%%", graphZoom_ * 100.0f);
+            ImGui::Dummy(ImVec2(0.0f, 4.0f));
 
             const Core::ProcessInfo* selectedGraphProcess = Core::FindProcessByPid(snapshot_, selectedPid_);
             const bool selectedHiddenByFilters = selectedGraphProcess != nullptr && !ProcessMatchesFilters(*selectedGraphProcess);
 
-            ImGui::Spacing();
             const ImVec2 available = ImGui::GetContentRegionAvail();
             const ImVec2 childSize(std::max(available.x, 320.0f), std::max(available.y, 260.0f));
             ImGui::PushStyleColor(ImGuiCol_ChildBg, GraphCanvasBg());
@@ -269,16 +273,20 @@
             drawList->AddRectFilledMultiColor(
                 canvasOrigin,
                 canvasMax,
-                IM_COL32(6, 10, 16, 255),
-                IM_COL32(9, 15, 23, 255),
-                IM_COL32(12, 18, 27, 255),
-                ColorU32(GraphCanvasBg()));
+                IM_COL32(4, 8, 13, 255),
+                IM_COL32(8, 14, 22, 255),
+                IM_COL32(10, 16, 25, 255),
+                IM_COL32(5, 9, 15, 255));
             drawList->AddRectFilled(
                 canvasOrigin,
                 canvasMax,
-                ColorU32(ImVec4(GraphCanvasBg().x, GraphCanvasBg().y, GraphCanvasBg().z, 0.58f)),
+                ColorU32(ImVec4(GraphCanvasBg().x, GraphCanvasBg().y, GraphCanvasBg().z, 0.44f)),
                 8.0f);
-            drawList->AddRect(canvasOrigin, canvasMax, ColorU32(PanelBorder()), 8.0f, 0, 1.2f);
+
+            const ImVec2 canvasCenter(
+                (canvasOrigin.x + canvasMax.x) * 0.5f,
+                (canvasOrigin.y + canvasMax.y) * 0.5f);
+            drawList->AddRect(canvasOrigin, canvasMax, ColorU32(ImVec4(PanelBorder().x, PanelBorder().y, PanelBorder().z, 0.72f)), 8.0f, 0, 1.1f);
 
             if (!std::isfinite(graphZoom_))
             {
@@ -287,6 +295,7 @@
             graphZoom_ = clampZoom(graphZoom_);
 
             const float gridStep = std::max(42.0f, 80.0f * graphZoom_);
+            const ImU32 gridColor = ColorU32(ImVec4(GraphGridLine().x, GraphGridLine().y, GraphGridLine().z, 0.135f));
             float firstGridX = canvasOrigin.x + std::fmod(graphPan_.x, gridStep);
             if (firstGridX > canvasOrigin.x)
             {
@@ -297,7 +306,7 @@
                 drawList->AddLine(
                     ImVec2(x, canvasOrigin.y + 12.0f),
                     ImVec2(x, canvasMax.y - 12.0f),
-                    ColorU32(GraphGridLine()),
+                    gridColor,
                     1.0f);
             }
 
@@ -311,7 +320,7 @@
                 drawList->AddLine(
                     ImVec2(canvasOrigin.x + 12.0f, y),
                     ImVec2(canvasMax.x - 12.0f, y),
-                    ColorU32(GraphGridLine()),
+                    gridColor,
                     1.0f);
             }
 
@@ -319,8 +328,12 @@
             {
                 drawList->AddText(
                     ImVec2(canvasOrigin.x + 16.0f, canvasOrigin.y + 16.0f),
+                    ColorU32(PrimaryText()),
+                    "No process graph is available.");
+                drawList->AddText(
+                    ImVec2(canvasOrigin.x + 16.0f, canvasOrigin.y + 40.0f),
                     ColorU32(MutedText()),
-                    "No focused graph available.");
+                    "Select a process to review its parent and child relationships.");
                 drawList->PopClipRect();
                 ImGui::EndChild();
                 return;
@@ -379,9 +392,50 @@
                 graphFitLayoutMode_ = graphLayoutMode_;
             }
 
+            struct GraphRailButtonSpec
+            {
+                const char* label;
+                const char* tooltip;
+                float width;
+            };
+
+            const GraphRailButtonSpec railButtons[] = {
+                { "Focus", "Focus graph on the selected process", 58.0f },
+                { "Fit", "Fit the focused graph in view", 44.0f },
+                { "-", "Zoom out", 34.0f },
+                { "+", "Zoom in", 34.0f },
+                { "Reset", "Reset graph zoom and pan", 58.0f },
+            };
+            const std::string railZoomLabel =
+                std::to_string(static_cast<int>(std::round(graphZoom_ * 100.0f))) + "%";
+            constexpr float RailPaddingX = 10.0f;
+            constexpr float RailPaddingY = 8.0f;
+            constexpr float RailGap = 6.0f;
+            constexpr float RailButtonHeight = 30.0f;
+            const float railZoomWidth = std::max(48.0f, ImGui::CalcTextSize(railZoomLabel.c_str()).x + 20.0f);
+            float railButtonWidth = 0.0f;
+            for (const GraphRailButtonSpec& button : railButtons)
+            {
+                railButtonWidth += button.width;
+            }
+            constexpr std::size_t RailButtonCount = sizeof(railButtons) / sizeof(railButtons[0]);
+            railButtonWidth += railZoomWidth + RailGap * static_cast<float>(RailButtonCount);
+            const ImVec2 railSize(
+                railButtonWidth + RailPaddingX * 2.0f,
+                RailButtonHeight + RailPaddingY * 2.0f);
+            const float railXMin = canvasOrigin.x + 16.0f;
+            const float railXMax = std::max(railXMin, canvasMax.x - railSize.x - 16.0f);
+            ImVec2 railMin(
+                std::clamp(canvasCenter.x - railSize.x * 0.5f, railXMin, railXMax),
+                canvasMax.y - railSize.y - 18.0f);
+            railMin.y = std::max(canvasOrigin.y + 18.0f, railMin.y);
+            const ImVec2 railMax(railMin.x + railSize.x, railMin.y + railSize.y);
+
             const bool canvasHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+            const bool railHovered = canvasHovered && ImGui::IsMouseHoveringRect(railMin, railMax);
+            const bool canvasInputHovered = canvasHovered && !railHovered;
             ImGuiIO& io = ImGui::GetIO();
-            if (canvasHovered && io.MouseWheel != 0.0f)
+            if (canvasInputHovered && io.MouseWheel != 0.0f)
             {
                 const float previousZoom = graphZoom_;
                 const ImVec2 mouseCanvas(
@@ -397,7 +451,7 @@
                     mouseCanvas.y - worldUnderMouse.y * graphZoom_);
             }
 
-            const float nodeDrawScale = std::clamp(graphZoom_, 0.62f, 1.18f);
+            const float nodeDrawScale = std::clamp(graphZoom_, 0.78f, 1.16f);
             const ImVec2 nodeSize(baseNodeSize.x * nodeDrawScale, baseNodeSize.y * nodeDrawScale);
 
             auto updateVisualRects = [&]() {
@@ -421,7 +475,7 @@
             updateVisualRects();
 
             bool mouseOverNode = false;
-            if (canvasHovered)
+            if (canvasInputHovered)
             {
                 for (const GraphVisualNode& visual : visualNodes)
                 {
@@ -433,7 +487,7 @@
                 }
             }
 
-            if (canvasHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+            if (canvasInputHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
             {
                 graphLeftMouseDownStartedOnNode_ = mouseOverNode;
                 graphLeftCanvasPanActive_ = !mouseOverNode;
@@ -444,7 +498,7 @@
                 ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
                 ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0f);
             const bool alternateCanvasDrag =
-                canvasHovered &&
+                canvasInputHovered &&
                 (ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f) ||
                     ImGui::IsMouseDragging(ImGuiMouseButton_Right, 0.0f));
             if (leftCanvasDrag || alternateCanvasDrag)
@@ -475,6 +529,25 @@
                     : ImVec2((visual.min.x + visual.max.x) * 0.5f, visual.min.y);
             };
 
+            auto edgeEndpointSeverity = [&](const Core::FocusedGraphEdge& edge) {
+                Core::Severity severity = Core::Severity::None;
+                const auto parentIndex = graphLayoutNodeIndexByPid_.find(edge.parentPid);
+                if (parentIndex != graphLayoutNodeIndexByPid_.end() && parentIndex->second < visualNodes.size())
+                {
+                    severity = visualNodes[parentIndex->second].displaySeverity;
+                }
+                const auto childIndex = graphLayoutNodeIndexByPid_.find(edge.childPid);
+                if (childIndex != graphLayoutNodeIndexByPid_.end() && childIndex->second < visualNodes.size())
+                {
+                    const Core::Severity childSeverity = visualNodes[childIndex->second].displaySeverity;
+                    if (Core::SeverityRank(childSeverity) > Core::SeverityRank(severity))
+                    {
+                        severity = childSeverity;
+                    }
+                }
+                return severity;
+            };
+
             for (const Core::FocusedGraphEdge& edge : focusedGraph_.edges)
             {
                 if (graphLayoutNodeIndexByPid_.find(edge.parentPid) == graphLayoutNodeIndexByPid_.end() ||
@@ -485,9 +558,14 @@
 
                 const ImVec2 start = edgeAnchor(edge.parentPid, true);
                 const ImVec2 end = edgeAnchor(edge.childPid, false);
+                const Core::Severity edgeSeverity = edgeEndpointSeverity(edge);
+                const bool severityEdge =
+                    edge.inSelectedChain &&
+                    Core::SeverityRank(edgeSeverity) >= Core::SeverityRank(Core::Severity::Low);
+                const ImVec4 edgeAccent = severityEdge ? SeverityColor(edgeSeverity) : AccentBlue();
                 const ImU32 color = edge.inSelectedChain
-                    ? ColorU32(ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.92f))
-                    : IM_COL32(94, 108, 130, 210);
+                    ? ColorU32(ImVec4(edgeAccent.x, edgeAccent.y, edgeAccent.z, 0.90f))
+                    : IM_COL32(86, 103, 126, 176);
                 if (graphLayoutMode_ == GraphLayoutMode::LeftToRight)
                 {
                     const float midpoint = (start.x + end.x) * 0.5f;
@@ -498,8 +576,8 @@
                             ImVec2(midpoint, start.y),
                             ImVec2(midpoint, end.y),
                             end,
-                            ColorU32(ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.18f)),
-                            7.0f);
+                            ColorU32(ImVec4(edgeAccent.x, edgeAccent.y, edgeAccent.z, 0.16f)),
+                            severityEdge ? 7.8f : 7.0f);
                     }
                     drawList->AddBezierCubic(
                         start,
@@ -507,7 +585,7 @@
                         ImVec2(midpoint, end.y),
                         end,
                         color,
-                        edge.inSelectedChain ? 4.6f : 2.4f);
+                        edge.inSelectedChain ? 4.0f : 2.0f);
                 }
                 else
                 {
@@ -519,8 +597,8 @@
                             ImVec2(start.x, midpoint),
                             ImVec2(end.x, midpoint),
                             end,
-                            ColorU32(ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.18f)),
-                            7.0f);
+                            ColorU32(ImVec4(edgeAccent.x, edgeAccent.y, edgeAccent.z, 0.16f)),
+                            severityEdge ? 7.8f : 7.0f);
                     }
                     drawList->AddBezierCubic(
                         start,
@@ -528,7 +606,7 @@
                         ImVec2(end.x, midpoint),
                         end,
                         color,
-                        edge.inSelectedChain ? 4.6f : 2.4f);
+                        edge.inSelectedChain ? 4.0f : 2.0f);
                 }
             }
 
@@ -551,7 +629,7 @@
                     hasSingleNodeBounds = true;
                 }
 
-                const bool hovered = ImGui::IsMouseHoveringRect(visual.min, visual.max);
+                const bool hovered = !railHovered && ImGui::IsMouseHoveringRect(visual.min, visual.max);
                 const ImVec2 leftDragDelta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
                 const bool leftClickWithoutDrag =
                     (leftDragDelta.x * leftDragDelta.x + leftDragDelta.y * leftDragDelta.y) < 36.0f;
@@ -563,81 +641,181 @@
                     pendingSelectedPid = node.pid;
                 }
 
-                ImU32 fill = node.focus ? ColorU32(ImVec4(0.090f, 0.165f, 0.245f, 1.0f)) : ColorU32(CardBg());
-                if (Core::SeverityRank(visual.displaySeverity) >= Core::SeverityRank(Core::Severity::High))
+                Core::Severity cardSeverity = visual.displaySeverity;
+                if (node.suspicious && Core::SeverityRank(cardSeverity) < Core::SeverityRank(Core::Severity::Medium))
                 {
-                    fill = node.focus ? IM_COL32(58, 38, 46, 255) : IM_COL32(46, 22, 28, 255);
+                    cardSeverity = Core::Severity::Medium;
                 }
-                else if (Core::SeverityRank(visual.displaySeverity) >= Core::SeverityRank(Core::Severity::Low))
+                const bool severityNode = Core::SeverityRank(cardSeverity) >= Core::SeverityRank(Core::Severity::Low);
+                const ImVec4 accent = severityNode
+                    ? SeverityColor(cardSeverity)
+                    : (node.inSelectedChain ? AccentBlue() : ImVec4(0.40f, 0.58f, 0.76f, 1.0f));
+                const ImVec4 selectedGlow = severityNode ? accent : AccentBlue();
+
+                ImVec4 fill = node.focus
+                    ? ImVec4(0.055f, 0.105f, 0.158f, 1.0f)
+                    : ImVec4(0.034f, 0.049f, 0.071f, 1.0f);
+                if (severityNode)
                 {
-                    fill = node.focus ? IM_COL32(58, 49, 36, 255) : IM_COL32(42, 33, 25, 255);
+                    if (Core::SeverityRank(cardSeverity) >= Core::SeverityRank(Core::Severity::High))
+                    {
+                        fill = node.focus ? ImVec4(0.156f, 0.045f, 0.055f, 1.0f) : ImVec4(0.096f, 0.030f, 0.040f, 1.0f);
+                    }
+                    else if (Core::SeverityRank(cardSeverity) >= Core::SeverityRank(Core::Severity::Medium))
+                    {
+                        fill = node.focus ? ImVec4(0.132f, 0.062f, 0.044f, 1.0f) : ImVec4(0.086f, 0.046f, 0.036f, 1.0f);
+                    }
+                    else
+                    {
+                        fill = node.focus ? ImVec4(0.105f, 0.095f, 0.050f, 1.0f) : ImVec4(0.065f, 0.062f, 0.038f, 1.0f);
+                    }
                 }
 
-                const ImU32 border = Core::SeverityRank(visual.displaySeverity) >= Core::SeverityRank(Core::Severity::Low)
-                    ? SeverityU32(visual.displaySeverity)
-                    : (node.inSelectedChain ? ColorU32(AccentBlue()) : ColorU32(PanelBorder()));
+                const ImU32 border = ColorU32(ImVec4(accent.x, accent.y, accent.z, node.focus ? 0.94f : 0.62f));
+                const float rounding = std::clamp(9.0f * nodeDrawScale, 7.0f, 10.0f);
                 if (node.focus)
                 {
                     drawList->AddRect(
-                        ImVec2(visual.min.x - 4.0f, visual.min.y - 4.0f),
-                        ImVec2(visual.max.x + 4.0f, visual.max.y + 4.0f),
-                        ColorU32(ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.68f)),
-                        9.0f,
+                        ImVec2(visual.min.x - 7.0f, visual.min.y - 7.0f),
+                        ImVec2(visual.max.x + 7.0f, visual.max.y + 7.0f),
+                        ColorU32(ImVec4(selectedGlow.x, selectedGlow.y, selectedGlow.z, 0.18f)),
+                        rounding + 4.0f,
+                        0,
+                        7.0f);
+                    drawList->AddRect(
+                        ImVec2(visual.min.x - 3.0f, visual.min.y - 3.0f),
+                        ImVec2(visual.max.x + 3.0f, visual.max.y + 3.0f),
+                        ColorU32(ImVec4(selectedGlow.x, selectedGlow.y, selectedGlow.z, 0.72f)),
+                        rounding + 2.0f,
                         0,
                         2.0f);
                 }
+                else if (severityNode)
+                {
+                    drawList->AddRect(
+                        ImVec2(visual.min.x - 3.0f, visual.min.y - 3.0f),
+                        ImVec2(visual.max.x + 3.0f, visual.max.y + 3.0f),
+                        ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.14f)),
+                        rounding + 2.0f,
+                        0,
+                        4.0f);
+                }
+
                 drawList->AddRectFilled(
-                    ImVec2(visual.min.x + 3.0f, visual.min.y + 4.0f),
-                    ImVec2(visual.max.x + 3.0f, visual.max.y + 4.0f),
-                    IM_COL32(0, 0, 0, 72),
-                    9.0f);
-                drawList->AddRectFilled(visual.min, visual.max, fill, 9.0f);
-                drawList->AddRect(visual.min, visual.max, border, 9.0f, 0, node.focus ? 3.2f : 1.8f);
+                    ImVec2(visual.min.x + 4.0f, visual.min.y + 6.0f),
+                    ImVec2(visual.max.x + 4.0f, visual.max.y + 6.0f),
+                    IM_COL32(0, 0, 0, 82),
+                    rounding);
+                drawList->AddRectFilled(visual.min, visual.max, ColorU32(fill), rounding);
+                drawList->AddRectFilledMultiColor(
+                    visual.min,
+                    ImVec2(visual.max.x, visual.min.y + std::min(20.0f, (visual.max.y - visual.min.y) * 0.45f)),
+                    ColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.055f)),
+                    ColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.028f)),
+                    ColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.0f)),
+                    ColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.0f)));
+                drawList->AddRect(visual.min, visual.max, border, rounding, 0, node.focus ? 2.4f : 1.35f);
                 drawList->AddRectFilled(
                     ImVec2(visual.min.x, visual.min.y),
-                    ImVec2(visual.min.x + 5.0f, visual.max.y),
-                    border,
-                    9.0f,
+                    ImVec2(visual.min.x + std::max(4.0f, 5.0f * nodeDrawScale), visual.max.y),
+                    ColorU32(ImVec4(accent.x, accent.y, accent.z, severityNode ? 0.88f : 0.62f)),
+                    rounding,
                     ImDrawFlags_RoundCornersLeft);
 
-                const std::string title = Shorten(DisplayName(node.name), nodeDrawScale < 0.78f ? 22 : 30);
+                const float iconSize = std::clamp(32.0f * nodeDrawScale, 24.0f, 34.0f);
+                const ImVec2 iconMin(
+                    visual.min.x + std::clamp(14.0f * nodeDrawScale, 10.0f, 15.0f),
+                    visual.min.y + ((visual.max.y - visual.min.y) - iconSize) * 0.5f);
+                const ImVec2 iconMax(iconMin.x + iconSize, iconMin.y + iconSize);
+                drawList->AddRectFilled(iconMin, iconMax, ColorU32(ImVec4(0.020f, 0.030f, 0.045f, 0.92f)), 6.0f);
+                drawList->AddRect(iconMin, iconMax, ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.42f)), 6.0f, 0, 1.0f);
+
+                const Core::ProcessInfo* nodeProcess = Core::FindProcessByPid(snapshot_, node.pid);
+                ID3D11ShaderResourceView* processIcon = nodeProcess != nullptr ? GetProcessIconTexture(*nodeProcess) : nullptr;
+                if (processIcon != nullptr)
+                {
+                    drawList->AddImage(
+                        reinterpret_cast<ImTextureID>(processIcon),
+                        ImVec2(iconMin.x + 4.0f, iconMin.y + 4.0f),
+                        ImVec2(iconMax.x - 4.0f, iconMax.y - 4.0f));
+                }
+                else
+                {
+                    const char* glyph = node.pid == 0 ? "S" : "P";
+                    const ImVec2 glyphSize = ImGui::CalcTextSize(glyph);
+                    drawList->AddText(
+                        ImVec2(
+                            iconMin.x + (iconSize - glyphSize.x) * 0.5f,
+                            iconMin.y + (iconSize - glyphSize.y) * 0.5f),
+                        ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.96f)),
+                        glyph);
+                }
+
+                const std::string displayTitle = DisplayName(node.name);
                 const std::string pidText = "PID " + std::to_string(node.pid);
-                const float leftPadding = std::max(12.0f, 18.0f * nodeDrawScale);
+                const float textX = iconMax.x + std::clamp(10.0f * nodeDrawScale, 8.0f, 12.0f);
+                const float titleY = visual.min.y + std::clamp(13.0f * nodeDrawScale, 10.0f, 14.0f);
+                const float pidY = titleY + std::clamp(22.0f * nodeDrawScale, 17.0f, 22.0f);
+                const float rightReserve = severityNode ? std::clamp(58.0f * nodeDrawScale, 44.0f, 68.0f) : 14.0f;
+                const float titleMaxWidth = std::max(24.0f, visual.max.x - rightReserve - textX);
+                const std::string title = EllipsizeToWidth(displayTitle, titleMaxWidth);
+                drawList->PushClipRect(
+                    ImVec2(textX, visual.min.y + 6.0f),
+                    ImVec2(visual.max.x - rightReserve, visual.max.y - 6.0f),
+                    true);
                 drawList->AddText(
-                    ImVec2(visual.min.x + leftPadding, visual.min.y + 15.0f * nodeDrawScale),
+                    ImVec2(textX, titleY),
                     ColorU32(PrimaryText()),
                     title.c_str());
                 drawList->AddText(
-                    ImVec2(visual.min.x + leftPadding, visual.min.y + 48.0f * nodeDrawScale),
-                    ColorU32(MutedText()),
+                    ImVec2(textX, pidY),
+                    ColorU32(ImVec4(MutedText().x + 0.08f, MutedText().y + 0.08f, MutedText().z + 0.08f, 1.0f)),
                     pidText.c_str());
+                drawList->PopClipRect();
 
-                if (Core::SeverityRank(visual.displaySeverity) >= Core::SeverityRank(Core::Severity::Low))
+                if (severityNode)
                 {
-                    const std::string severityLabel = WideToUtf8(Core::SeverityToString(visual.displaySeverity));
+                    const std::string severityLabel = WideToUtf8(Core::SeverityToString(cardSeverity));
                     const ImVec2 badgeTextSize = ImGui::CalcTextSize(severityLabel.c_str());
+                    const float badgeWidth = badgeTextSize.x + 20.0f;
                     const ImVec2 badgeMin(
-                        visual.max.x - badgeTextSize.x - 28.0f,
-                        visual.min.y + 15.0f * nodeDrawScale);
+                        visual.max.x - badgeWidth - 12.0f,
+                        visual.max.y - std::clamp(26.0f * nodeDrawScale, 22.0f, 26.0f));
                     const ImVec2 badgeMax(
                         visual.max.x - 12.0f,
-                        badgeMin.y + 24.0f);
-                    if (badgeMin.x > visual.min.x + leftPadding + 90.0f)
+                        badgeMin.y + 21.0f);
+                    drawList->AddRectFilled(
+                        badgeMin,
+                        badgeMax,
+                        ColorU32(ImVec4(0.020f, 0.025f, 0.034f, 0.86f)),
+                        5.0f);
+                    drawList->AddRect(
+                        badgeMin,
+                        badgeMax,
+                        ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.68f)),
+                        5.0f,
+                        0,
+                        1.0f);
+                    drawList->AddText(
+                        ImVec2(badgeMin.x + 10.0f, badgeMin.y + 3.0f),
+                        ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.96f)),
+                        severityLabel.c_str());
+
+                    if (Core::SeverityRank(cardSeverity) >= Core::SeverityRank(Core::Severity::Medium))
                     {
-                        drawList->AddRectFilled(badgeMin, badgeMax, IM_COL32(20, 22, 26, 180), 4.0f);
-                        drawList->AddRect(badgeMin, badgeMax, SeverityU32(visual.displaySeverity), 4.0f, 0, 1.0f);
-                        drawList->AddText(
-                            ImVec2(badgeMin.x + 8.0f, badgeMin.y + 4.0f),
-                            SeverityU32(visual.displaySeverity),
-                            severityLabel.c_str());
+                        const ImVec2 alertCenter(visual.max.x - 12.0f, visual.min.y + 12.0f);
+                        drawList->AddCircleFilled(alertCenter, 8.0f, ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.96f)), 16);
+                        drawList->AddText(ImVec2(alertCenter.x - 2.5f, alertCenter.y - 7.5f), IM_COL32(255, 255, 255, 245), "!");
                     }
                 }
                 else if (node.inSelectedChain)
                 {
+                    const char* chainLabel = "chain";
+                    const ImVec2 chainSize = ImGui::CalcTextSize(chainLabel);
                     drawList->AddText(
-                        ImVec2(visual.min.x + leftPadding, visual.min.y + 76.0f * nodeDrawScale),
-                        ColorU32(AccentBlue()),
-                        "chain");
+                        ImVec2(visual.max.x - chainSize.x - 13.0f, visual.max.y - chainSize.y - 11.0f),
+                        ColorU32(ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.84f)),
+                        chainLabel);
                 }
 
                 if (hovered)
@@ -646,10 +824,14 @@
                         visual.min,
                         visual.max,
                         ColorU32(ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.82f)),
-                        9.0f,
+                        rounding,
                         0,
-                        1.5f);
+                        1.4f);
                     ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    if (title != displayTitle)
+                    {
+                        RenderWrappedTooltip(displayTitle, 420.0f);
+                    }
                 }
             }
 
@@ -687,7 +869,7 @@
 
                     std::vector<GraphSummaryBadge> badges;
                     const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*summaryProcess);
-                    const Core::FileIdentity& fileIdentity = CachedFileIdentity(summaryProcess->executablePath);
+                    const Core::FileIdentity& fileIdentity = CachedFileIdentity(*summaryProcess);
                     const std::vector<Core::Finding>& findings =
                         FindingsForSelectedProcess(*summaryProcess, chain, fileIdentity);
 
@@ -804,6 +986,111 @@
                 {
                     ShowSelectedProcessInFilters();
                 }
+            }
+
+            auto drawRailButton = [&](const GraphRailButtonSpec& button, const ImVec2& buttonMin) {
+                const ImVec2 buttonMax(buttonMin.x + button.width, buttonMin.y + RailButtonHeight);
+                const bool hovered = canvasHovered && ImGui::IsMouseHoveringRect(buttonMin, buttonMax);
+                const bool clicked = hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+                const ImVec4 fill = hovered
+                    ? GlassHoverColor()
+                    : ImVec4(0.036f, 0.049f, 0.070f, 0.96f);
+                const ImVec4 border = hovered
+                    ? ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.78f)
+                    : ImVec4(GlassBorderColor().x, GlassBorderColor().y, GlassBorderColor().z, 0.80f);
+                drawList->AddRectFilled(buttonMin, buttonMax, ColorU32(fill), 7.0f);
+                drawList->AddRect(buttonMin, buttonMax, ColorU32(border), 7.0f, 0, hovered ? 1.4f : 1.0f);
+
+                const ImVec2 labelSize = ImGui::CalcTextSize(button.label);
+                drawList->AddText(
+                    ImVec2(
+                        buttonMin.x + (button.width - labelSize.x) * 0.5f,
+                        buttonMin.y + (RailButtonHeight - labelSize.y) * 0.5f),
+                    ColorU32(hovered ? GlassPrimaryTextColor() : GlassMutedTextColor()),
+                    button.label);
+
+                if (hovered)
+                {
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    ImGui::SetTooltip("%s", button.tooltip);
+                }
+
+                return clicked;
+            };
+
+            drawList->AddRectFilled(
+                ImVec2(railMin.x + 3.0f, railMin.y + 5.0f),
+                ImVec2(railMax.x + 3.0f, railMax.y + 5.0f),
+                IM_COL32(0, 0, 0, 92),
+                11.0f);
+            drawList->AddRectFilled(
+                railMin,
+                railMax,
+                ColorU32(ImVec4(GlassRaisedPanelBackground().x, GlassRaisedPanelBackground().y, GlassRaisedPanelBackground().z, 0.94f)),
+                11.0f);
+            drawList->AddRect(
+                railMin,
+                railMax,
+                ColorU32(ImVec4(GlassBorderColor().x, GlassBorderColor().y, GlassBorderColor().z, 0.92f)),
+                11.0f,
+                0,
+                1.1f);
+
+            ImVec2 railButtonMin(railMin.x + RailPaddingX, railMin.y + RailPaddingY);
+            const bool focusClicked = drawRailButton(railButtons[0], railButtonMin);
+            railButtonMin.x += railButtons[0].width + RailGap;
+            const bool fitClicked = drawRailButton(railButtons[1], railButtonMin);
+            railButtonMin.x += railButtons[1].width + RailGap;
+            const bool zoomOutClicked = drawRailButton(railButtons[2], railButtonMin);
+            railButtonMin.x += railButtons[2].width + RailGap;
+            const bool zoomInClicked = drawRailButton(railButtons[3], railButtonMin);
+            railButtonMin.x += railButtons[3].width + RailGap;
+            const bool resetClicked = drawRailButton(railButtons[4], railButtonMin);
+            railButtonMin.x += railButtons[4].width + RailGap;
+            const ImVec2 zoomMin(railButtonMin.x, railButtonMin.y);
+            const ImVec2 zoomMax(zoomMin.x + railZoomWidth, zoomMin.y + RailButtonHeight);
+            drawList->AddRectFilled(
+                zoomMin,
+                zoomMax,
+                ColorU32(ImVec4(0.024f, 0.034f, 0.050f, 0.92f)),
+                7.0f);
+            drawList->AddRect(
+                zoomMin,
+                zoomMax,
+                ColorU32(ImVec4(GlassBorderColor().x, GlassBorderColor().y, GlassBorderColor().z, 0.58f)),
+                7.0f,
+                0,
+                1.0f);
+            const ImVec2 zoomTextSize = ImGui::CalcTextSize(railZoomLabel.c_str());
+            drawList->AddText(
+                ImVec2(
+                    zoomMin.x + (railZoomWidth - zoomTextSize.x) * 0.5f,
+                    zoomMin.y + (RailButtonHeight - zoomTextSize.y) * 0.5f),
+                ColorU32(GlassMutedTextColor()),
+                railZoomLabel.c_str());
+
+            if (focusClicked)
+            {
+                RebuildFocusedGraph("graph-focus-rail");
+                RequestGraphFit();
+                AddLog(LogLevel::Info, "Graph focused on selected process.");
+            }
+            if (fitClicked)
+            {
+                RequestGraphFit();
+                AddLog(LogLevel::Info, "Graph fit requested.");
+            }
+            if (zoomOutClicked)
+            {
+                graphZoom_ = clampZoom(graphZoom_ * 0.86f);
+            }
+            if (zoomInClicked)
+            {
+                graphZoom_ = clampZoom(graphZoom_ * 1.16f);
+            }
+            if (resetClicked)
+            {
+                ResetGraphView();
             }
 
             drawList->PopClipRect();

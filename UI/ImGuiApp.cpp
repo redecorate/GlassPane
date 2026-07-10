@@ -28,6 +28,7 @@
 #include "../Core/TokenCollector.h"
 #include "../Export/JsonExporter.h"
 #include "../Export/MarkdownReportExporter.h"
+#include "../Export/SavedSnapshot.h"
 #include "../resource.h"
 
 #include "imgui.h"
@@ -40,24 +41,34 @@
 #include <Windows.h>
 #include <commdlg.h>
 #include <d3d11.h>
+#include <dwmapi.h>
+#include <knownfolders.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 #include <shellapi.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <cwctype>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #pragma comment(lib, "d3d11.lib")
@@ -66,6 +77,7 @@
 #pragma comment(lib, "Comdlg32.lib")
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "Windowscodecs.lib")
+#pragma comment(lib, "Dwmapi.lib")
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
@@ -76,7 +88,7 @@ namespace GlassPane::UI
         constexpr UINT WindowWidth = 1440;
         constexpr UINT WindowHeight = 900;
         constexpr std::uint32_t InvalidPid = 0;
-        constexpr const char* GlassPaneBaseVersion = "V0.5.0";
+        constexpr const char* GlassPaneBaseVersion = "V0.6.0";
 #ifdef _DEBUG
         constexpr const char* GlassPaneBuildSuffix = "-Debug";
 #else
@@ -94,6 +106,44 @@ namespace GlassPane::UI
                 height,
                 LR_DEFAULTCOLOR | LR_SHARED));
             return icon != nullptr ? icon : LoadIconW(nullptr, IDI_APPLICATION);
+        }
+
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+        constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+#endif
+#ifndef DWMWA_CAPTION_COLOR
+        constexpr DWORD DWMWA_CAPTION_COLOR = 35;
+#endif
+#ifndef DWMWA_BORDER_COLOR
+        constexpr DWORD DWMWA_BORDER_COLOR = 34;
+#endif
+
+        void ApplyDarkNativeTitleBar(HWND hwnd)
+        {
+            if (hwnd == nullptr)
+            {
+                return;
+            }
+
+            const BOOL useDarkMode = TRUE;
+            if (FAILED(DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    &useDarkMode,
+                    sizeof(useDarkMode))))
+            {
+                constexpr DWORD LegacyDarkModeAttribute = 19;
+                DwmSetWindowAttribute(
+                    hwnd,
+                    LegacyDarkModeAttribute,
+                    &useDarkMode,
+                    sizeof(useDarkMode));
+            }
+
+            const COLORREF captionColor = RGB(6, 10, 16);
+            DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &captionColor, sizeof(captionColor));
+            const COLORREF borderColor = RGB(28, 42, 60);
+            DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
         }
 
         enum class LogLevel
@@ -164,6 +214,41 @@ namespace GlassPane::UI
             Registry,
             NamedObjects,
             WithIndicators
+        };
+
+        enum class LongRunningOperationKind
+        {
+            None,
+            SaveSnapshot,
+            SaveDeepSnapshot,
+            ExportEvidencePackage,
+            UpdateIntelFeed,
+            LoadIntelFeed,
+            LoadSnapshot
+        };
+
+        struct LongOperationLog
+        {
+            LogLevel level = LogLevel::Info;
+            std::string message;
+        };
+
+        struct LongOperationResult
+        {
+            LongRunningOperationKind kind = LongRunningOperationKind::None;
+            bool success = false;
+            std::string status;
+            std::wstring outputPath;
+            std::wstring inputPath;
+            std::uint64_t elapsedMs = 0;
+            std::vector<LongOperationLog> logs;
+
+            Core::NetworkIndicatorUpdateResult networkUpdateResult;
+            Core::NetworkIndicatorLoadResult networkLoadResult;
+            bool networkUsedFallback = false;
+
+            Export::SavedSnapshotDocument loadedSnapshot;
+            bool hasLoadedSnapshot = false;
         };
 
         struct InspectorTabSpec
@@ -1045,15 +1130,9 @@ namespace GlassPane::UI
 
         bool ChipButton(const char* label, bool active, const ImVec4& accent)
         {
-            const ImVec4 inactive = CardBg();
-            ImGui::PushStyleColor(ImGuiCol_Button, active ? ImVec4(accent.x * 0.30f, accent.y * 0.30f, accent.z * 0.30f, 1.0f) : inactive);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, active ? ImVec4(accent.x * 0.40f, accent.y * 0.40f, accent.z * 0.40f, 1.0f) : PanelHover());
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, active ? ImVec4(accent.x * 0.50f, accent.y * 0.50f, accent.z * 0.50f, 1.0f) : ImVec4(0.105f, 0.155f, 0.220f, 1.0f));
-            ImGui::PushStyleColor(ImGuiCol_Border, active ? ImVec4(accent.x, accent.y, accent.z, 0.65f) : PanelBorder());
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f, 5.0f));
+            PushGlassChipStyle(active, accent);
             const bool clicked = ImGui::Button(label, ImVec2(0.0f, 29.0f));
-            ImGui::PopStyleVar();
-            ImGui::PopStyleColor();
+            PopGlassChipStyle();
             if (active)
             {
                 const ImVec2 min = ImGui::GetItemRectMin();
@@ -1065,13 +1144,12 @@ namespace GlassPane::UI
                     ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.85f)),
                     2.0f);
             }
-            ImGui::PopStyleColor(3);
             return clicked;
         }
 
         float ChipButtonWidth(const char* label)
         {
-            return ImGui::CalcTextSize(label).x + 20.0f;
+            return ImGui::CalcTextSize(label).x + 22.0f;
         }
 
         float StandardButtonWidth(const char* label)
@@ -1102,22 +1180,18 @@ namespace GlassPane::UI
 
         void BeginInspectorCard(const char* id, const char* title, ImFont* headingFont)
         {
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, CardBg());
-            ImGui::PushStyleColor(ImGuiCol_Border, PanelBorder());
+            PushGlassCardStyle();
             ImGui::BeginChild(
                 id,
                 ImVec2(0.0f, 0.0f),
                 ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY);
-            const bool pushedHeadingFont = PushFontIfAvailable(headingFont);
-            ImGui::TextColored(ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.92f), "%s", title);
-            PopFontIfPushed(pushedHeadingFont);
-            ImGui::Spacing();
+            RenderGlassSectionHeader(title, headingFont, AccentBlue());
         }
 
         void EndInspectorCard()
         {
             ImGui::EndChild();
-            ImGui::PopStyleColor(2);
+            PopGlassCardStyle();
             ImGui::Spacing();
         }
 
@@ -1197,7 +1271,7 @@ namespace GlassPane::UI
 
             hwnd_ = CreateWindowW(
                 windowClass.lpszClassName,
-                L"GlassPane - ImGui",
+                L"GlassPane",
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -1212,6 +1286,7 @@ namespace GlassPane::UI
                 UnregisterClassW(windowClass.lpszClassName, instance_);
                 return false;
             }
+            ApplyDarkNativeTitleBar(hwnd_);
             SendMessageW(hwnd_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(windowClass.hIcon));
             SendMessageW(hwnd_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(windowClass.hIconSm));
 
@@ -1341,6 +1416,7 @@ namespace GlassPane::UI
 
         void Cleanup()
         {
+            WaitForLongOperationBeforeShutdown();
             ReleasePickerCapture();
             DestroyPickWindowOverlay();
             pickWindowActive_ = false;
@@ -1380,6 +1456,580 @@ namespace GlassPane::UI
             }
         }
 
+        bool IsLongOperationActive() const
+        {
+            return longOperationRunning_.load() && !longOperationCompleted_.load();
+        }
+
+        static const char* LongOperationTitle(LongRunningOperationKind kind)
+        {
+            switch (kind)
+            {
+            case LongRunningOperationKind::SaveSnapshot:
+                return "Saving Snapshot...";
+            case LongRunningOperationKind::SaveDeepSnapshot:
+                return "Saving Deep Evidence Snapshot...";
+            case LongRunningOperationKind::ExportEvidencePackage:
+                return "Exporting Evidence Package...";
+            case LongRunningOperationKind::UpdateIntelFeed:
+                return "Updating Network Intelligence...";
+            case LongRunningOperationKind::LoadIntelFeed:
+                return "Loading Network Intelligence...";
+            case LongRunningOperationKind::LoadSnapshot:
+                return "Loading Snapshot...";
+            default:
+                return "Working...";
+            }
+        }
+
+        static const char* LongOperationStatusLabel(LongRunningOperationKind kind)
+        {
+            switch (kind)
+            {
+            case LongRunningOperationKind::SaveSnapshot:
+                return "Saving snapshot";
+            case LongRunningOperationKind::SaveDeepSnapshot:
+                return "Saving deep evidence snapshot";
+            case LongRunningOperationKind::ExportEvidencePackage:
+                return "Exporting evidence package";
+            case LongRunningOperationKind::UpdateIntelFeed:
+                return "Updating Network Intelligence";
+            case LongRunningOperationKind::LoadIntelFeed:
+                return "Loading Network Intelligence";
+            case LongRunningOperationKind::LoadSnapshot:
+                return "Loading snapshot";
+            default:
+                return "operation";
+            }
+        }
+
+        void UpdateLongOperationProgress(const std::string& status, float progress)
+        {
+            std::lock_guard<std::mutex> lock(longOperationMutex_);
+            longOperationStatus_ = status;
+            longOperationProgress_ = std::clamp(progress, 0.0f, 1.0f);
+        }
+
+        bool StartLongOperation(
+            LongRunningOperationKind kind,
+            const std::string& initialStatus,
+            std::function<LongOperationResult(std::function<void(const std::string&, float)>)> worker)
+        {
+            if (IsLongOperationActive())
+            {
+                AddLog(LogLevel::Warning, "Action ignored because another operation is already running.");
+                return false;
+            }
+
+            if (longOperationWorker_.joinable())
+            {
+                longOperationWorker_.join();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(longOperationMutex_);
+                longOperationKind_ = kind;
+                longOperationTitle_ = LongOperationTitle(kind);
+                longOperationStatus_ = initialStatus;
+                longOperationProgress_ = 0.0f;
+                longOperationResult_ = {};
+                longOperationResultVisible_ = false;
+                longOperationResultVisibleFrame_ = -1;
+                longOperationCloseClickArmed_ = false;
+            }
+
+            longOperationCompleted_.store(false);
+            longOperationRunning_.store(true);
+            longOperationWorker_ = std::thread([this, kind, worker = std::move(worker)]() mutable {
+                auto progress = [this](const std::string& status, float value) {
+                    UpdateLongOperationProgress(status, value);
+                };
+
+                LongOperationResult result;
+                result.kind = kind;
+                try
+                {
+                    result = worker(progress);
+                    result.kind = kind;
+                }
+                catch (const std::exception& ex)
+                {
+                    result.kind = kind;
+                    result.success = false;
+                    result.status = std::string("Operation failed: ") + ex.what();
+                }
+                catch (...)
+                {
+                    result.kind = kind;
+                    result.success = false;
+                    result.status = "Operation failed unexpectedly.";
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(longOperationMutex_);
+                    longOperationResult_ = std::move(result);
+                    longOperationStatus_ = longOperationResult_.status.empty()
+                        ? (longOperationResult_.success ? "Operation complete." : "Operation failed.")
+                        : longOperationResult_.status;
+                    longOperationProgress_ = 1.0f;
+                }
+                longOperationCompleted_.store(true);
+            });
+
+            return true;
+        }
+
+        void ApplyLongOperationResult(const LongOperationResult& result)
+        {
+            for (const LongOperationLog& entry : result.logs)
+            {
+                AddLog(entry.level, entry.message);
+            }
+
+            switch (result.kind)
+            {
+            case LongRunningOperationKind::SaveSnapshot:
+            case LongRunningOperationKind::SaveDeepSnapshot:
+            case LongRunningOperationKind::ExportEvidencePackage:
+                timings_.jsonExportMs = result.elapsedMs;
+                break;
+            case LongRunningOperationKind::UpdateIntelFeed:
+                networkIndicatorUpdateInProgress_ = false;
+                networkIndicatorUpdateAttempted_ = true;
+                networkIndicatorUpdateResult_ = result.networkUpdateResult;
+                if (result.networkUpdateResult.success)
+                {
+                    networkIndicatorLoadAttempted_ = true;
+                    networkIndicatorUsedFallback_ = false;
+                    networkIndicatorLoadResult_ = result.networkUpdateResult.loadResult;
+                    networkIndicatorFeed_ = networkIndicatorLoadResult_.feed;
+                    RefreshNetworkIntelMatches(true);
+                    InvalidateFindingsCache();
+                }
+                break;
+            case LongRunningOperationKind::LoadIntelFeed:
+                networkIndicatorUpdateAttempted_ = false;
+                networkIndicatorUpdateResult_ = {};
+                networkIndicatorLoadAttempted_ = true;
+                networkIndicatorUsedFallback_ = result.networkUsedFallback;
+                networkIndicatorLoadResult_ = result.networkLoadResult;
+                networkIndicatorFeed_ = networkIndicatorLoadResult_.success
+                    ? networkIndicatorLoadResult_.feed
+                    : Core::NetworkIndicatorFeed{};
+                RefreshNetworkIntelMatches(false);
+                InvalidateFindingsCache();
+                break;
+            case LongRunningOperationKind::LoadSnapshot:
+                if (result.success && result.hasLoadedSnapshot)
+                {
+                    ApplyLoadedSnapshot(result.loadedSnapshot, result.inputPath);
+                }
+                break;
+            default:
+                break;
+            }
+
+            const bool statusAlreadyLogged =
+                std::any_of(
+                    result.logs.begin(),
+                    result.logs.end(),
+                    [&result](const LongOperationLog& entry) {
+                        return entry.message == result.status ||
+                            (!result.status.empty() &&
+                                entry.message.rfind(result.status + " (", 0) == 0);
+                    });
+
+            if (!result.status.empty() && !statusAlreadyLogged)
+            {
+                AddLog(result.success ? LogLevel::Info : LogLevel::Warning, result.status);
+            }
+        }
+
+        void PollLongOperationCompletion()
+        {
+            if (!longOperationCompleted_.load())
+            {
+                return;
+            }
+
+            if (longOperationWorker_.joinable())
+            {
+                longOperationWorker_.join();
+            }
+
+            LongOperationResult result;
+            {
+                std::lock_guard<std::mutex> lock(longOperationMutex_);
+                result = std::move(longOperationResult_);
+                longOperationResult_.success = result.success;
+            }
+            ApplyLongOperationResult(result);
+            longOperationRunning_.store(false);
+            longOperationCompleted_.store(false);
+            longOperationResultVisible_ = true;
+            longOperationResultVisibleFrame_ = ImGui::GetFrameCount();
+            longOperationCloseClickArmed_ = false;
+        }
+
+        void WaitForLongOperationBeforeShutdown()
+        {
+            if (!longOperationRunning_.load() && !longOperationWorker_.joinable())
+            {
+                return;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(longOperationMutex_);
+                if (longOperationRunning_.load() && !longOperationCompleted_.load())
+                {
+                    longOperationStatus_ = "Finishing operation before shutdown...";
+                }
+            }
+            if (longOperationWorker_.joinable())
+            {
+                longOperationWorker_.join();
+            }
+            if (longOperationCompleted_.load())
+            {
+                LongOperationResult result;
+                {
+                    std::lock_guard<std::mutex> lock(longOperationMutex_);
+                    result = std::move(longOperationResult_);
+                    longOperationResult_.success = result.success;
+                }
+                ApplyLongOperationResult(result);
+            }
+            longOperationRunning_.store(false);
+            longOperationCompleted_.store(false);
+        }
+
+        void RenderLongOperationOverlay()
+        {
+            const bool active = IsLongOperationActive();
+            if (!active && !longOperationResultVisible_)
+            {
+                return;
+            }
+
+            std::string title;
+            std::string status;
+            float progress = 0.0f;
+            bool success = false;
+            LongRunningOperationKind kind = LongRunningOperationKind::None;
+            {
+                std::lock_guard<std::mutex> lock(longOperationMutex_);
+                title = longOperationTitle_.empty() ? "Working..." : longOperationTitle_;
+                status = longOperationStatus_;
+                progress = longOperationProgress_;
+                success = longOperationResult_.success;
+                kind = longOperationKind_;
+            }
+            const bool showFooter = !active && longOperationResultVisible_;
+
+            constexpr const char* PopupId = "Operation Status##GlassPaneLongOperation";
+            if (!ImGui::IsPopupOpen(PopupId))
+            {
+                ImGui::OpenPopup(PopupId);
+            }
+
+            std::string rawStatus;
+            if (status.empty())
+            {
+                rawStatus = active ? "Working..." : "Operation complete.";
+            }
+            else if (!active && success)
+            {
+                switch (kind)
+                {
+                case LongRunningOperationKind::SaveSnapshot:
+                    rawStatus = "Snapshot saved successfully.";
+                    break;
+                case LongRunningOperationKind::SaveDeepSnapshot:
+                    rawStatus = "Deep evidence snapshot saved successfully.";
+                    break;
+                case LongRunningOperationKind::ExportEvidencePackage:
+                    rawStatus = "Evidence package exported successfully.";
+                    break;
+                case LongRunningOperationKind::LoadSnapshot:
+                    rawStatus = "Snapshot loaded successfully.";
+                    break;
+                default:
+                    rawStatus = status;
+                    break;
+                }
+            }
+            else
+            {
+                rawStatus = status;
+            }
+
+            ImGuiViewport* viewport = ImGui::GetMainViewport();
+            const ImGuiStyle& style = ImGui::GetStyle();
+            constexpr float DesiredWidth = 500.0f;
+            constexpr float MinWidth = 360.0f;
+            constexpr float ViewportMargin = 48.0f;
+            constexpr float ProgressHeight = 26.0f;
+            constexpr float TitleToProgressSpacing = 12.0f;
+            constexpr float ProgressToStatusSpacing = 12.0f;
+            constexpr float StatusToFooterSpacing = 16.0f;
+            constexpr float FooterBottomPadding = 14.0f;
+            constexpr float LayoutSafetyPadding = 12.0f;
+            const ImVec2 modalPadding(16.0f, 14.0f);
+            const float maxModalWidth = std::max(260.0f, viewport->WorkSize.x - ViewportMargin);
+            const float modalMinWidth = std::min(MinWidth, maxModalWidth);
+            const float modalWidth = std::clamp(DesiredWidth, modalMinWidth, maxModalWidth);
+            const float contentWidth = std::max(1.0f, modalWidth - modalPadding.x * 2.0f);
+
+            auto fitTextToWidth = [](const std::string& value, float width) {
+                if (value.empty() || ImGui::CalcTextSize(value.c_str()).x <= width)
+                {
+                    return value;
+                }
+
+                constexpr const char* Ellipsis = "...";
+                const float ellipsisWidth = ImGui::CalcTextSize(Ellipsis).x;
+                if (ellipsisWidth >= width)
+                {
+                    return std::string(Ellipsis);
+                }
+
+                std::size_t low = 0;
+                std::size_t high = value.size();
+                while (low < high)
+                {
+                    const std::size_t mid = (low + high + 1) / 2;
+                    const std::string candidate = value.substr(0, mid) + Ellipsis;
+                    if (ImGui::CalcTextSize(candidate.c_str()).x <= width)
+                    {
+                        low = mid;
+                    }
+                    else
+                    {
+                        high = mid - 1;
+                    }
+                }
+                return value.substr(0, low) + Ellipsis;
+            };
+
+            const float spinnerWidth = active ? 28.0f : 0.0f;
+            const std::string displayTitle = fitTextToWidth(title, contentWidth);
+            const std::string displayStatus =
+                fitTextToWidth(rawStatus, std::max(1.0f, contentWidth - spinnerWidth));
+            const float titleHeight = std::max(
+                ImGui::GetTextLineHeight(),
+                ImGui::CalcTextSize(displayTitle.c_str()).y);
+            const float statusLineHeight = std::max(
+                ImGui::GetTextLineHeight(),
+                ImGui::CalcTextSize(displayStatus.c_str()).y);
+            const float statusAreaHeight =
+                std::max(statusLineHeight * 2.0f + style.ItemSpacing.y * 0.25f, 30.0f);
+            const float footerHeight = showFooter ? ImGui::GetFrameHeightWithSpacing() : 0.0f;
+            const float footerSpacing = showFooter ? StatusToFooterSpacing : 0.0f;
+            const float footerBottomPadding = showFooter ? FooterBottomPadding : 0.0f;
+            const float popupTitleBarHeight = ImGui::GetFrameHeightWithSpacing();
+            const float measuredHeight =
+                popupTitleBarHeight +
+                modalPadding.y * 2.0f +
+                titleHeight +
+                TitleToProgressSpacing +
+                ProgressHeight +
+                ProgressToStatusSpacing +
+                statusAreaHeight +
+                footerSpacing +
+                footerHeight +
+                footerBottomPadding +
+                LayoutSafetyPadding;
+            const float maxModalHeight = std::max(160.0f, viewport->WorkSize.y - ViewportMargin);
+            const float modalHeight = std::min(measuredHeight, maxModalHeight);
+            const bool needsScroll = modalHeight + 0.5f < measuredHeight;
+            const ImVec2 modalSize(modalWidth, modalHeight);
+            ImGui::SetNextWindowSize(modalSize, ImGuiCond_Always);
+            ImGui::SetNextWindowSizeConstraints(modalSize, modalSize);
+            ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg, ImVec4(0.0f, 0.0f, 0.0f, 0.58f));
+            ImGui::PushStyleColor(ImGuiCol_PopupBg, PanelBgRaised());
+            ImGui::PushStyleColor(ImGuiCol_Border, PanelBorder());
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, modalPadding);
+            ImGuiWindowFlags flags =
+                ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoCollapse;
+            if (!needsScroll)
+            {
+                flags |= ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
+            }
+#ifdef IMGUI_HAS_DOCK
+            flags |= ImGuiWindowFlags_NoDocking;
+#endif
+            const bool modalVisible = ImGui::BeginPopupModal(
+                PopupId,
+                nullptr,
+                flags);
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(3);
+
+            if (!modalVisible)
+            {
+                return;
+            }
+
+            const ImGuiViewport* overlayViewport = ImGui::GetMainViewport();
+            const ImVec2 overlayMin = overlayViewport->Pos;
+            const ImVec2 overlayMax(
+                overlayMin.x + overlayViewport->Size.x,
+                overlayMin.y + overlayViewport->Size.y);
+            const ImVec2 popupMin = ImGui::GetWindowPos();
+            const ImVec2 popupMax(
+                popupMin.x + ImGui::GetWindowSize().x,
+                popupMin.y + ImGui::GetWindowSize().y);
+            auto pointInsideOverlay = [overlayMin, overlayMax](const ImVec2& point) {
+                return point.x >= overlayMin.x &&
+                    point.x <= overlayMax.x &&
+                    point.y >= overlayMin.y &&
+                    point.y <= overlayMax.y;
+            };
+            auto pointInsidePopup = [popupMin, popupMax](const ImVec2& point) {
+                return point.x >= popupMin.x &&
+                    point.x <= popupMax.x &&
+                    point.y >= popupMin.y &&
+                    point.y <= popupMax.y;
+            };
+            if (showFooter &&
+                ImGui::GetFrameCount() > longOperationResultVisibleFrame_ &&
+                !ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                !ImGui::IsMouseReleased(ImGuiMouseButton_Left))
+            {
+                longOperationCloseClickArmed_ = true;
+            }
+
+            bool closeResultRequested = false;
+            const bool pushedTitle = PushFontIfAvailable(fonts_.bold);
+            ImGui::TextColored(
+                active || success ? AccentBlue() : SeverityColor(Core::Severity::High),
+                "%s",
+                displayTitle.c_str());
+            PopFontIfPushed(pushedTitle);
+            if (displayTitle != title && ImGui::IsItemHovered())
+            {
+                RenderWrappedTooltip(title, 520.0f);
+            }
+            ImGui::Dummy(ImVec2(0.0f, TitleToProgressSpacing));
+
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.035f, 0.049f, 0.070f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.035f, 0.049f, 0.070f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.035f, 0.049f, 0.070f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, AccentBlue());
+            ImGui::PushStyleColor(ImGuiCol_PlotHistogramHovered, AccentBlue());
+            ImGui::ProgressBar(progress, ImVec2(ImGui::GetContentRegionAvail().x, ProgressHeight));
+            ImGui::PopStyleColor(5);
+
+            ImGui::Dummy(ImVec2(0.0f, ProgressToStatusSpacing));
+            const float statusStartY = ImGui::GetCursorPosY();
+            if (active)
+            {
+                constexpr float radius = 7.0f;
+                const ImVec2 cursor = ImGui::GetCursorScreenPos();
+                const ImVec2 center(cursor.x + radius + 1.0f, cursor.y + radius + 2.0f);
+                ImDrawList* drawList = ImGui::GetWindowDrawList();
+                const float time = static_cast<float>(ImGui::GetTime());
+                constexpr int segments = 18;
+                for (int index = 0; index < segments; ++index)
+                {
+                    const float alpha = static_cast<float>(index + 1) / static_cast<float>(segments);
+                    const float angle =
+                        time * 7.5f +
+                        (static_cast<float>(index) / static_cast<float>(segments)) * 6.2831853f;
+                    const ImVec2 point(
+                        center.x + std::cos(angle) * radius,
+                        center.y + std::sin(angle) * radius);
+                    const ImVec4 accent = AccentBlue();
+                    drawList->AddCircleFilled(
+                        point,
+                        1.8f,
+                        ImGui::ColorConvertFloat4ToU32(
+                            ImVec4(accent.x, accent.y, accent.z, alpha * 0.92f)));
+                }
+                ImGui::Dummy(ImVec2(radius * 2.0f + 8.0f, radius * 2.0f + 6.0f));
+                ImGui::SameLine();
+                WrappedTextDisabled(displayStatus);
+            }
+            else
+            {
+                const ImVec4 resultColor = success
+                    ? ImVec4(AccentBlue().x, AccentBlue().y, AccentBlue().z, 0.96f)
+                    : SeverityColor(Core::Severity::High);
+                WrappedTextColored(resultColor, displayStatus);
+            }
+            if (displayStatus != rawStatus && !status.empty() && ImGui::IsItemHovered())
+            {
+                RenderWrappedTooltip(status, 520.0f);
+            }
+
+            const float statusTargetY = statusStartY + statusAreaHeight;
+            if (ImGui::GetCursorPosY() < statusTargetY)
+            {
+                ImGui::Dummy(ImVec2(0.0f, statusTargetY - ImGui::GetCursorPosY()));
+            }
+
+            if (showFooter)
+            {
+                ImGui::Dummy(ImVec2(0.0f, StatusToFooterSpacing));
+                constexpr float buttonWidth = 92.0f;
+                const float contentMinX = ImGui::GetCursorStartPos().x;
+                const float contentWidthNow = ImGui::GetContentRegionAvail().x;
+                ImGui::SetCursorPosX(contentMinX + std::max(0.0f, (contentWidthNow - buttonWidth) * 0.5f));
+                if (ImGui::Button("Close##LongOperation", ImVec2(buttonWidth, 0.0f)))
+                {
+                    closeResultRequested = true;
+                }
+                ImGui::Dummy(ImVec2(0.0f, FooterBottomPadding));
+            }
+
+            if (showFooter)
+            {
+                constexpr const char* hint = "Click anywhere to close";
+                const ImVec2 hintSize = ImGui::CalcTextSize(hint);
+                const ImVec2 hintPosition(
+                    overlayViewport->WorkPos.x + (overlayViewport->WorkSize.x - hintSize.x) * 0.5f,
+                    overlayViewport->WorkPos.y + overlayViewport->WorkSize.y - hintSize.y - 28.0f);
+                const ImVec4 muted = MutedText();
+                ImGui::GetForegroundDrawList()->AddText(
+                    hintPosition,
+                    ImGui::ColorConvertFloat4ToU32(muted),
+                    hint);
+            }
+
+            if (!closeResultRequested &&
+                showFooter &&
+                longOperationCloseClickArmed_)
+            {
+                const ImGuiIO& io = ImGui::GetIO();
+                const bool clickStartedInsideOverlay = pointInsideOverlay(io.MouseClickedPos[ImGuiMouseButton_Left]);
+                const bool clickReleasedInsideOverlay =
+                    ImGui::IsMouseReleased(ImGuiMouseButton_Left) &&
+                    pointInsideOverlay(io.MousePos);
+                const bool clickStartedInsidePopup = pointInsidePopup(io.MouseClickedPos[ImGuiMouseButton_Left]);
+                const bool clickReleasedInsidePopup = pointInsidePopup(io.MousePos);
+                if (clickStartedInsideOverlay &&
+                    clickReleasedInsideOverlay &&
+                    !clickStartedInsidePopup &&
+                    !clickReleasedInsidePopup)
+                {
+                    closeResultRequested = true;
+                }
+            }
+
+            if (closeResultRequested)
+            {
+                longOperationResultVisible_ = false;
+                longOperationResultVisibleFrame_ = -1;
+                longOperationCloseClickArmed_ = false;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::EndPopup();
+        }
+
         static std::uint64_t ElapsedMs(ULONGLONG started)
         {
             return static_cast<std::uint64_t>(GetTickCount64() - started);
@@ -1406,6 +2056,15 @@ namespace GlassPane::UI
 
         void RefreshNetwork(bool logActivity = true)
         {
+            if (loadedSnapshotActive_)
+            {
+                if (logActivity)
+                {
+                    AddLog(LogLevel::Warning, "Network refresh is unavailable while viewing a saved snapshot. Return to live view first.");
+                }
+                return;
+            }
+
             const ULONGLONG started = GetTickCount64();
             networkSnapshot_ = Core::CollectNetworkConnectionSnapshot();
             timings_.networkMs = ElapsedMs(started);
@@ -1468,11 +2127,15 @@ namespace GlassPane::UI
 
         void LoadNetworkIntelFeed()
         {
-            networkIndicatorUpdateAttempted_ = false;
-            networkIndicatorUpdateResult_ = {};
+            if (IsLongOperationActive())
+            {
+                AddLog(LogLevel::Warning, "Intel feed load ignored because another operation is running.");
+                return;
+            }
+
             const std::filesystem::path portablePath = PortableNetworkIndicatorFeedPath();
             std::filesystem::path loadPath = portablePath;
-            networkIndicatorUsedFallback_ = false;
+            bool usedFallback = false;
 
             if (!FileExists(loadPath))
             {
@@ -1480,123 +2143,172 @@ namespace GlassPane::UI
                 if (fallbackPath != portablePath && FileExists(fallbackPath))
                 {
                     loadPath = fallbackPath;
-                    networkIndicatorUsedFallback_ = true;
-                    AddLog(
-                        LogLevel::Warning,
-                        "Intel feed portable path missing; using development fallback: " +
-                            WideToUtf8(loadPath.wstring()));
+                    usedFallback = true;
                 }
             }
 
-            networkIndicatorLoadAttempted_ = true;
-            networkIndicatorLoadResult_ = Core::LoadNetworkIndicatorFeedFromFile(loadPath.wstring());
-            networkIndicatorFeed_ = networkIndicatorLoadResult_.success
-                ? networkIndicatorLoadResult_.feed
-                : Core::NetworkIndicatorFeed{};
+            AddLog(LogLevel::Info, "Intel feed load started.");
+            const std::wstring loadPathText = loadPath.wstring();
 
-            RefreshNetworkIntelMatches(false);
-            InvalidateFindingsCache();
+            StartLongOperation(
+                LongRunningOperationKind::LoadIntelFeed,
+                "Reading local indicator feed...",
+                [loadPathText, usedFallback](std::function<void(const std::string&, float)> progress) mutable {
+                    LongOperationResult result;
+                    const ULONGLONG started = GetTickCount64();
+                    result.networkUsedFallback = usedFallback;
+                    progress("Parsing local feed JSON...", 0.45f);
+                    result.networkLoadResult =
+                        Core::LoadNetworkIndicatorFeedFromFile(loadPathText);
+                    result.success = result.networkLoadResult.success;
+                    result.elapsedMs = ElapsedMs(started);
 
-            if (networkIndicatorLoadResult_.success)
-            {
-                AddLog(
-                    LogLevel::Info,
-                    std::string("Intel feed loaded ") +
-                        (networkIndicatorUsedFallback_ ? "from development fallback: " : "from portable Indicators folder: ") +
-                        std::to_string(networkIndicatorFeed_.indicators.size()) +
-                        " indicator(s).");
-            }
-            else if (networkIndicatorLoadResult_.missing)
-            {
-                AddLog(
-                    LogLevel::Warning,
-                    "Intel feed missing: Indicators/network-indicators.json next to GlassPane.exe.");
-            }
-            else
-            {
-                AddLog(
-                    LogLevel::Warning,
-                    "Intel feed error: " + WideToUtf8(networkIndicatorLoadResult_.statusMessage));
-            }
+                    if (usedFallback)
+                    {
+                        result.logs.push_back({
+                            LogLevel::Warning,
+                            "Intel feed portable path missing; using development fallback: " +
+                                WideToUtf8(loadPathText)
+                        });
+                    }
+
+                    if (result.networkLoadResult.success)
+                    {
+                        result.status =
+                            std::string("Intel feed loaded ") +
+                            (usedFallback ? "from development fallback: " : "from portable Indicators folder: ") +
+                            std::to_string(result.networkLoadResult.feed.indicators.size()) +
+                            " indicator(s).";
+                        result.logs.push_back({
+                            LogLevel::Info,
+                            result.status + " (" + std::to_string(result.elapsedMs) + " ms)."
+                        });
+                    }
+                    else if (result.networkLoadResult.missing)
+                    {
+                        result.status =
+                            "Intel feed missing: Indicators/network-indicators.json next to GlassPane.exe.";
+                        result.logs.push_back({ LogLevel::Warning, result.status });
+                    }
+                    else
+                    {
+                        result.status =
+                            "Intel feed error: " +
+                            WideToUtf8(result.networkLoadResult.statusMessage);
+                        result.logs.push_back({ LogLevel::Warning, result.status });
+                    }
+
+                    progress("Finalizing...", 0.95f);
+                    return result;
+                });
         }
 
         void UpdateNetworkIntelFeed()
         {
-            if (networkIndicatorUpdateInProgress_)
+            if (networkIndicatorUpdateInProgress_ || IsLongOperationActive())
             {
+                AddLog(LogLevel::Warning, "Network intelligence update ignored because another operation is running.");
                 return;
             }
 
             networkIndicatorUpdateInProgress_ = true;
-            struct UpdateInProgressGuard
-            {
-                bool& value;
-                ~UpdateInProgressGuard()
-                {
-                    value = false;
-                }
-            } updateInProgressGuard{ networkIndicatorUpdateInProgress_ };
             networkIndicatorUpdateAttempted_ = true;
+            networkIndicatorUpdateResult_ = {};
             AddLog(LogLevel::Info, "Network intelligence feed update started.");
 
-            networkIndicatorUpdateResult_ =
-                Core::UpdateNetworkIndicatorFeed(PortableNetworkIndicatorDirectory().wstring());
+            const std::wstring indicatorsDirectory = PortableNetworkIndicatorDirectory().wstring();
+            if (!StartLongOperation(
+                    LongRunningOperationKind::UpdateIntelFeed,
+                    "Connecting to GitHub...",
+                    [indicatorsDirectory](std::function<void(const std::string&, float)> progress) mutable {
+                        LongOperationResult result;
+                        const ULONGLONG started = GetTickCount64();
+                        result.networkUpdateResult =
+                            Core::UpdateNetworkIndicatorFeed(
+                                indicatorsDirectory,
+                                [&progress](const std::wstring& status, float value) {
+                                    progress(WideToUtf8(status), value);
+                                });
+                        result.success = result.networkUpdateResult.success;
+                        result.elapsedMs = ElapsedMs(started);
 
-            if (networkIndicatorUpdateResult_.jsonDownloaded)
-            {
-                AddLog(
-                    LogLevel::Info,
-                    "Network intelligence JSON downloaded: " +
-                        std::to_string(networkIndicatorUpdateResult_.downloadedJsonBytes) +
-                        " bytes.");
-            }
-            if (networkIndicatorUpdateResult_.shaDownloaded)
-            {
-                AddLog(
-                    LogLevel::Info,
-                    "Network intelligence checksum downloaded: " +
-                        std::to_string(networkIndicatorUpdateResult_.downloadedShaBytes) +
-                        " bytes.");
-            }
-            if (networkIndicatorUpdateResult_.checksumParsed)
-            {
-                AddLog(LogLevel::Info, "Network intelligence checksum parsed.");
-            }
+                        if (result.networkUpdateResult.jsonDownloaded)
+                        {
+                            result.logs.push_back({
+                                LogLevel::Info,
+                                "Network intelligence JSON downloaded: " +
+                                    std::to_string(result.networkUpdateResult.downloadedJsonBytes) +
+                                    " bytes."
+                            });
+                        }
+                        if (result.networkUpdateResult.shaDownloaded)
+                        {
+                            result.logs.push_back({
+                                LogLevel::Info,
+                                "Network intelligence checksum downloaded: " +
+                                    std::to_string(result.networkUpdateResult.downloadedShaBytes) +
+                                    " bytes."
+                            });
+                        }
+                        if (result.networkUpdateResult.checksumParsed)
+                        {
+                            result.logs.push_back({ LogLevel::Info, "Network intelligence checksum parsed." });
+                        }
+                        if (result.networkUpdateResult.shaVerified)
+                        {
+                            result.logs.push_back({ LogLevel::Info, "Network intelligence SHA256 verification passed." });
+                        }
+                        if (result.networkUpdateResult.jsonValidated)
+                        {
+                            result.logs.push_back({ LogLevel::Info, "Network intelligence feed JSON validation passed." });
+                        }
 
-            if (!networkIndicatorUpdateResult_.success)
+                        if (!result.networkUpdateResult.success)
+                        {
+                            result.status = WideToUtf8(
+                                result.networkUpdateResult.statusMessage.empty()
+                                    ? std::wstring(L"Update failed: network intelligence feed update failed")
+                                    : result.networkUpdateResult.statusMessage);
+                            result.logs.push_back({ LogLevel::Warning, result.status });
+                            if (!result.networkUpdateResult.detail.empty())
+                            {
+                                result.logs.push_back({
+                                    LogLevel::Warning,
+                                    WideToUtf8(result.networkUpdateResult.detail)
+                                });
+                            }
+                        }
+                        else
+                        {
+                            result.status =
+                                WideToUtf8(result.networkUpdateResult.statusMessage.empty()
+                                    ? std::wstring(L"Network Intelligence updated and verified.")
+                                    : result.networkUpdateResult.statusMessage);
+                            result.logs.push_back({
+                                LogLevel::Info,
+                                result.status + " (" + std::to_string(result.elapsedMs) + " ms)."
+                            });
+                            if (result.networkUpdateResult.cleanupWarning)
+                            {
+                                result.logs.push_back({
+                                    LogLevel::Warning,
+                                    "Intel feed update completed, but temporary cleanup was incomplete."
+                                });
+                            }
+                        }
+                        progress("Finalizing...", 0.98f);
+                        return result;
+                    }))
             {
-                AddLog(
-                    LogLevel::Warning,
-                    WideToUtf8(networkIndicatorUpdateResult_.statusMessage.empty()
-                        ? std::wstring(L"Update failed: network intelligence feed update failed")
-                        : networkIndicatorUpdateResult_.statusMessage));
-                if (!networkIndicatorUpdateResult_.detail.empty())
-                {
-                    AddLog(LogLevel::Warning, WideToUtf8(networkIndicatorUpdateResult_.detail));
-                }
-                return;
-            }
-
-            networkIndicatorLoadAttempted_ = true;
-            networkIndicatorUsedFallback_ = false;
-            networkIndicatorLoadResult_ = networkIndicatorUpdateResult_.loadResult;
-            networkIndicatorFeed_ = networkIndicatorLoadResult_.feed;
-            RefreshNetworkIntelMatches(true);
-            InvalidateFindingsCache();
-
-            AddLog(
-                LogLevel::Info,
-                WideToUtf8(networkIndicatorUpdateResult_.statusMessage));
-            if (networkIndicatorUpdateResult_.cleanupWarning)
-            {
-                AddLog(LogLevel::Warning, "Intel feed update completed, but temporary cleanup was incomplete.");
+                networkIndicatorUpdateInProgress_ = false;
             }
         }
 
         void RequestNetworkIntelFeedUpdate()
         {
-            if (networkIndicatorUpdateInProgress_)
+            if (networkIndicatorUpdateInProgress_ || IsLongOperationActive())
             {
+                AddLog(LogLevel::Warning, "Network intelligence update ignored because another operation is running.");
                 return;
             }
 
@@ -1613,8 +2325,9 @@ namespace GlassPane::UI
 
         void ConfirmNetworkIntelFeedUpdate()
         {
-            if (networkIndicatorUpdateInProgress_)
+            if (networkIndicatorUpdateInProgress_ || IsLongOperationActive())
             {
+                AddLog(LogLevel::Warning, "Network intelligence update ignored because another operation is running.");
                 return;
             }
 
@@ -1637,6 +2350,21 @@ namespace GlassPane::UI
         {
             networkIndicatorMatches_.clear();
             networkIndicatorMatchIndexesByRemote_.clear();
+            if (loadedSnapshotActive_)
+            {
+                networkIndicatorMatches_ = loadedSnapshotNetworkIndicatorMatches_;
+                for (std::size_t index = 0; index < networkIndicatorMatches_.size(); ++index)
+                {
+                    const Core::NetworkIndicatorMatch& match = networkIndicatorMatches_[index];
+                    const std::wstring normalizedRemote =
+                        Core::NormalizeIpIndicatorValue(match.connection.remoteAddress);
+                    if (!normalizedRemote.empty())
+                    {
+                        networkIndicatorMatchIndexesByRemote_[normalizedRemote].push_back(index);
+                    }
+                }
+                return;
+            }
             if (!networkLoaded_ || !networkIndicatorFeed_.loaded)
             {
                 return;
@@ -1667,6 +2395,19 @@ namespace GlassPane::UI
 
         std::wstring NetworkIntelStatusText() const
         {
+            if (loadedSnapshotActive_)
+            {
+                if (!loadedSnapshotNetworkIntel_.loaded)
+                {
+                    return L"Intel feed: not loaded in saved snapshot";
+                }
+                std::wstring status = loadedSnapshotNetworkIntel_.status.empty()
+                    ? std::wstring(L"Intel feed: saved snapshot metadata")
+                    : loadedSnapshotNetworkIntel_.status;
+                status += L"; offline saved snapshot";
+                return status;
+            }
+
             if (networkIndicatorUpdateAttempted_ && !networkIndicatorUpdateResult_.success)
             {
                 std::wstring status =
@@ -1743,6 +2484,13 @@ namespace GlassPane::UI
 
         std::wstring NetworkIntelPrimaryStatusText() const
         {
+            if (loadedSnapshotActive_)
+            {
+                return loadedSnapshotNetworkIntel_.loaded
+                    ? std::wstring(L"Intel feed: saved snapshot metadata")
+                    : std::wstring(L"Intel feed: not loaded in saved snapshot");
+            }
+
             if (networkIndicatorUpdateInProgress_)
             {
                 return L"Intel feed: updating...";
@@ -1770,6 +2518,25 @@ namespace GlassPane::UI
 
         std::wstring NetworkIntelMetadataLine() const
         {
+            if (loadedSnapshotActive_)
+            {
+                if (!loadedSnapshotNetworkIntel_.loaded)
+                {
+                    return L"Saved snapshot did not include Network Intelligence feed metadata.";
+                }
+
+                std::wstring line = loadedSnapshotNetworkIntel_.feedName.empty()
+                    ? std::wstring(L"(unnamed feed)")
+                    : loadedSnapshotNetworkIntel_.feedName;
+                line += L" | " + FormatIndicatorCount(loadedSnapshotNetworkIntel_.indicatorCount) + L" indicator";
+                line += loadedSnapshotNetworkIntel_.indicatorCount == 1 ? L"" : L"s";
+                if (!loadedSnapshotNetworkIntel_.generatedAt.empty())
+                {
+                    line += L" | generated " + CompactFeedTimestamp(loadedSnapshotNetworkIntel_.generatedAt);
+                }
+                return line;
+            }
+
             if (networkIndicatorUpdateAttempted_ && !networkIndicatorUpdateResult_.success)
             {
                 const std::wstring reason = !networkIndicatorUpdateResult_.statusMessage.empty()
@@ -1808,6 +2575,16 @@ namespace GlassPane::UI
 
         std::wstring NetworkIntelSourceLine() const
         {
+            if (loadedSnapshotActive_)
+            {
+                return loadedSnapshotNetworkIntel_.loaded
+                    ? std::wstring(L"Source: saved snapshot") +
+                        (loadedSnapshotNetworkIntel_.source.empty()
+                            ? std::wstring{}
+                            : std::wstring(L" (") + loadedSnapshotNetworkIntel_.source + L")")
+                    : std::wstring{};
+            }
+
             if (!(networkIndicatorLoadResult_.success && networkIndicatorFeed_.loaded))
             {
                 return {};
@@ -1839,7 +2616,26 @@ namespace GlassPane::UI
                 details << source << L"\n";
             }
 
-            if (networkIndicatorFeed_.loaded)
+            if (loadedSnapshotActive_ && loadedSnapshotNetworkIntel_.loaded)
+            {
+                details << L"Feed name: " <<
+                    (loadedSnapshotNetworkIntel_.feedName.empty() ? L"(unnamed feed)" : loadedSnapshotNetworkIntel_.feedName) << L"\n";
+                details << L"Schema version: " << loadedSnapshotNetworkIntel_.schemaVersion << L"\n";
+                details << L"Generated: " <<
+                    (loadedSnapshotNetworkIntel_.generatedAt.empty()
+                        ? std::wstring(L"(unknown)")
+                        : CompactFeedTimestamp(loadedSnapshotNetworkIntel_.generatedAt)) << L"\n";
+                details << L"Expires: " <<
+                    (loadedSnapshotNetworkIntel_.expiresAt.empty()
+                        ? std::wstring(L"(unknown)")
+                        : CompactFeedTimestamp(loadedSnapshotNetworkIntel_.expiresAt)) << L"\n";
+                details << L"Indicators: " << FormatIndicatorCount(loadedSnapshotNetworkIntel_.indicatorCount) << L"\n";
+                if (!loadedSnapshotNetworkIntel_.localFeedSha256.empty())
+                {
+                    details << L"Feed SHA256: " << loadedSnapshotNetworkIntel_.localFeedSha256 << L"\n";
+                }
+            }
+            else if (networkIndicatorFeed_.loaded)
             {
                 details << L"Feed name: " <<
                     (networkIndicatorFeed_.metadata.feedName.empty() ? L"(unnamed feed)" : networkIndicatorFeed_.metadata.feedName) << L"\n";
@@ -1879,8 +2675,9 @@ namespace GlassPane::UI
         void RenderNetworkIntelStatus()
         {
             const bool warningState =
-                (networkIndicatorUpdateAttempted_ && !networkIndicatorUpdateResult_.success) ||
-                (networkIndicatorLoadAttempted_ && !networkIndicatorLoadResult_.success);
+                !loadedSnapshotActive_ &&
+                ((networkIndicatorUpdateAttempted_ && !networkIndicatorUpdateResult_.success) ||
+                    (networkIndicatorLoadAttempted_ && !networkIndicatorLoadResult_.success));
             const ImVec4 statusColor = warningState
                 ? ImVec4(0.96f, 0.62f, 0.24f, 1.0f)
                 : AccentBlue();
@@ -2169,6 +2966,21 @@ namespace GlassPane::UI
             return notes;
         }
 
+        static bool IsSyntheticSystemProcessEntry(const Core::ProcessInfo& process)
+        {
+            return process.pid == 0 && process.executablePath.empty();
+        }
+
+        static const Core::FileIdentity& SyntheticSystemProcessFileIdentity()
+        {
+            static const Core::FileIdentity identity = [] {
+                Core::FileIdentity result;
+                result.path.clear();
+                return result;
+            }();
+            return identity;
+        }
+
         const Core::FileIdentity& CachedFileIdentity(const std::wstring& path)
         {
             const std::wstring key = ToLower(path);
@@ -2192,6 +3004,28 @@ namespace GlassPane::UI
                         " (" + std::to_string(timings_.fileIdentityMs) + " ms).");
             }
             return cached;
+        }
+
+        const Core::FileIdentity& CachedFileIdentity(const Core::ProcessInfo& process)
+        {
+            if (IsSyntheticSystemProcessEntry(process))
+            {
+                return SyntheticSystemProcessFileIdentity();
+            }
+
+            return CachedFileIdentity(process.executablePath);
+        }
+
+        std::vector<Core::FileIdentityIndicator> BuildProcessFileIdentityIndicators(
+            const Core::ProcessInfo& process,
+            const Core::FileIdentity& fileIdentity) const
+        {
+            if (IsSyntheticSystemProcessEntry(process))
+            {
+                return {};
+            }
+
+            return Core::BuildFileIdentityIndicators(fileIdentity, process.name, true);
         }
 
         void RenderFileIdentityFields(
@@ -2285,7 +3119,7 @@ namespace GlassPane::UI
             context.modules = modules;
             context.networkConnections = &selectedNetworkConnections;
             context.networkIndicatorMatches = &selectedNetworkIndicatorMatches;
-            context.fileIdentity = &fileIdentity;
+            context.fileIdentity = IsSyntheticSystemProcessEntry(process) ? nullptr : &fileIdentity;
             context.token = token;
             context.runtime = runtime;
             context.memory = memory;
@@ -2401,11 +3235,25 @@ namespace GlassPane::UI
             findingsCacheCreationTime_ = ProcessCacheStamp(process);
             findingsCacheValid_ = true;
 
-            AddLog(
-                selectedFindingsCache_.empty() ? LogLevel::Info : LogLevel::Warning,
-                "Triage findings recomputed for PID " + std::to_string(process.pid) +
+            if (!IsSyntheticSystemProcessEntry(process))
+            {
+                const std::string logMessage =
+                    "Triage findings recomputed for PID " + std::to_string(process.pid) +
                     ": " + std::to_string(selectedFindingsCache_.size()) +
-                    " finding(s) in " + std::to_string(timings_.findingsMs) + " ms.");
+                    " finding(s) in " + std::to_string(timings_.findingsMs) + " ms.";
+                const ULONGLONG now = GetTickCount64();
+                constexpr ULONGLONG DuplicateTriageLogWindowMs = 100;
+                const bool duplicateFromSameAction =
+                    logMessage == lastTriageRecomputeLogMessage_ &&
+                    now >= lastTriageRecomputeLogTick_ &&
+                    now - lastTriageRecomputeLogTick_ <= DuplicateTriageLogWindowMs;
+                if (!duplicateFromSameAction)
+                {
+                    AddLog(LogLevel::Info, logMessage);
+                }
+                lastTriageRecomputeLogMessage_ = logMessage;
+                lastTriageRecomputeLogTick_ = now;
+            }
             return selectedFindingsCache_;
         }
 
@@ -2443,7 +3291,7 @@ namespace GlassPane::UI
             }
 
             const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(process->executablePath);
+            const Core::FileIdentity& fileIdentity = CachedFileIdentity(*process);
             const std::vector<Core::Finding>& findings =
                 FindingsForSelectedProcess(*process, chain, fileIdentity);
             selectedHighTriage_ = !findings.empty() &&
@@ -2609,6 +3457,12 @@ namespace GlassPane::UI
 
         void RefreshSnapshot(bool refreshSelectedEvidence = false)
         {
+            if (loadedSnapshotActive_)
+            {
+                ReturnToLiveView(true);
+                return;
+            }
+
             AddLog(LogLevel::Info, "Refreshing process snapshot.");
             const std::uint32_t previousSelectedPid = selectedPid_;
             const Core::ProcessInfo* previousSelectedProcess = Core::FindProcessByPid(snapshot_, previousSelectedPid);
@@ -2675,7 +3529,7 @@ namespace GlassPane::UI
             RebuildGraphWorldLayoutIfNeeded();
             InvalidateFindingsCache();
             AddLog(
-                suspiciousCount_ == 0 ? LogLevel::Info : LogLevel::Warning,
+                snapshot_.processes.empty() ? LogLevel::Warning : LogLevel::Info,
                 "Snapshot loaded: " + std::to_string(snapshot_.processes.size()) +
                     " processes, " + std::to_string(suspiciousCount_) +
                     " suspicious in " + std::to_string(timings_.processSnapshotMs) +
@@ -2811,16 +3665,141 @@ namespace GlassPane::UI
 
         void RenderUi()
         {
+            PollLongOperationCompletion();
             RenderToolbar();
             RenderAboutPopup();
             RenderResetLayoutPopup();
             RenderNetworkIntelUpdatePopup();
+            RenderDeepEvidenceSnapshotPopup();
+            RenderLoadedSnapshotBanner();
 
 #ifdef IMGUI_HAS_DOCK
             RenderDockedWorkspace();
 #else
             RenderFixedWorkspace();
 #endif
+            GlassPane::UI::RenderAppStatusBar(BuildAppStatusBarContext());
+            RenderLongOperationOverlay();
+        }
+
+        float HeaderReservedHeight() const
+        {
+            return loadedSnapshotActive_ ? 198.0f : 108.0f;
+        }
+
+        bool LoadedSnapshotLiveActionButton(const char* label)
+        {
+            const bool operationActive = IsLongOperationActive();
+            if (!loadedSnapshotActive_ && !operationActive)
+            {
+                return ImGui::Button(label);
+            }
+
+            ImGui::BeginDisabled();
+            ImGui::Button(label);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                ImGui::SetTooltip(
+                    "%s",
+                    operationActive
+                        ? "Unavailable while an operation is running."
+                        : "Live collection is disabled while viewing a saved snapshot.");
+            }
+            return false;
+        }
+
+        void SameLineIfButtonFits(const char* label)
+        {
+            const float buttonWidth =
+                ImGui::CalcTextSize(label).x +
+                ImGui::GetStyle().FramePadding.x * 2.0f;
+            if (ImGui::GetContentRegionAvail().x > buttonWidth + ImGui::GetStyle().ItemSpacing.x)
+            {
+                ImGui::SameLine();
+            }
+        }
+
+        void RenderLoadedSnapshotBanner()
+        {
+            if (!loadedSnapshotActive_)
+            {
+                return;
+            }
+
+            const ImGuiViewport* viewport = ImGui::GetMainViewport();
+            constexpr float margin = 10.0f;
+            constexpr float headerHeight = 108.0f;
+            const ImVec2 bannerPos(viewport->WorkPos.x + margin, viewport->WorkPos.y + headerHeight + 4.0f);
+            const ImVec2 bannerSize(std::max(640.0f, viewport->WorkSize.x - margin * 2.0f), 76.0f);
+
+            ImGui::SetNextWindowPos(bannerPos, ImGuiCond_Always);
+            ImGui::SetNextWindowSize(bannerSize, ImGuiCond_Always);
+            ImGui::SetNextWindowViewport(viewport->ID);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 6.0f);
+            ImGui::PushStyleColor(ImGuiCol_WindowBg, PanelBgRaised());
+            ImGui::PushStyleColor(ImGuiCol_Border, PanelBorder());
+            ImGui::Begin(
+                "Loaded Snapshot Banner##GlassPane",
+                nullptr,
+                ImGuiWindowFlags_NoTitleBar |
+                    ImGuiWindowFlags_NoCollapse |
+                    ImGuiWindowFlags_NoResize |
+                    ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_NoSavedSettings |
+                    ImGuiWindowFlags_NoDocking);
+
+            const std::wstring capturedAt = loadedSnapshotMetadata_.capturedAt.empty()
+                ? std::wstring(L"(unknown time)")
+                : loadedSnapshotMetadata_.capturedAt;
+            const std::wstring host = loadedSnapshotMetadata_.hostname.empty()
+                ? std::wstring(L"(unknown host)")
+                : loadedSnapshotMetadata_.hostname;
+            const std::wstring summary =
+                L"Viewing saved snapshot | captured " +
+                capturedAt +
+                L" | " +
+                host +
+                L" | " +
+                std::to_wstring(snapshot_.processes.size()) +
+                L" processes";
+            ImGui::TextColored(AccentBlue(), "Saved snapshot mode");
+            ImGui::SameLine();
+            WrappedTextDisabled(summary);
+
+            ImGui::Spacing();
+            const bool operationActive = IsLongOperationActive();
+            if (operationActive)
+            {
+                ImGui::BeginDisabled();
+            }
+            if (ImGui::Button("Use as Baseline##LoadedSnapshot"))
+            {
+                UseLoadedSnapshotAsBaseline();
+            }
+            SameLineIfButtonFits("Return to Live View##LoadedSnapshot");
+            if (ImGui::Button("Return to Live View##LoadedSnapshot"))
+            {
+                ReturnToLiveView(false);
+            }
+            SameLineIfButtonFits("Refresh Live##LoadedSnapshot");
+            if (ImGui::Button("Refresh Live##LoadedSnapshot"))
+            {
+                ReturnToLiveView(true);
+            }
+            if (operationActive)
+            {
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                {
+                    ImGui::SetTooltip("Unavailable while an operation is running.");
+                }
+            }
+
+            ImGui::End();
+            ImGui::PopStyleColor(2);
+            ImGui::PopStyleVar(2);
         }
 
         void RenderFixedWorkspace()
@@ -2828,11 +3807,16 @@ namespace GlassPane::UI
             const ImGuiViewport* viewport = ImGui::GetMainViewport();
             constexpr float margin = 10.0f;
             constexpr float gap = 10.0f;
-            constexpr float headerHeight = 108.0f;
-            const float bottomHeight = std::clamp(viewport->WorkSize.y * 0.18f, 150.0f, 220.0f);
+            const float headerHeight = HeaderReservedHeight();
+            const float bottomHeight = std::clamp(
+                (viewport->WorkSize.y - AppStatusBarHeight) * 0.17f,
+                138.0f,
+                190.0f);
             const float bodyTop = headerHeight + gap;
-            const float bodyHeight = std::max(280.0f, viewport->WorkSize.y - bodyTop - bottomHeight - (margin * 2.0f));
-            const float leftWidth = std::clamp(viewport->WorkSize.x * 0.20f, 300.0f, 365.0f);
+            const float bodyHeight = std::max(
+                280.0f,
+                viewport->WorkSize.y - bodyTop - bottomHeight - AppStatusBarHeight - (margin * 2.0f));
+            const float leftWidth = std::clamp(viewport->WorkSize.x * 0.24f, 330.0f, 365.0f);
             const float rightWidth = std::clamp(viewport->WorkSize.x * 0.23f, 330.0f, 430.0f);
             const float centerWidth = std::max(420.0f, viewport->WorkSize.x - leftWidth - rightWidth - (margin * 2.0f) - (gap * 2.0f));
             const float centerX = margin + leftWidth + gap;
@@ -2858,14 +3842,14 @@ namespace GlassPane::UI
             const ImGuiViewport* viewport = ImGui::GetMainViewport();
             constexpr float margin = 10.0f;
             constexpr float gap = 10.0f;
-            constexpr float headerHeight = 108.0f;
+            const float headerHeight = HeaderReservedHeight();
             const float bodyTop = headerHeight + gap;
             const ImVec2 dockHostPos(
                 viewport->WorkPos.x + margin,
                 viewport->WorkPos.y + bodyTop);
             const ImVec2 dockHostSize(
                 std::max(640.0f, viewport->WorkSize.x - (margin * 2.0f)),
-                std::max(360.0f, viewport->WorkSize.y - bodyTop - margin));
+                std::max(360.0f, viewport->WorkSize.y - bodyTop - margin - AppStatusBarHeight));
 
             ImGui::SetNextWindowPos(dockHostPos, ImGuiCond_Always);
             ImGui::SetNextWindowSize(dockHostSize, ImGuiCond_Always);
@@ -2919,8 +3903,11 @@ namespace GlassPane::UI
             ImGuiID dockRight = 0;
             ImGuiID dockCenter = 0;
 
-            ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, 0.19f, &dockBottom, &dockMain);
-            ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, 0.17f, &dockLeft, &dockMain);
+            const float bottomRatio = std::clamp(150.0f / std::max(dockHostSize.y, 1.0f), 0.16f, 0.22f);
+            ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Down, bottomRatio, &dockBottom, &dockMain);
+            const float processPanelWidth = std::clamp(dockHostSize.x * 0.24f, 330.0f, 365.0f);
+            const float processPanelRatio = processPanelWidth / std::max(dockHostSize.x, 1.0f);
+            ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Left, processPanelRatio, &dockLeft, &dockMain);
             ImGui::DockBuilderSplitNode(dockMain, ImGuiDir_Right, 0.205f, &dockRight, &dockCenter);
 
             leftDockId_ = dockLeft;
@@ -3095,6 +4082,23 @@ namespace GlassPane::UI
             RenderNetworkIntelUpdateModal(context);
         }
 
+        void RenderDeepEvidenceSnapshotPopup()
+        {
+            DeepEvidenceSnapshotModalContext context;
+            context.popupRequested = &deepEvidenceSnapshotPopupRequested_;
+            context.openedFrame = &deepEvidenceSnapshotPopupOpenedFrame_;
+            context.titleFont = fonts_.bold;
+            context.accentColor = AccentBlue();
+            context.mutedTextColor = MutedText();
+            context.onContinue = [this]() {
+                SaveDeepEvidenceSnapshotFile();
+            };
+            context.onCancel = [this]() {
+                CancelDeepEvidenceSnapshotSave();
+            };
+            RenderDeepEvidenceSnapshotModal(context);
+        }
+
         void RenderToolbar()
         {
             HeaderPanelContext context;
@@ -3102,6 +4106,8 @@ namespace GlassPane::UI
             context.searchBuffer = searchBuffer_.data();
             context.searchBufferSize = searchBuffer_.size();
             context.pickWindowActive = pickWindowActive_;
+            context.loadedSnapshotActive = loadedSnapshotActive_;
+            context.longOperationActive = IsLongOperationActive();
             context.processCount = snapshot_.processes.size();
             context.suspiciousCount = suspiciousCount_;
             context.lastRefreshText = WideToUtf8(lastRefreshTime_);
@@ -3124,8 +4130,17 @@ namespace GlassPane::UI
             context.onPickWindow = [this]() {
                 StartPickWindowMode();
             };
-            context.onExportJson = [this]() {
-                ExportSnapshot();
+            context.onSaveSnapshot = [this]() {
+                SaveSnapshotFile();
+            };
+            context.onSaveDeepSnapshot = [this]() {
+                RequestDeepEvidenceSnapshotSave();
+            };
+            context.onLoadSnapshot = [this]() {
+                LoadSnapshotFile();
+            };
+            context.onExportEvidencePackage = [this]() {
+                ExportEvidencePackage();
             };
             context.onRefreshModules = [this]() {
                 RefreshModules();
@@ -3590,10 +4605,13 @@ namespace GlassPane::UI
             callbacks.captureCurrent = [this]() { CaptureCurrentSnapshot(); };
             callbacks.clearCompare = [this]() { ClearSnapshotCompare(); };
             callbacks.copySummary = [this]() {
-                CopyTextToClipboard(FormatCompareSummaryForClipboard());
+                CopyTextToClipboard(FormatCompareSummaryForClipboard(
+                    baselineCompareSnapshot_,
+                    currentCompareSnapshot_,
+                    compareResult_,
+                    compareResultValid_));
                 AddLog(LogLevel::Info, "Compare summary copied to clipboard.");
             };
-            callbacks.exportReport = [this]() { ExportCompareReport(); };
             callbacks.renderSummary = [this]() { RenderCompareSummary(); };
             callbacks.renderNotes = [this]() {
                 for (const std::wstring& note : compareResult_.notes)
@@ -4135,6 +5153,45 @@ namespace GlassPane::UI
             return context;
         }
 
+        AppStatusBarContext BuildAppStatusBarContext()
+        {
+            AppStatusBarContext context;
+            constexpr ImVec4 ReadyGreen(0.32f, 0.74f, 0.46f, 1.0f);
+            constexpr ImVec4 WorkingYellow(0.88f, 0.70f, 0.28f, 1.0f);
+            constexpr ImVec4 FailedRed(0.88f, 0.32f, 0.32f, 1.0f);
+
+            if (IsLongOperationActive())
+            {
+                std::lock_guard<std::mutex> lock(longOperationMutex_);
+                context.statusText = std::string("Working: ") + LongOperationStatusLabel(longOperationKind_);
+                context.indicatorColor = WorkingYellow;
+            }
+            else if (longOperationResultVisible_)
+            {
+                std::lock_guard<std::mutex> lock(longOperationMutex_);
+                const bool success = longOperationResult_.success;
+                context.statusText = std::string(success ? "Complete: " : "Failed: ") +
+                    LongOperationStatusLabel(longOperationKind_);
+                context.indicatorColor = success ? ReadyGreen : FailedRed;
+            }
+            else
+            {
+                context.statusText = "Ready";
+                context.indicatorColor = ReadyGreen;
+            }
+
+            static const std::string liveOsBuild = WideToUtf8(OsBuildText());
+            context.osBuild = loadedSnapshotActive_ && !loadedSnapshotMetadata_.osBuild.empty()
+                ? WideToUtf8(loadedSnapshotMetadata_.osBuild)
+                : liveOsBuild;
+            context.architecture = BuildArchitecture();
+            context.textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+            context.mutedTextColor = MutedText();
+            context.backgroundColor = ConsoleBg();
+            context.borderColor = PanelBorder();
+            return context;
+        }
+
         IndicatorsPanelContext BuildIndicatorsPanelContext()
         {
             IndicatorsPanelContext context;
@@ -4146,9 +5203,9 @@ namespace GlassPane::UI
 
             context.hasSelectedProcess = true;
             const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(process->executablePath);
+            const Core::FileIdentity& fileIdentity = CachedFileIdentity(*process);
             const std::vector<Core::FileIdentityIndicator> fileIdentityIndicators =
-                Core::BuildFileIdentityIndicators(fileIdentity, process->name, true);
+                BuildProcessFileIdentityIndicators(*process, fileIdentity);
 
             context.processIndicators.reserve(process->indicators.size() + fileIdentityIndicators.size());
             for (const std::wstring& indicator : process->indicators)
@@ -4366,12 +5423,22 @@ namespace GlassPane::UI
         Core::NetworkIndicatorLoadResult networkIndicatorLoadResult_;
         Core::NetworkIndicatorUpdateResult networkIndicatorUpdateResult_;
         Core::NetworkIndicatorFeed networkIndicatorFeed_;
+        Export::SavedSnapshotMetadata loadedSnapshotMetadata_;
+        Export::NetworkIntelligenceSnapshotMetadata loadedSnapshotNetworkIntel_;
+        std::vector<Export::ProcessEvidenceSnapshot> loadedSnapshotEvidence_;
+        std::unordered_map<std::uint32_t, std::size_t> loadedSnapshotEvidenceByPid_;
+        std::vector<Core::NetworkIndicatorMatch> loadedSnapshotNetworkIndicatorMatches_;
         Core::ModuleCollectionResult selectedModules_;
         Core::NetworkCollectionResult networkSnapshot_;
+        Core::ProcessSnapshot liveSnapshotBeforeLoad_;
+        Core::NetworkCollectionResult liveNetworkSnapshotBeforeLoad_;
         Core::TokenInfo selectedToken_;
         Core::RuntimeInfo selectedRuntime_;
         Core::MemoryCollectionResult selectedMemory_;
         Core::HandleCollectionResult selectedHandles_;
+        std::thread longOperationWorker_;
+        std::mutex longOperationMutex_;
+        LongOperationResult longOperationResult_;
         Core::TimelineFilter timelineFilter_ = Core::TimelineFilter::All;
         FontSet fonts_;
         std::uint32_t selectedPid_ = InvalidPid;
@@ -4387,6 +5454,7 @@ namespace GlassPane::UI
         std::uint64_t selectedRuntimeCreationTime_ = 0;
         std::uint64_t selectedMemoryCreationTime_ = 0;
         std::uint64_t selectedHandlesCreationTime_ = 0;
+        ULONGLONG lastTriageRecomputeLogTick_ = 0;
         std::uint64_t findingsCacheCreationTime_ = 0;
         std::uint64_t selectedChainCacheCreationTime_ = 0;
         std::uint64_t selectedChainCacheSnapshotGeneration_ = 0;
@@ -4418,6 +5486,14 @@ namespace GlassPane::UI
         bool networkIndicatorUpdateAttempted_ = false;
         bool networkIndicatorUsedFallback_ = false;
         bool networkIndicatorUpdateInProgress_ = false;
+        std::atomic_bool longOperationRunning_ = false;
+        std::atomic_bool longOperationCompleted_ = false;
+        bool longOperationResultVisible_ = false;
+        int longOperationResultVisibleFrame_ = -1;
+        bool longOperationCloseClickArmed_ = false;
+        bool loadedSnapshotActive_ = false;
+        bool liveSnapshotPreserved_ = false;
+        bool liveNetworkLoadedBeforeLoad_ = false;
         bool comInitialized_ = false;
         bool pickWindowActive_ = false;
         bool pickerOverlayClassRegistered_ = false;
@@ -4425,11 +5501,13 @@ namespace GlassPane::UI
         bool aboutPopupRequested_ = false;
         bool resetLayoutPopupRequested_ = false;
         bool networkIntelUpdatePopupRequested_ = false;
+        bool deepEvidenceSnapshotPopupRequested_ = false;
         bool networkIntelUpdateDoNotShowAgainChoice_ = false;
         bool networkIntelUpdateConfirmationSuppressed_ = false;
         int aboutPopupOpenedFrame_ = -1;
         int resetLayoutPopupOpenedFrame_ = -1;
         int networkIntelUpdatePopupOpenedFrame_ = -1;
+        int deepEvidenceSnapshotPopupOpenedFrame_ = -1;
         ProcessFilterMode processFilterMode_ = ProcessFilterMode::All;
         TriageFilter triageFilter_ = TriageFilter::All;
         HandleFilter handleFilter_ = HandleFilter::All;
@@ -4443,7 +5521,17 @@ namespace GlassPane::UI
         std::wstring memorySearchText_;
         std::wstring lastRefreshTime_ = L"(not refreshed)";
         std::wstring lastNetworkRefreshTime_ = L"(not refreshed)";
+        std::wstring loadedSnapshotStatus_;
+        std::wstring liveLastRefreshTimeBeforeLoad_;
+        std::wstring liveLastNetworkRefreshTimeBeforeLoad_;
+        std::string lastTriageRecomputeLogMessage_;
+        LongRunningOperationKind longOperationKind_ = LongRunningOperationKind::None;
+        std::string longOperationTitle_;
+        std::string longOperationStatus_;
+        float longOperationProgress_ = 0.0f;
         std::size_t suspiciousCount_ = 0;
+        std::size_t liveSuspiciousCountBeforeLoad_ = 0;
+        std::uint32_t liveSelectedPidBeforeLoad_ = InvalidPid;
         CollectorTimings timings_;
         bool findingsCacheValid_ = false;
         bool selectedHighTriageCacheValid_ = false;

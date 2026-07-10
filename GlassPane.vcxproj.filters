@@ -143,6 +143,9 @@
     <ClCompile Include="Export\MarkdownReportExporter.cpp">
       <Filter>Source Files\Export</Filter>
     </ClCompile>
+    <ClCompile Include="Export\SavedSnapshot.cpp">
+      <Filter>Source Files\Export</Filter>
+    </ClCompile>
     <ClCompile Include="third_party\imgui\imgui.cpp">
       <Filter>Source Files\third_party\imgui</Filter>
     </ClCompile>
@@ -293,6 +296,9 @@
       <Filter>Header Files\Export</Filter>
     </ClInclude>
     <ClInclude Include="Export\MarkdownReportExporter.h">
+      <Filter>Header Files\Export</Filter>
+    </ClInclude>
+    <ClInclude Include="Export\SavedSnapshot.h">
       <Filter>Header Files\Export</Filter>
     </ClInclude>
     <ClInclude Include="resource.h">

@@ -4,6 +4,12 @@
 
 namespace GlassPane::UI
 {
+    void PushGlassButtonStyle();
+    void PopGlassButtonStyle();
+    ImVec4 GlassCardBackground();
+    ImVec4 GlassMutedTextColor();
+    ImU32 ColorU32(const ImVec4& color);
+
     namespace
     {
         bool PushFontIfAvailable(ImFont* font)
@@ -48,48 +54,81 @@ namespace GlassPane::UI
             const ImVec4& cardBg,
             const ImVec4& borderColor)
         {
-            constexpr float cardHeight = 54.0f;
+            constexpr float cardHeight = 60.0f;
             ImGui::PushStyleColor(ImGuiCol_ChildBg, cardBg);
             ImGui::PushStyleColor(ImGuiCol_Border, borderColor);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 9.0f));
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 2.0f));
             ImGui::BeginChild(
                 label,
                 ImVec2(width, cardHeight),
                 ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            const ImVec2 cardMin = ImGui::GetWindowPos();
+            const ImVec2 cardMax(cardMin.x + ImGui::GetWindowSize().x, cardMin.y + ImGui::GetWindowSize().y);
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(cardMin.x + 9.0f, cardMin.y),
+                ImVec2(cardMax.x - 9.0f, cardMin.y + 2.0f),
+                ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.68f)),
+                2.0f);
             const float textBlockHeight = ImGui::GetTextLineHeight() * 2.0f + 4.0f;
             ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), (cardHeight - textBlockHeight) * 0.5f));
             const bool pushedLabelFont = PushFontIfAvailable(labelFont);
-            ImGui::TextDisabled("%s", label);
+            ImGui::TextColored(GlassMutedTextColor(), "%s", label);
             PopFontIfPushed(pushedLabelFont);
             const bool pushedValueFont = PushFontIfAvailable(valueFont);
-            ImGui::TextColored(accent, "%s", Shorten(value, 24).c_str());
+            ImGui::TextColored(accent, "%s", Shorten(value, 28).c_str());
             PopFontIfPushed(pushedValueFont);
             ImGui::EndChild();
-            ImGui::PopStyleVar();
+            ImGui::PopStyleVar(2);
             ImGui::PopStyleColor(2);
         }
 
         ImVec4 CardBg()
         {
-            return ImVec4(0.040f, 0.058f, 0.078f, 1.0f);
+            return GlassCardBackground();
+        }
+
+        bool ToolbarButton(const char* label, const char* tooltip, bool disabled = false, const char* disabledTooltip = nullptr)
+        {
+            if (disabled)
+            {
+                ImGui::BeginDisabled();
+            }
+            PushGlassButtonStyle();
+            const bool clicked = ImGui::Button(label, ImVec2(0.0f, 34.0f));
+            PopGlassButtonStyle();
+            if (disabled)
+            {
+                ImGui::EndDisabled();
+            }
+
+            if (disabled && disabledTooltip != nullptr && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                ImGui::SetTooltip("%s", disabledTooltip);
+            }
+            else if (!disabled && tooltip != nullptr && ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("%s", tooltip);
+            }
+            return !disabled && clicked;
         }
     }
 
     void RenderHeaderPanel(const HeaderPanelContext& context)
     {
         const ImGuiViewport* viewport = ImGui::GetMainViewport();
-        const float headerWindowWidth = std::max(viewport->WorkSize.x - 16.0f, 960.0f);
+        const float headerWindowWidth = std::max(viewport->WorkSize.x - 16.0f, 980.0f);
         ImGui::SetNextWindowPos(
             ImVec2(viewport->WorkPos.x + 8.0f, viewport->WorkPos.y + 8.0f),
             ImGuiCond_Always);
         ImGui::SetNextWindowSize(
-            ImVec2(headerWindowWidth, 96.0f),
+            ImVec2(headerWindowWidth, 104.0f),
             ImGuiCond_Always);
 
         ImGui::PushStyleColor(ImGuiCol_WindowBg, context.headerBgColor);
         ImGui::PushStyleColor(ImGuiCol_Border, context.panelBorderColor);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16.0f, 11.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18.0f, 13.0f));
         ImGuiWindowFlags headerFlags =
             ImGuiWindowFlags_NoTitleBar |
             ImGuiWindowFlags_NoCollapse |
@@ -106,12 +145,12 @@ namespace GlassPane::UI
 
         const bool narrowHeader = headerWindowWidth < 1180.0f;
         const bool compactHeader = headerWindowWidth < 1320.0f;
-        const float statsWidth = narrowHeader ? 376.0f : (compactHeader ? 456.0f : 516.0f);
-        const float brandWidth = narrowHeader ? 360.0f : (compactHeader ? 440.0f : 500.0f);
-        const float processCardWidth = narrowHeader ? 92.0f : (compactHeader ? 112.0f : 128.0f);
-        const float suspiciousCardWidth = narrowHeader ? 98.0f : (compactHeader ? 112.0f : 128.0f);
-        const float refreshCardWidth = narrowHeader ? 166.0f : (compactHeader ? 208.0f : 228.0f);
-        constexpr float rowHeight = 64.0f;
+        const float statsWidth = narrowHeader ? 396.0f : (compactHeader ? 474.0f : 534.0f);
+        const float brandWidth = narrowHeader ? 374.0f : (compactHeader ? 454.0f : 514.0f);
+        const float processCardWidth = narrowHeader ? 98.0f : (compactHeader ? 118.0f : 134.0f);
+        const float suspiciousCardWidth = narrowHeader ? 106.0f : (compactHeader ? 120.0f : 134.0f);
+        const float refreshCardWidth = narrowHeader ? 176.0f : (compactHeader ? 218.0f : 238.0f);
+        constexpr float rowHeight = 72.0f;
         const float contentTop = ImGui::GetCursorPosY();
         const float centeredRowY = contentTop + std::max(0.0f, (ImGui::GetContentRegionAvail().y - rowHeight) * 0.5f);
 
@@ -123,21 +162,31 @@ namespace GlassPane::UI
             ImGui::TableNextRow();
 
             ImGui::TableSetColumnIndex(0);
-            ImGui::SetCursorPosY(centeredRowY + 2.0f);
-            const ImVec2 brandMin = ImGui::GetCursorScreenPos();
-            constexpr float logoSize = 28.0f;
-            if (context.logoTexture != nullptr)
-            {
-                ImGui::Image(reinterpret_cast<ImTextureID>(context.logoTexture), ImVec2(logoSize, logoSize));
-                ImGui::SameLine(0.0f, 8.0f);
-            }
-            const ImVec2 titlePosition = ImGui::GetCursorScreenPos();
+            constexpr float logoSize = 30.0f;
             bool pushedTitleFont = PushFontIfAvailable(context.titleFont);
             const ImVec2 titleSize = ImGui::CalcTextSize("GlassPane");
             PopFontIfPushed(pushedTitleFont);
+
+            const bool hasLogo = context.logoTexture != nullptr;
+            constexpr float identityGap = 7.0f;
+            const float identityHeight = std::max(hasLogo ? logoSize : 0.0f, titleSize.y);
+            const float identityTopY = centeredRowY + 2.0f;
+            const ImVec2 windowPos = ImGui::GetWindowPos();
+
+            ImGui::SetCursorPosY(identityTopY);
+            const float identityStartX = ImGui::GetCursorScreenPos().x;
+            const float identityCenterY = windowPos.y + identityTopY + identityHeight * 0.5f;
+            const float titleX = identityStartX + (hasLogo ? logoSize + identityGap : 0.0f);
+            const ImVec2 brandMin(identityStartX, windowPos.y + identityTopY);
+            if (context.logoTexture != nullptr)
+            {
+                ImGui::SetCursorScreenPos(ImVec2(identityStartX, identityCenterY - logoSize * 0.5f));
+                ImGui::Image(reinterpret_cast<ImTextureID>(context.logoTexture), ImVec2(logoSize, logoSize));
+            }
+            const ImVec2 titlePosition(titleX, identityCenterY - titleSize.y * 0.5f);
             const ImVec2 brandMax(
                 titlePosition.x + titleSize.x,
-                brandMin.y + std::max(context.logoTexture != nullptr ? logoSize : 0.0f, titleSize.y));
+                brandMin.y + identityHeight);
             const bool titleHovered = ImGui::IsMouseHoveringRect(brandMin, brandMax);
             if (titleHovered)
             {
@@ -155,35 +204,90 @@ namespace GlassPane::UI
                 "GlassPane");
             PopFontIfPushed(pushedTitleFont);
             ImGui::SetCursorPosY(centeredRowY + 36.0f);
-            if (ImGui::Button("Refresh") && context.onRefresh)
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(compactHeader ? 5.0f : 7.0f, 5.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(compactHeader ? 8.0f : 10.0f, 5.0f));
+            constexpr const char* LoadedSnapshotDisabledTooltip =
+                "Unavailable while viewing a saved snapshot. Return to Live View to refresh live endpoint data.";
+            constexpr const char* LongOperationDisabledTooltip =
+                "Unavailable while an operation is running.";
+            const char* liveActionDisabledTooltip =
+                context.longOperationActive ? LongOperationDisabledTooltip : LoadedSnapshotDisabledTooltip;
+            const bool liveActionDisabled = context.loadedSnapshotActive || context.longOperationActive;
+            if (ToolbarButton(
+                    "Refresh##HeaderRefresh",
+                    "Refresh live process snapshot",
+                    liveActionDisabled,
+                    liveActionDisabledTooltip) && context.onRefresh)
             {
                 context.onRefresh();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Pick Window") && context.onPickWindow)
+            if (ToolbarButton(
+                    "Pick##HeaderPickWindow",
+                    "Pick Window",
+                    liveActionDisabled,
+                    liveActionDisabledTooltip) && context.onPickWindow)
             {
                 context.onPickWindow();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Export JSON") && context.onExportJson)
+            if (ToolbarButton(
+                    "Evidence##HeaderEvidence",
+                    "Snapshot and evidence package actions",
+                    context.longOperationActive,
+                    LongOperationDisabledTooltip))
             {
-                context.onExportJson();
+                ImGui::OpenPopup("EvidenceMenu##Header");
+            }
+            if (ImGui::BeginPopup("EvidenceMenu##Header"))
+            {
+                if (ImGui::MenuItem("Save Snapshot") && context.onSaveSnapshot)
+                {
+                    ImGui::CloseCurrentPopup();
+                    context.onSaveSnapshot();
+                }
+                if (ImGui::MenuItem("Save Deep Evidence Snapshot") && context.onSaveDeepSnapshot)
+                {
+                    ImGui::CloseCurrentPopup();
+                    context.onSaveDeepSnapshot();
+                }
+                if (ImGui::MenuItem("Load Snapshot") && context.onLoadSnapshot)
+                {
+                    ImGui::CloseCurrentPopup();
+                    context.onLoadSnapshot();
+                }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Export Evidence Package") && context.onExportEvidencePackage)
+                {
+                    ImGui::CloseCurrentPopup();
+                    context.onExportEvidencePackage();
+                }
+                ImGui::EndPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Refresh Modules") && context.onRefreshModules)
+            if (ToolbarButton(
+                    "Modules##HeaderRefreshModules",
+                    "Refresh Modules",
+                    liveActionDisabled,
+                    liveActionDisabledTooltip) && context.onRefreshModules)
             {
                 context.onRefreshModules();
             }
 #ifdef IMGUI_HAS_DOCK
             ImGui::SameLine();
-            if (ImGui::Button("Reset Layout") && context.onResetLayout)
+            if (ToolbarButton(
+                    "Layout##HeaderResetLayout",
+                    "Reset Layout",
+                    context.longOperationActive,
+                    LongOperationDisabledTooltip) && context.onResetLayout)
             {
                 context.onResetLayout();
             }
 #endif
+            ImGui::PopStyleVar(2);
 
             ImGui::TableSetColumnIndex(1);
-            ImGui::SetCursorPosY(centeredRowY + 21.0f);
+            ImGui::SetCursorPosY(centeredRowY + 24.0f);
             const float controlsAvail = ImGui::GetContentRegionAvail().x;
             const float minSearchWidth = narrowHeader ? 160.0f : (compactHeader ? 220.0f : 260.0f);
             const float maxSearchWidth = narrowHeader ? 240.0f : (compactHeader ? 360.0f : 460.0f);
@@ -195,6 +299,8 @@ namespace GlassPane::UI
             const float centeredControlsX = ImGui::GetCursorPosX() + std::max(0.0f, (controlsAvail - controlsWidth) * 0.5f);
             ImGui::SetCursorPosX(centeredControlsX);
             ImGui::BeginGroup();
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(11.0f, 6.0f));
+            ImGui::AlignTextToFramePadding();
             ImGui::TextColored(context.mutedTextColor, "Search");
             ImGui::SameLine();
             ImGui::SetNextItemWidth(searchWidth);
@@ -211,12 +317,13 @@ namespace GlassPane::UI
                     context.onSearchChanged(context.searchBuffer);
                 }
             }
+            ImGui::PopStyleVar();
             ImGui::EndGroup();
 
             if (context.pickWindowActive)
             {
                 ImGui::SetCursorPosX(centeredControlsX);
-                ImGui::SetCursorPosY(centeredRowY + 52.0f);
+                ImGui::SetCursorPosY(centeredRowY + 58.0f);
                 const bool pushedPickerFont = PushFontIfAvailable(context.smallUiFont);
                 ImGui::TextColored(
                     ImVec4(context.accentColor.x, context.accentColor.y, context.accentColor.z, 0.95f),
@@ -225,7 +332,7 @@ namespace GlassPane::UI
             }
 
             ImGui::TableSetColumnIndex(2);
-            ImGui::SetCursorPosY(centeredRowY + 5.0f);
+            ImGui::SetCursorPosY(centeredRowY + 4.0f);
             StatCard(
                 "Processes",
                 std::to_string(context.processCount),
@@ -235,7 +342,7 @@ namespace GlassPane::UI
                 context.boldFont,
                 CardBg(),
                 ImVec4(context.accentColor.x, context.accentColor.y, context.accentColor.z, 0.20f));
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             StatCard(
                 "Suspicious",
                 std::to_string(context.suspiciousCount),
@@ -245,7 +352,7 @@ namespace GlassPane::UI
                 context.boldFont,
                 CardBg(),
                 ImVec4(context.highSeverityColor.x, context.highSeverityColor.y, context.highSeverityColor.z, 0.20f));
-            ImGui::SameLine();
+            ImGui::SameLine(0.0f, 8.0f);
             StatCard(
                 "Last refresh",
                 context.lastRefreshText,

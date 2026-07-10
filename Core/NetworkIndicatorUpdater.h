@@ -3,6 +3,7 @@
 #include "NetworkIndicatorFeed.h"
 
 #include <cstddef>
+#include <functional>
 #include <string>
 
 namespace GlassPane::Core
@@ -34,4 +35,8 @@ namespace GlassPane::Core
 
     NetworkIndicatorUpdateResult UpdateNetworkIndicatorFeed(
         const std::wstring& indicatorsDirectory);
+
+    NetworkIndicatorUpdateResult UpdateNetworkIndicatorFeed(
+        const std::wstring& indicatorsDirectory,
+        const std::function<void(const std::wstring&, float)>& progress);
 }

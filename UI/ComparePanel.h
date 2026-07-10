@@ -31,7 +31,6 @@ namespace GlassPane::UI
         std::function<void()> captureCurrent;
         std::function<void()> clearCompare;
         std::function<void()> copySummary;
-        std::function<void()> exportReport;
         std::function<void()> renderSummary;
         std::function<void()> renderNotes;
         std::function<void()> renderNewProcesses;

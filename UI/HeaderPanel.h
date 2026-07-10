@@ -16,6 +16,8 @@ namespace GlassPane::UI
         char* searchBuffer = nullptr;
         std::size_t searchBufferSize = 0;
         bool pickWindowActive = false;
+        bool loadedSnapshotActive = false;
+        bool longOperationActive = false;
         std::size_t processCount = 0;
         std::size_t suspiciousCount = 0;
         std::string lastRefreshText;
@@ -35,7 +37,10 @@ namespace GlassPane::UI
         std::function<void()> onAbout;
         std::function<void()> onRefresh;
         std::function<void()> onPickWindow;
-        std::function<void()> onExportJson;
+        std::function<void()> onSaveSnapshot;
+        std::function<void()> onSaveDeepSnapshot;
+        std::function<void()> onLoadSnapshot;
+        std::function<void()> onExportEvidencePackage;
         std::function<void()> onRefreshModules;
         std::function<void()> onResetLayout;
         std::function<void(const char*)> onSearchChanged;

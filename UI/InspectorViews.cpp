@@ -2,55 +2,335 @@
 // This file is intentionally included inside the ImGuiApp class definition so
 // inspector rendering can move out of ImGuiApp.cpp without moving state ownership.
 
+        Core::Severity TriageSeverityForFindings(const std::vector<Core::Finding>& findings)
+        {
+            return findings.empty()
+                ? Core::Severity::None
+                : FindingSeverityAsCoreSeverity(Core::HighestFindingSeverity(findings));
+        }
+
+        std::wstring InspectorProcessName(const Core::ProcessInfo& process)
+        {
+            return process.name.empty() ? L"(unknown process)" : process.name;
+        }
+
+        std::wstring InspectorFindingCountText(std::size_t findingCount)
+        {
+            return std::to_wstring(findingCount) + (findingCount == 1 ? L" finding" : L" findings");
+        }
+
+        static int CompareInspectorTextCaseInsensitive(const std::wstring& left, const std::wstring& right)
+        {
+            const int result = CompareStringOrdinal(
+                left.c_str(),
+                static_cast<int>(left.size()),
+                right.c_str(),
+                static_cast<int>(right.size()),
+                TRUE);
+            if (result == CSTR_LESS_THAN)
+            {
+                return -1;
+            }
+            if (result == CSTR_GREATER_THAN)
+            {
+                return 1;
+            }
+            if (result == CSTR_EQUAL)
+            {
+                return 0;
+            }
+            return left.compare(right);
+        }
+
+        static int CompareInspectorUnsigned(std::uint64_t left, std::uint64_t right)
+        {
+            return left < right ? -1 : (left > right ? 1 : 0);
+        }
+
+        static int CompareInspectorSigned(std::int64_t left, std::int64_t right)
+        {
+            return left < right ? -1 : (left > right ? 1 : 0);
+        }
+
+        static std::uint64_t InspectorNumericAddress(const std::wstring& value)
+        {
+            if (value.empty())
+            {
+                return 0;
+            }
+
+            wchar_t* end = nullptr;
+            const std::uint64_t parsed = std::wcstoull(value.c_str(), &end, 0);
+            if (end != value.c_str())
+            {
+                return parsed;
+            }
+            return std::wcstoull(value.c_str(), nullptr, 16);
+        }
+
+        static std::vector<std::size_t> NaturalInspectorIndexView(std::size_t count)
+        {
+            std::vector<std::size_t> indexes;
+            indexes.reserve(count);
+            for (std::size_t index = 0; index < count; ++index)
+            {
+                indexes.push_back(index);
+            }
+            return indexes;
+        }
+
+        template <typename Comparator>
+        static void SortInspectorIndexView(
+            std::vector<std::size_t>& indexes,
+            ImGuiTableSortSpecs* sortSpecs,
+            Comparator compare)
+        {
+            if (sortSpecs == nullptr || sortSpecs->SpecsCount == 0)
+            {
+                return;
+            }
+
+            const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
+            const bool descending = spec.SortDirection == ImGuiSortDirection_Descending;
+            std::stable_sort(indexes.begin(), indexes.end(), [&](std::size_t left, std::size_t right) {
+                const int result = compare(left, right, spec.ColumnIndex);
+                if (result == 0)
+                {
+                    return false;
+                }
+                return descending ? result > 0 : result < 0;
+            });
+            sortSpecs->SpecsDirty = false;
+        }
+
+        static bool IsExistingInspectorPath(const std::wstring& value, bool& isDirectory)
+        {
+            isDirectory = false;
+            if (value.empty() || value.find(L'\"') != std::wstring::npos)
+            {
+                return false;
+            }
+            for (wchar_t character : value)
+            {
+                if (character < 32)
+                {
+                    return false;
+                }
+            }
+
+            const std::filesystem::path path(value);
+            if (!path.is_absolute())
+            {
+                return false;
+            }
+
+            std::error_code error;
+            const std::filesystem::file_status status = std::filesystem::status(path, error);
+            if (error || !std::filesystem::exists(status))
+            {
+                return false;
+            }
+            isDirectory = std::filesystem::is_directory(status);
+            return true;
+        }
+
+        bool OpenInspectorPathLocation(const std::wstring& path, bool isDirectory)
+        {
+            HINSTANCE result = nullptr;
+            if (isDirectory)
+            {
+                result = ShellExecuteW(hwnd_, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+            else
+            {
+                const std::wstring parameters = L"/select,\"" + path + L"\"";
+                result = ShellExecuteW(hwnd_, L"open", L"explorer.exe", parameters.c_str(), nullptr, SW_SHOWNORMAL);
+            }
+            return reinterpret_cast<INT_PTR>(result) > 32;
+        }
+
+        void RenderInspectorValueContextMenu(
+            const char* popupId,
+            const std::wstring& copyValue,
+            bool openRequested,
+            const std::wstring* fileSystemPath = nullptr)
+        {
+            if (openRequested)
+            {
+                ImGui::OpenPopup(popupId);
+            }
+            if (!ImGui::BeginPopup(popupId))
+            {
+                return;
+            }
+
+            const bool pushedMenuFont = PushFontIfAvailable(fonts_.ui);
+            if (ImGui::MenuItem("Copy value"))
+            {
+                CopyTextToClipboard(copyValue);
+            }
+
+            bool isDirectory = false;
+            if (fileSystemPath != nullptr && IsExistingInspectorPath(*fileSystemPath, isDirectory))
+            {
+                ImGui::Separator();
+                if (ImGui::MenuItem("Open file location"))
+                {
+                    if (OpenInspectorPathLocation(*fileSystemPath, isDirectory))
+                    {
+                        AddLog(LogLevel::Info, "Opened file location in Windows Explorer.");
+                    }
+                    else
+                    {
+                        AddLog(LogLevel::Warning, "Could not open file location in Windows Explorer.");
+                    }
+                }
+            }
+
+            PopFontIfPushed(pushedMenuFont);
+            ImGui::EndPopup();
+        }
+
+        void RenderInspectorClippedValue(
+            const char* popupId,
+            const std::wstring& displayValue,
+            const std::wstring* fileSystemPath = nullptr,
+            float tooltipWidth = 600.0f)
+        {
+            ImGui::TextUnformatted(WideToUtf8(displayValue).c_str());
+            const bool hovered = ImGui::IsItemHovered();
+            if (hovered)
+            {
+                RenderWrappedTooltip(displayValue, tooltipWidth);
+            }
+            RenderInspectorValueContextMenu(
+                popupId,
+                displayValue,
+                hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right),
+                fileSystemPath);
+        }
+
+        float InspectorSummaryChipWidth(const char* label, const std::wstring& value)
+        {
+            const std::string chipText = std::string(label) + ": " + WideToUtf8(value);
+            return ImGui::CalcTextSize(chipText.c_str()).x + 20.0f;
+        }
+
+        void InspectorSummaryChip(const char* id, const char* label, const std::wstring& value, const ImVec4& accent)
+        {
+            ImGui::PushID(id);
+            const std::string chipText = std::string(label) + ": " + WideToUtf8(value);
+            const ImVec2 textSize = ImGui::CalcTextSize(chipText.c_str());
+            const ImVec2 min = ImGui::GetCursorScreenPos();
+            const ImVec2 max(min.x + textSize.x + 20.0f, min.y + textSize.y + 10.0f);
+            ImDrawList* drawList = ImGui::GetWindowDrawList();
+            const ImVec4 base = GlassRaisedPanelBackground();
+            drawList->AddRectFilled(min, max, ColorU32(base), 5.0f);
+            drawList->AddRect(min, max, ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.58f)), 5.0f, 0, 1.2f);
+            drawList->AddText(ImVec2(min.x + 10.0f, min.y + 5.0f), ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.96f)), chipText.c_str());
+            ImGui::Dummy(ImVec2(textSize.x + 20.0f, textSize.y + 10.0f));
+            ImGui::PopID();
+        }
+
+        void RenderInspectorProcessIcon(const Core::ProcessInfo& process, float size)
+        {
+            ID3D11ShaderResourceView* processIcon = GetProcessIconTexture(process);
+            if (processIcon != nullptr)
+            {
+                ImGui::Image(reinterpret_cast<ImTextureID>(processIcon), ImVec2(size, size));
+                return;
+            }
+
+            const ImVec2 iconMin = ImGui::GetCursorScreenPos();
+            const ImVec2 iconMax(iconMin.x + size, iconMin.y + size);
+            ImGui::GetWindowDrawList()->AddRectFilled(iconMin, iconMax, ColorU32(PanelBgRaised()), 6.0f);
+            ImGui::GetWindowDrawList()->AddRect(iconMin, iconMax, ColorU32(AccentBlue()), 6.0f, 0, 1.1f);
+            ImGui::Dummy(ImVec2(size, size));
+        }
+
         void RenderTriagePanel()
         {
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review triage findings.");
                 return;
             }
 
             const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(process->executablePath);
+            Core::FileIdentity loadedSnapshotFileIdentity;
+            const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
+                ? loadedSnapshotFileIdentity
+                : CachedFileIdentity(*process);
             const std::vector<Core::Finding>& findings =
                 FindingsForSelectedProcess(*process, chain, fileIdentity);
             const std::wstring triageSummary = Core::TriageSummary(findings);
+            const Core::Severity verdictColorSeverity = TriageSeverityForFindings(findings);
 
             BeginInspectorCard("triage_summary", "Triage Summary", fonts_.bold);
-            ImGui::TextDisabled("Selected Process");
-            ImGui::SameLine(145.0f);
-            TextWide((process->name.empty() ? L"(unknown)" : process->name) + L"  PID " + std::to_wstring(process->pid));
-            ImGui::TextDisabled("Triage Verdict");
-            ImGui::SameLine(145.0f);
-            const Core::Severity verdictColorSeverity = findings.empty()
-                ? Core::Severity::None
-                : FindingSeverityAsCoreSeverity(Core::HighestFindingSeverity(findings));
-            ImGui::TextColored(SeverityColor(verdictColorSeverity), "%s", WideToUtf8(triageSummary).c_str());
-            ImGui::TextDisabled("Highest Severity");
-            ImGui::SameLine(145.0f);
-            if (findings.empty())
+
+            RenderInspectorProcessIcon(*process, 42.0f);
+            ImGui::SameLine(0.0f, 12.0f);
+            ImGui::BeginGroup();
+            const bool pushedSummaryTitleFont = PushFontIfAvailable(fonts_.title);
+            ClippedTextWithTooltip(InspectorProcessName(*process));
+            PopFontIfPushed(pushedSummaryTitleFont);
+
+            const bool pushedSummaryPidFont = PushFontIfAvailable(fonts_.monospace);
+            ImGui::TextDisabled("PID %u  |  PPID %u", process->pid, process->parentPid);
+            PopFontIfPushed(pushedSummaryPidFont);
+            ImGui::EndGroup();
+
+            ImGui::Spacing();
+            InspectorSummaryChip("triage_verdict_chip", "Triage", triageSummary, SeverityColor(verdictColorSeverity));
+            SameLineIfFits(InspectorSummaryChipWidth("Findings", InspectorFindingCountText(findings.size())), 6.0f);
+            InspectorSummaryChip(
+                "triage_finding_count_chip",
+                "Findings",
+                InspectorFindingCountText(findings.size()),
+                findings.empty() ? MutedText() : SeverityColor(verdictColorSeverity));
+
+            ImGui::Spacing();
+            if (!process->executablePath.empty())
             {
-                ImGui::TextDisabled("None");
+                const bool pushedSummaryPathFont = PushFontIfAvailable(fonts_.monospace);
+                RenderInspectorClippedValue(
+                    "TriageExecutablePathValueContext",
+                    process->executablePath,
+                    &process->executablePath);
+                PopFontIfPushed(pushedSummaryPathFont);
+            }
+            else if (process->pid == 0)
+            {
+                WrappedTextDisabled("System process entry has no executable path.");
             }
             else
             {
-                SeverityText(FindingSeverityAsCoreSeverity(Core::HighestFindingSeverity(findings)));
+                WrappedTextDisabled("Executable path unavailable.");
             }
-            LabelValue("Finding Count", std::to_wstring(findings.size()));
+
             ImGui::Spacing();
             if (ImGui::SmallButton("Copy Triage Summary"))
             {
                 CopyTextToClipboard(FormatTriageSummaryForClipboard(*process, findings));
                 AddLog(LogLevel::Info, "Copied triage summary to clipboard.");
             }
-            ImGui::SameLine();
+            SameLineIfFits(StandardButtonWidth("Copy All Findings"), 6.0f);
+            if (findings.empty())
+            {
+                ImGui::BeginDisabled();
+            }
             if (ImGui::SmallButton("Copy All Findings"))
             {
                 CopyTextToClipboard(FormatFindingsForClipboard(*process, findings));
                 AddLog(LogLevel::Info, "Copied all triage findings to clipboard.");
             }
-            ImGui::SameLine();
+            if (findings.empty())
+            {
+                ImGui::EndDisabled();
+                RenderDisabledReasonTooltip("No findings are available to copy for this process.");
+            }
+            SameLineIfFits(StandardButtonWidth("Export Report"), 6.0f);
             if (ImGui::SmallButton("Export Report"))
             {
                 ExportSelectedMarkdownReport();
@@ -88,8 +368,9 @@
             if (findings.empty())
             {
                 BeginInspectorCard("triage_clean", "Findings", fonts_.bold);
-                WrappedTextDisabled("No triage findings for this process.");
-                WrappedTextDisabled("Review details, modules, network, and chain context for raw evidence.");
+                RenderEmptyState(
+                    "No findings are available for the selected process.",
+                    "Review process, module, network, and chain context as needed.");
                 EndInspectorCard();
                 return;
             }
@@ -148,8 +429,9 @@
             if (visibleFindings == 0)
             {
                 BeginInspectorCard("triage_filter_empty", "Findings", fonts_.bold);
-                WrappedTextDisabled("No findings match the current triage filter.");
-                WrappedTextDisabled("Current filter: " + WideToUtf8(TriageFilterLabel(triageFilter_)));
+                const std::string filterDetail =
+                    "Current filter: " + WideToUtf8(TriageFilterLabel(triageFilter_));
+                RenderEmptyState("No findings match the current filter.", filterDetail.c_str());
                 EndInspectorCard();
             }
         }
@@ -159,7 +441,7 @@
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review its details.");
                 return;
             }
 
@@ -171,9 +453,14 @@
                     : nullptr;
             const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
             const NetworkSummary networkSummary = GetNetworkSummary(process->pid);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(process->executablePath);
+            Core::FileIdentity loadedSnapshotFileIdentity;
+            const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
+                ? loadedSnapshotFileIdentity
+                : CachedFileIdentity(*process);
             const std::vector<Core::FileIdentityIndicator> fileIdentityIndicators =
-                Core::BuildFileIdentityIndicators(fileIdentity, process->name, true);
+                loadedSnapshotActive_
+                    ? std::vector<Core::FileIdentityIndicator>{}
+                    : BuildProcessFileIdentityIndicators(*process, fileIdentity);
             const std::vector<Core::Finding>& findings =
                 FindingsForSelectedProcess(*process, chain, fileIdentity);
             if (!ProcessMatchesFilters(*process))
@@ -209,7 +496,7 @@
 
             ImGui::BeginGroup();
             const bool pushedProcessTitleFont = PushFontIfAvailable(fonts_.title);
-            TextWide(process->name.empty() ? L"(unknown process)" : process->name);
+            ClippedTextWithTooltip(InspectorProcessName(*process));
             PopFontIfPushed(pushedProcessTitleFont);
             ImGui::TextDisabled("Triage");
             ImGui::SameLine(82.0f);
@@ -242,6 +529,11 @@
                 ImGui::Spacing();
                 const bool pushedPathFont = PushFontIfAvailable(fonts_.monospace);
                 WrappedTextDisabled(process->executablePath);
+                RenderInspectorValueContextMenu(
+                    "DetailsHeaderExecutablePathValueContext",
+                    process->executablePath,
+                    ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right),
+                    &process->executablePath);
                 PopFontIfPushed(pushedPathFont);
             }
             ImGui::EndChild();
@@ -268,20 +560,47 @@
             LabelValue("Start Time", process->hasCreationTime ? process->creationTimeLocal : L"(not accessible)");
             ImGui::TextDisabled("Executable Path");
             ImGui::SameLine();
+            const bool executablePathAvailable = !process->executablePath.empty();
+            if (!executablePathAvailable)
+            {
+                ImGui::BeginDisabled();
+            }
             if (ImGui::SmallButton("Copy Path"))
             {
                 CopyTextToClipboard(process->executablePath);
                 AddLog(LogLevel::Info, "Copied executable path to clipboard.");
             }
+            if (!executablePathAvailable)
+            {
+                ImGui::EndDisabled();
+                RenderDisabledReasonTooltip("The executable path is unavailable for this process.");
+            }
             const bool pushedExecutionPathFont = PushFontIfAvailable(fonts_.monospace);
-            WrappedTextWide(process->executablePath.empty() ? L"(not accessible)" : process->executablePath);
+            const std::wstring executablePath =
+                process->executablePath.empty() ? L"(not accessible)" : process->executablePath;
+            WrappedTextWide(executablePath);
+            RenderInspectorValueContextMenu(
+                "DetailsExecutablePathValueContext",
+                executablePath,
+                ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right),
+                process->executablePath.empty() ? nullptr : &process->executablePath);
             PopFontIfPushed(pushedExecutionPathFont);
             ImGui::TextDisabled("Command Line");
             ImGui::SameLine();
+            const bool commandLineAvailable = process->commandLineAccessible && !process->commandLine.empty();
+            if (!commandLineAvailable)
+            {
+                ImGui::BeginDisabled();
+            }
             if (ImGui::SmallButton("Copy Command"))
             {
                 CopyTextToClipboard(process->commandLine);
                 AddLog(LogLevel::Info, "Copied command line to clipboard.");
+            }
+            if (!commandLineAvailable)
+            {
+                ImGui::EndDisabled();
+                RenderDisabledReasonTooltip("The command line is unavailable for this process.");
             }
             if (!process->commandLineAccessible)
             {
@@ -322,7 +641,7 @@
             const std::vector<std::wstring> networkIndicators = BuildNetworkIndicators(*process, networkSummary);
             if (process->indicators.empty() && networkIndicators.empty() && fileIdentityIndicators.empty())
             {
-                ImGui::TextDisabled("No process indicators.");
+                RenderEmptyState("No process indicators are available.");
             }
             else
             {
@@ -353,7 +672,7 @@
             const std::vector<std::wstring> networkContextNotes = BuildNetworkContextNotes(*process, chain, networkSummary);
             if (process->contextNotes.empty() && networkContextNotes.empty())
             {
-                ImGui::TextDisabled("No context notes.");
+                RenderEmptyState("No context notes are available.");
             }
             else
             {
@@ -378,7 +697,7 @@
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review its process chain.");
                 return;
             }
 
@@ -422,7 +741,7 @@
             ImGui::SeparatorText("Chain Indicators");
             if (chain.chainIndicators.empty())
             {
-                ImGui::TextDisabled("No chain indicators.");
+                RenderEmptyState("No chain indicators are available.");
             }
             else
             {
@@ -440,7 +759,7 @@
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review module information.");
                 return;
             }
 
@@ -453,7 +772,7 @@
             PopFontIfPushed(pushedModulePidFont);
 
             ImGui::Separator();
-            if (ImGui::Button("Refresh Modules"))
+            if (LoadedSnapshotLiveActionButton("Refresh Modules"))
             {
                 RefreshModules();
             }
@@ -466,18 +785,24 @@
             if (!ModulesLoadedForProcess(*process))
             {
                 ImGui::Spacing();
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, PanelBgRaised());
-                ImGui::PushStyleColor(ImGuiCol_Border, PanelBorder());
-                ImGui::BeginChild(
-                    "modules_empty_state",
-                    ImVec2(0.0f, 0.0f),
-                    ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY,
-                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-                ImGui::TextColored(AccentBlue(), "Modules not loaded for this process.");
-                ImGui::TextDisabled("Click Refresh Modules to inspect loaded DLLs.");
-                ImGui::EndChild();
-                ImGui::PopStyleColor(2);
+                if (loadedSnapshotActive_)
+                {
+                    RenderEmptyState(
+                        "Module information was not collected in this saved snapshot.",
+                        "Return to Live View to collect live module information.");
+                }
+                else
+                {
+                    RenderEmptyState(
+                        "Module information has not been collected for this process.",
+                        "Use Refresh Modules to collect read-only module metadata.");
+                }
                 return;
+            }
+
+            if (loadedSnapshotActive_)
+            {
+                WrappedTextDisabled("Showing metadata preserved in saved snapshot.");
             }
 
             if (selectedModules_.success)
@@ -490,7 +815,7 @@
             {
                 WrappedTextColored(
                     ImVec4(0.96f, 0.52f, 0.20f, 1.0f),
-                    "Modules unavailable: " + WideToUtf8(selectedModules_.statusMessage));
+                    "Module information is unavailable: " + WideToUtf8(selectedModules_.statusMessage));
                 WrappedTextDisabled("Protected, exited, or cross-architecture processes may not expose module details.");
             }
 
@@ -508,7 +833,7 @@
             if (selectedModules_.modules.empty())
             {
                 ImGui::Spacing();
-                WrappedTextDisabled("No modules returned for the selected process.");
+                RenderEmptyState("No module information was returned for this process.");
                 return;
             }
 
@@ -518,24 +843,61 @@
                 ImGuiTableFlags_Resizable |
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
-                ImGuiTableFlags_NoSavedSettings;
+                ImGuiTableFlags_NoSavedSettings |
+                ImGuiTableFlags_Sortable |
+                ImGuiTableFlags_SortTristate;
             AcknowledgeTableAutoSizeRequest(modulesTableNeedsAutoSize_);
             if (ImGui::BeginTable("ModulesTable##ModulesPanel", 4, flags))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthFixed, 155.0f);
-                ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, 112.0f);
-                ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 76.0f);
-                ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn(
+                    "Module",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    155.0f);
+                ImGui::TableSetupColumn(
+                    "Base",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    112.0f);
+                ImGui::TableSetupColumn(
+                    "Size",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    76.0f);
+                ImGui::TableSetupColumn(
+                    "Path",
+                    ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortAscending);
                 ImGui::TableHeadersRow();
 
+                std::vector<std::size_t> moduleView = NaturalInspectorIndexView(selectedModules_.modules.size());
+                SortInspectorIndexView(
+                    moduleView,
+                    ImGui::TableGetSortSpecs(),
+                    [this](std::size_t leftIndex, std::size_t rightIndex, int columnIndex) {
+                        const Core::ModuleInfo& left = selectedModules_.modules[leftIndex];
+                        const Core::ModuleInfo& right = selectedModules_.modules[rightIndex];
+                        switch (columnIndex)
+                        {
+                        case 0:
+                            return CompareInspectorTextCaseInsensitive(left.moduleName, right.moduleName);
+                        case 1:
+                            return CompareInspectorUnsigned(
+                                InspectorNumericAddress(left.baseAddress),
+                                InspectorNumericAddress(right.baseAddress));
+                        case 2:
+                            return CompareInspectorUnsigned(left.sizeBytes, right.sizeBytes);
+                        case 3:
+                            return CompareInspectorTextCaseInsensitive(left.modulePath, right.modulePath);
+                        default:
+                            return 0;
+                        }
+                    });
+
                 ImGuiListClipper clipper;
-                clipper.Begin(static_cast<int>(selectedModules_.modules.size()));
+                clipper.Begin(static_cast<int>(moduleView.size()));
                 while (clipper.Step())
                 {
                     for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
                     {
-                        const std::size_t moduleIndex = static_cast<std::size_t>(rowIndex);
+                        const std::size_t moduleIndex = moduleView[static_cast<std::size_t>(rowIndex)];
                         const Core::ModuleInfo& module = selectedModules_.modules[moduleIndex];
                         const bool moduleSelected =
                             selectedModulePid_ == selectedPid_ &&
@@ -551,24 +913,62 @@
                         ImGui::PushID(static_cast<int>(moduleIndex));
 
                         ImGui::TableSetColumnIndex(0);
+                        const std::wstring moduleName = module.moduleName.empty() ? L"(unknown)" : module.moduleName;
+                        const ImVec2 moduleCellStart = ImGui::GetCursorScreenPos();
                         if (ImGui::Selectable(
-                            WideToUtf8(module.moduleName.empty() ? L"(unknown)" : module.moduleName).c_str(),
+                            WideToUtf8(moduleName).c_str(),
                             moduleSelected,
-                            ImGuiSelectableFlags_SpanAllColumns,
+                            ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
                             ImVec2(0.0f, 24.0f)))
                         {
                             selectedModulePid_ = selectedPid_;
                             selectedModuleIndex_ = moduleIndex;
                         }
+                        const ImVec2 moduleRowMin = ImGui::GetItemRectMin();
+                        const ImVec2 moduleRowMax = ImGui::GetItemRectMax();
+                        const float moduleTextWidth =
+                            ImGui::CalcTextSize(WideToUtf8(moduleName).c_str()).x +
+                            ImGui::GetStyle().FramePadding.x * 2.0f;
+                        ImGui::SetCursorScreenPos(ImVec2(moduleCellStart.x, moduleRowMin.y));
+                        ImGui::InvisibleButton(
+                            "##ModuleNameContextHit",
+                            ImVec2(moduleTextWidth, moduleRowMax.y - moduleRowMin.y),
+                            ImGuiButtonFlags_MouseButtonRight);
+                        const bool moduleContextRequested = ImGui::IsItemClicked(ImGuiMouseButton_Right);
+                        RenderInspectorValueContextMenu(
+                            "ModuleNameValueContext",
+                            moduleName,
+                            moduleContextRequested);
 
                         ImGui::TableSetColumnIndex(1);
                         const bool pushedBaseFont = PushFontIfAvailable(fonts_.monospace);
                         TextWide(module.baseAddress);
+                        const bool baseContextRequested =
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
+                        PopFontIfPushed(pushedBaseFont);
+                        RenderInspectorValueContextMenu(
+                            "ModuleBaseValueContext",
+                            module.baseAddress,
+                            baseContextRequested);
+
                         ImGui::TableSetColumnIndex(2);
                         ImGui::Text("%u", module.sizeBytes);
+                        const bool sizeContextRequested =
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
+                        RenderInspectorValueContextMenu(
+                            "ModuleSizeValueContext",
+                            std::to_wstring(module.sizeBytes),
+                            sizeContextRequested);
+
                         ImGui::TableSetColumnIndex(3);
-                        ClippedTextWithTooltip(module.modulePath.empty() ? L"(path unavailable)" : module.modulePath);
-                        PopFontIfPushed(pushedBaseFont);
+                        const std::wstring modulePath =
+                            module.modulePath.empty() ? L"(path unavailable)" : module.modulePath;
+                        const bool pushedPathFont = PushFontIfAvailable(fonts_.monospace);
+                        RenderInspectorClippedValue(
+                            "ModulePathValueContext",
+                            modulePath,
+                            module.modulePath.empty() ? nullptr : &module.modulePath);
+                        PopFontIfPushed(pushedPathFont);
                         ImGui::PopID();
                     }
                 }
@@ -581,28 +981,57 @@
                 ImGui::SeparatorText("Selected Module");
                 ImGui::TextDisabled("Module");
                 ImGui::SameLine(92.0f);
-                TextWide(module.moduleName.empty() ? L"(unknown)" : module.moduleName);
+                const std::wstring selectedModuleName =
+                    module.moduleName.empty() ? L"(unknown)" : module.moduleName;
+                TextWide(selectedModuleName);
+                RenderInspectorValueContextMenu(
+                    "SelectedModuleNameValueContext",
+                    selectedModuleName,
+                    ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                 const bool pushedSelectedModuleFont = PushFontIfAvailable(fonts_.monospace);
                 ImGui::TextDisabled("Base");
                 ImGui::SameLine(92.0f);
                 TextWide(module.baseAddress);
+                RenderInspectorValueContextMenu(
+                    "SelectedModuleBaseValueContext",
+                    module.baseAddress,
+                    ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
                 ImGui::TextDisabled("Size");
                 ImGui::SameLine(92.0f);
                 ImGui::Text("%u", module.sizeBytes);
+                RenderInspectorValueContextMenu(
+                    "SelectedModuleSizeValueContext",
+                    std::to_wstring(module.sizeBytes),
+                    ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
                 ImGui::TextDisabled("Path");
-                WrappedTextWide(module.modulePath.empty() ? L"(path unavailable)" : module.modulePath);
+                const std::wstring selectedModulePath =
+                    module.modulePath.empty() ? L"(path unavailable)" : module.modulePath;
+                WrappedTextWide(selectedModulePath);
+                RenderInspectorValueContextMenu(
+                    "SelectedModulePathValueContext",
+                    selectedModulePath,
+                    ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right),
+                    module.modulePath.empty() ? nullptr : &module.modulePath);
                 PopFontIfPushed(pushedSelectedModuleFont);
 
-                const Core::FileIdentity& moduleFileIdentity = CachedFileIdentity(module.modulePath);
-                const std::vector<Core::FileIdentityIndicator> moduleFileIdentityIndicators =
-                    Core::BuildFileIdentityIndicators(moduleFileIdentity, module.moduleName, false);
-                ImGui::SeparatorText("File Identity");
-                RenderFileIdentityFields(
-                    "selected_module_file_identity",
-                    moduleFileIdentity,
-                    moduleFileIdentityIndicators,
-                    "selected module");
+                if (loadedSnapshotActive_)
+                {
+                    ImGui::SeparatorText("File Identity");
+                    WrappedTextDisabled("File identity metadata is live-only and was not collected for this saved module row.");
+                }
+                else
+                {
+                    const Core::FileIdentity& moduleFileIdentity = CachedFileIdentity(module.modulePath);
+                    const std::vector<Core::FileIdentityIndicator> moduleFileIdentityIndicators =
+                        Core::BuildFileIdentityIndicators(moduleFileIdentity, module.moduleName, false);
+                    ImGui::SeparatorText("File Identity");
+                    RenderFileIdentityFields(
+                        "selected_module_file_identity",
+                        moduleFileIdentity,
+                        moduleFileIdentityIndicators,
+                        "selected module");
+                }
             }
         }
 
@@ -611,7 +1040,7 @@
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review token information.");
                 return;
             }
 
@@ -624,7 +1053,7 @@
             PopFontIfPushed(pushedTokenPidFont);
 
             ImGui::Separator();
-            if (ImGui::Button("Refresh Token"))
+            if (LoadedSnapshotLiveActionButton("Refresh Token"))
             {
                 RefreshToken(true);
             }
@@ -633,10 +1062,25 @@
             {
                 ImGui::Spacing();
                 BeginInspectorCard("token_empty_state", "Token", fonts_.bold);
-                WrappedTextDisabled("Token data is not loaded for this process.");
-                WrappedTextDisabled("Click Refresh Token to inspect read-only token metadata.");
+                if (loadedSnapshotActive_)
+                {
+                    RenderEmptyState(
+                        "Token information was not collected in this saved snapshot.",
+                        "Return to Live View to collect live token information.");
+                }
+                else
+                {
+                    RenderEmptyState(
+                        "Token information has not been collected for this process.",
+                        "Use Refresh Token to collect read-only token metadata.");
+                }
                 EndInspectorCard();
                 return;
+            }
+
+            if (loadedSnapshotActive_)
+            {
+                WrappedTextDisabled("Showing metadata preserved in saved snapshot.");
             }
 
             const Core::TokenInfo& token = selectedToken_;
@@ -648,9 +1092,9 @@
             if (!token.success)
             {
                 BeginInspectorCard("token_unavailable", "Token", fonts_.bold);
-                WrappedTextDisabled(
-                    L"Token unavailable: " +
-                    (token.errorMessage.empty() ? std::wstring(L"access denied or process exited") : token.errorMessage));
+                const std::string tokenDetail = WideToUtf8(
+                    token.errorMessage.empty() ? std::wstring(L"Access was denied or the process exited.") : token.errorMessage);
+                RenderEmptyState("Token information is unavailable.", tokenDetail.c_str());
                 EndInspectorCard();
                 return;
             }
@@ -723,7 +1167,10 @@
             EndInspectorCard();
 
             const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(process->executablePath);
+            Core::FileIdentity loadedSnapshotFileIdentity;
+            const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
+                ? loadedSnapshotFileIdentity
+                : CachedFileIdentity(*process);
             const std::vector<Core::Finding>& findings =
                 FindingsForSelectedProcess(*process, chain, fileIdentity);
             bool hasTokenFindings = false;
@@ -756,7 +1203,7 @@
             BeginInspectorCard("token_privileges", "Privileges", fonts_.bold);
             if (token.privileges.empty())
             {
-                WrappedTextDisabled("No privileges returned for this token.");
+                RenderEmptyState("No privilege information was returned for this token.");
             }
             else
             {
@@ -779,7 +1226,7 @@
 
                 if (visiblePrivileges.empty())
                 {
-                    WrappedTextDisabled("No privileges match the current filter.");
+                    RenderEmptyState("No privileges match the current filter.");
                 }
                 else
                 {
@@ -842,7 +1289,7 @@
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review handle information.");
                 return;
             }
 
@@ -855,7 +1302,7 @@
             PopFontIfPushed(pushedHandlePidFont);
 
             ImGui::Separator();
-            if (ImGui::Button("Refresh Handles"))
+            if (LoadedSnapshotLiveActionButton("Refresh Handles"))
             {
                 RefreshHandles(true);
             }
@@ -869,20 +1316,34 @@
             {
                 ImGui::Spacing();
                 BeginInspectorCard("handles_empty_state", "Handles", fonts_.bold);
-                WrappedTextDisabled("Handle data is not loaded for this process.");
-                WrappedTextDisabled("Click Refresh Handles to inspect read-only handle metadata.");
+                if (loadedSnapshotActive_)
+                {
+                    RenderEmptyState(
+                        "Handle information was not collected in this saved snapshot.",
+                        "Return to Live View to collect live handle information.");
+                }
+                else
+                {
+                    RenderEmptyState(
+                        "Handle information has not been collected for this process.",
+                        "Use Refresh Handles to collect read-only handle metadata.");
+                }
                 EndInspectorCard();
                 return;
+            }
+
+            if (loadedSnapshotActive_)
+            {
+                WrappedTextDisabled("Showing metadata preserved in saved snapshot.");
             }
 
             if (!selectedHandles_.success)
             {
                 BeginInspectorCard("handles_unavailable", "Handles", fonts_.bold);
-                WrappedTextColored(
-                    ImVec4(0.96f, 0.52f, 0.20f, 1.0f),
-                    "Handles unavailable: " + WideToUtf8(selectedHandles_.statusMessage.empty()
-                        ? L"collection did not complete"
-                        : selectedHandles_.statusMessage));
+                const std::string handleDetail = WideToUtf8(selectedHandles_.statusMessage.empty()
+                    ? L"Collection did not complete."
+                    : selectedHandles_.statusMessage);
+                RenderEmptyState("Handle information is unavailable.", handleDetail.c_str());
                 EndInspectorCard();
                 return;
             }
@@ -890,7 +1351,7 @@
             if (selectedHandles_.handles.empty())
             {
                 BeginInspectorCard("handles_none", "Handles", fonts_.bold);
-                WrappedTextDisabled("No handles returned for this process.");
+                RenderEmptyState("No handle information was returned for this process.");
                 EndInspectorCard();
                 return;
             }
@@ -1008,7 +1469,7 @@
             if (visibleHandleIndexes_.empty())
             {
                 BeginInspectorCard("handles_filter_empty", "Handles", fonts_.bold);
-                WrappedTextDisabled("No handles match the current filters.");
+                RenderEmptyState("No handles match the current filters.");
                 EndInspectorCard();
                 return;
             }
@@ -1019,26 +1480,67 @@
                 ImGuiTableFlags_Resizable |
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
-                ImGuiTableFlags_NoSavedSettings;
+                ImGuiTableFlags_NoSavedSettings |
+                ImGuiTableFlags_Sortable |
+                ImGuiTableFlags_SortTristate;
             AcknowledgeTableAutoSizeRequest(handlesTableNeedsAutoSize_);
             if (ImGui::BeginTable("HandlesTable##HandlesPanel", 5, flags))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Handle", ImGuiTableColumnFlags_WidthFixed, 76.0f);
-                ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 88.0f);
-                ImGui::TableSetupColumn("Target / Name", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("Access", ImGuiTableColumnFlags_WidthFixed, 92.0f);
-                ImGui::TableSetupColumn("Indicators", ImGuiTableColumnFlags_WidthFixed, 118.0f);
+                ImGui::TableSetupColumn(
+                    "Handle",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    76.0f);
+                ImGui::TableSetupColumn(
+                    "Type",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    88.0f);
+                ImGui::TableSetupColumn(
+                    "Target / Name",
+                    ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortAscending);
+                ImGui::TableSetupColumn(
+                    "Access",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    92.0f);
+                ImGui::TableSetupColumn(
+                    "Indicators",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
+                    118.0f);
                 ImGui::TableHeadersRow();
 
+                std::vector<std::size_t> handleView = visibleHandleIndexes_;
+                SortInspectorIndexView(
+                    handleView,
+                    ImGui::TableGetSortSpecs(),
+                    [this](std::size_t leftIndex, std::size_t rightIndex, int columnIndex) {
+                        const Core::HandleInfo& left = selectedHandles_.handles[leftIndex];
+                        const Core::HandleInfo& right = selectedHandles_.handles[rightIndex];
+                        switch (columnIndex)
+                        {
+                        case 0:
+                            return CompareInspectorUnsigned(left.handleValue, right.handleValue);
+                        case 1:
+                            return CompareInspectorTextCaseInsensitive(
+                                HandleObjectTypeText(left),
+                                HandleObjectTypeText(right));
+                        case 2:
+                            return CompareInspectorTextCaseInsensitive(
+                                HandleTargetText(left),
+                                HandleTargetText(right));
+                        case 3:
+                            return CompareInspectorUnsigned(left.grantedAccessRaw, right.grantedAccessRaw);
+                        default:
+                            return 0;
+                        }
+                    });
+
                 ImGuiListClipper clipper;
-                clipper.Begin(static_cast<int>(visibleHandleIndexes_.size()));
+                clipper.Begin(static_cast<int>(handleView.size()));
                 while (clipper.Step())
                 {
                     for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
                     {
-                        const std::size_t visibleIndex = static_cast<std::size_t>(rowIndex);
-                        const std::size_t handleIndex = visibleHandleIndexes_[visibleIndex];
+                        const std::size_t handleIndex = handleView[static_cast<std::size_t>(rowIndex)];
                         if (handleIndex >= selectedHandles_.handles.size())
                         {
                             continue;
@@ -1056,21 +1558,29 @@
                         ImGui::PushID(static_cast<int>(handleIndex));
 
                         ImGui::TableSetColumnIndex(0);
+                        const std::wstring handleValue = HandleValueText(handle.handleValue);
                         const bool pushedHandleFont = PushFontIfAvailable(fonts_.monospace);
                         if (handle.isSensitive)
                         {
-                            ImGui::TextColored(SeverityColor(Core::Severity::Medium), "%s", WideToUtf8(HandleValueText(handle.handleValue)).c_str());
+                            ImGui::TextColored(SeverityColor(Core::Severity::Medium), "%s", WideToUtf8(handleValue).c_str());
                         }
                         else
                         {
-                            ClippedTextWithTooltip(HandleValueText(handle.handleValue));
+                            ClippedTextWithTooltip(handleValue);
                         }
+                        const bool handleContextRequested =
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
                         PopFontIfPushed(pushedHandleFont);
+                        RenderInspectorValueContextMenu(
+                            "HandleValueContext",
+                            handleValue,
+                            handleContextRequested);
 
                         ImGui::TableSetColumnIndex(1);
                         const std::wstring objectTypeText = HandleObjectTypeText(handle);
                         ImGui::TextUnformatted(WideToUtf8(objectTypeText).c_str());
-                        if (ImGui::IsItemHovered())
+                        const bool typeHovered = ImGui::IsItemHovered();
+                        if (typeHovered)
                         {
                             if (IsRawObjectTypeIndex(handle.objectType))
                             {
@@ -1083,49 +1593,80 @@
                                 RenderWrappedTooltip(objectTypeText, 520.0f);
                             }
                         }
+                        RenderInspectorValueContextMenu(
+                            "HandleTypeValueContext",
+                            objectTypeText,
+                            typeHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         ImGui::TableSetColumnIndex(2);
-                        ImGui::TextUnformatted(WideToUtf8(HandleTargetText(handle)).c_str());
-                        if (ImGui::IsItemHovered())
+                        const std::wstring targetText = HandleTargetText(handle);
+                        ImGui::TextUnformatted(WideToUtf8(targetText).c_str());
+                        const bool targetHovered = ImGui::IsItemHovered();
+                        if (targetHovered)
                         {
                             RenderWrappedTooltip(HandleTargetTooltipText(handle), 600.0f);
                         }
+                        RenderInspectorValueContextMenu(
+                            "HandleTargetValueContext",
+                            targetText,
+                            targetHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         ImGui::TableSetColumnIndex(3);
+                        const std::wstring accessText =
+                            handle.grantedAccess.empty() ? L"(unknown)" : handle.grantedAccess;
                         const bool pushedAccessFont = PushFontIfAvailable(fonts_.monospace);
-                        TextWide(handle.grantedAccess.empty() ? L"(unknown)" : handle.grantedAccess);
+                        TextWide(accessText);
+                        const bool accessHovered = ImGui::IsItemHovered();
                         PopFontIfPushed(pushedAccessFont);
-                        if (ImGui::IsItemHovered())
+                        if (accessHovered)
                         {
                             RenderWrappedTooltip(HandleAccessTooltipText(handle), 520.0f);
                         }
+                        RenderInspectorValueContextMenu(
+                            "HandleAccessValueContext",
+                            accessText,
+                            accessHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         ImGui::TableSetColumnIndex(4);
                         const std::wstring indicators = HandleIndicatorText(handle);
                         const std::wstring status = HandleStatusText(handle);
+                        std::wstring displayedIndicatorText;
+                        bool indicatorHovered = false;
                         if (!indicators.empty())
                         {
+                            displayedIndicatorText = indicators;
                             ImGui::TextColored(
                                 handle.isSensitive ? SeverityColor(Core::Severity::Medium) : SeverityColor(Core::Severity::Low),
                                 "%s",
                                 WideToUtf8(indicators).c_str());
-                            if (ImGui::IsItemHovered())
+                            indicatorHovered = ImGui::IsItemHovered();
+                            if (indicatorHovered)
                             {
                                 RenderWrappedTooltip(indicators, 560.0f);
                             }
                         }
                         else if (!status.empty())
                         {
+                            displayedIndicatorText = status;
                             ImGui::TextDisabled("%s", WideToUtf8(status).c_str());
-                            if (ImGui::IsItemHovered() && !handle.errorMessage.empty())
+                            indicatorHovered = ImGui::IsItemHovered();
+                            if (indicatorHovered && !handle.errorMessage.empty())
                             {
                                 RenderWrappedTooltip(handle.errorMessage, 560.0f);
                             }
                         }
                         else
                         {
+                            displayedIndicatorText = L"None";
                             ImGui::TextDisabled("None");
+                            indicatorHovered = ImGui::IsItemHovered();
                         }
+                        const bool indicatorContextRequested =
+                            indicatorHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
+                        RenderInspectorValueContextMenu(
+                            "HandleIndicatorValueContext",
+                            displayedIndicatorText,
+                            indicatorContextRequested);
 
                         ImGui::PopID();
                     }
@@ -1140,7 +1681,7 @@
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review network connections.");
                 return;
             }
 
@@ -1153,17 +1694,34 @@
             PopFontIfPushed(pushedNetworkPidFont);
 
             ImGui::Separator();
-            if (ImGui::Button("Refresh Network"))
+            if (LoadedSnapshotLiveActionButton("Refresh Network"))
             {
                 RefreshNetwork(true);
             }
             ImGui::SameLine();
-            if (ImGui::Button("Load Intel Feed"))
+            const bool operationActive = IsLongOperationActive();
+            const bool loadIntelDisabled = loadedSnapshotActive_ || operationActive;
+            if (!loadIntelDisabled)
             {
-                LoadNetworkIntelFeed();
+                if (ImGui::Button("Load Intel Feed"))
+                {
+                    LoadNetworkIntelFeed();
+                }
+            }
+            else
+            {
+                ImGui::BeginDisabled();
+                ImGui::Button("Load Intel Feed");
+                ImGui::EndDisabled();
+                RenderDisabledReasonTooltip(
+                    operationActive
+                        ? "Unavailable while another operation is running."
+                        : "Live collection is disabled while viewing a saved snapshot.");
             }
             ImGui::SameLine();
-            if (networkIndicatorUpdateInProgress_)
+            const bool updateIntelDisabled =
+                loadedSnapshotActive_ || networkIndicatorUpdateInProgress_ || operationActive;
+            if (updateIntelDisabled)
             {
                 ImGui::BeginDisabled();
             }
@@ -1171,9 +1729,15 @@
             {
                 RequestNetworkIntelFeedUpdate();
             }
-            if (networkIndicatorUpdateInProgress_)
+            if (updateIntelDisabled)
             {
                 ImGui::EndDisabled();
+                const char* disabledReason = loadedSnapshotActive_
+                    ? "Live collection is disabled while viewing a saved snapshot."
+                    : (networkIndicatorUpdateInProgress_
+                        ? "A Network Intelligence update is already running."
+                        : "Unavailable while another operation is running.");
+                RenderDisabledReasonTooltip(disabledReason);
             }
             WrappedTextDisabled(std::wstring(L"Last refreshed: ") + lastNetworkRefreshTime_);
             RenderNetworkIntelStatus();
@@ -1181,25 +1745,31 @@
             if (!networkLoaded_)
             {
                 ImGui::Spacing();
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, PanelBgRaised());
-                ImGui::PushStyleColor(ImGuiCol_Border, PanelBorder());
-                ImGui::BeginChild(
-                    "network_empty_state",
-                    ImVec2(0.0f, 0.0f),
-                    ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY,
-                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-                ImGui::TextColored(AccentBlue(), "Network data not loaded.");
-                ImGui::TextDisabled("Click Refresh Network to inspect local socket ownership.");
-                ImGui::EndChild();
-                ImGui::PopStyleColor(2);
+                if (loadedSnapshotActive_)
+                {
+                    RenderEmptyState(
+                        "Network rows were not collected in this saved snapshot.",
+                        "Return to Live View to collect live network information.");
+                }
+                else
+                {
+                    RenderEmptyState(
+                        "Network information has not been collected for this process.",
+                        "Use Refresh Network to inspect local socket ownership.");
+                }
                 return;
+            }
+
+            if (loadedSnapshotActive_)
+            {
+                WrappedTextDisabled("Network rows are available from this saved snapshot.");
             }
 
             if (!networkSnapshot_.success)
             {
                 WrappedTextColored(
                     ImVec4(0.96f, 0.52f, 0.20f, 1.0f),
-                    "Network unavailable: " + WideToUtf8(networkSnapshot_.statusMessage));
+                    "Network information is unavailable: " + WideToUtf8(networkSnapshot_.statusMessage));
             }
             else
             {
@@ -1226,7 +1796,7 @@
             if (selectedConnections.empty())
             {
                 ImGui::Spacing();
-                ImGui::TextDisabled("No network connections for this process.");
+                RenderEmptyState("No network connections were observed for this process.");
                 return;
             }
 
@@ -1236,76 +1806,156 @@
                 ImGuiTableFlags_Resizable |
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
-                ImGuiTableFlags_NoSavedSettings;
+                ImGuiTableFlags_NoSavedSettings |
+                ImGuiTableFlags_Sortable |
+                ImGuiTableFlags_SortTristate;
             AcknowledgeTableAutoSizeRequest(networkTableNeedsAutoSize_);
             if (ImGui::BeginTable("NetworkTable##NetworkPanel", 6, flags))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Protocol", ImGuiTableColumnFlags_WidthFixed, 76.0f);
-                ImGui::TableSetupColumn("Local", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("Remote", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 96.0f);
-                ImGui::TableSetupColumn("Type/Scope", ImGuiTableColumnFlags_WidthFixed, 150.0f);
-                ImGui::TableSetupColumn("Intel", ImGuiTableColumnFlags_WidthFixed, 116.0f);
+                ImGui::TableSetupColumn(
+                    "Protocol",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    76.0f);
+                ImGui::TableSetupColumn(
+                    "Local",
+                    ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortAscending);
+                ImGui::TableSetupColumn(
+                    "Remote",
+                    ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortAscending);
+                ImGui::TableSetupColumn(
+                    "State",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    96.0f);
+                ImGui::TableSetupColumn(
+                    "Type/Scope",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    150.0f);
+                ImGui::TableSetupColumn(
+                    "Intel",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
+                    116.0f);
                 ImGui::TableHeadersRow();
 
+                std::vector<std::size_t> connectionView = NaturalInspectorIndexView(selectedConnections.size());
+                SortInspectorIndexView(
+                    connectionView,
+                    ImGui::TableGetSortSpecs(),
+                    [this, &selectedConnections](std::size_t leftIndex, std::size_t rightIndex, int columnIndex) {
+                        const Core::NetworkConnection& left = *selectedConnections[leftIndex];
+                        const Core::NetworkConnection& right = *selectedConnections[rightIndex];
+                        int result = 0;
+                        switch (columnIndex)
+                        {
+                        case 0:
+                            return CompareInspectorTextCaseInsensitive(left.protocol, right.protocol);
+                        case 1:
+                            result = CompareInspectorTextCaseInsensitive(left.localAddress, right.localAddress);
+                            return result != 0
+                                ? result
+                                : CompareInspectorUnsigned(left.localPort, right.localPort);
+                        case 2:
+                            result = CompareInspectorTextCaseInsensitive(left.remoteAddress, right.remoteAddress);
+                            return result != 0
+                                ? result
+                                : CompareInspectorUnsigned(left.remotePort, right.remotePort);
+                        case 3:
+                            return CompareInspectorTextCaseInsensitive(left.state, right.state);
+                        case 4:
+                            return CompareInspectorTextCaseInsensitive(
+                                NetworkScopeText(left),
+                                NetworkScopeText(right));
+                        default:
+                            return 0;
+                        }
+                    });
+
                 ImGuiListClipper clipper;
-                clipper.Begin(static_cast<int>(selectedConnections.size()));
+                clipper.Begin(static_cast<int>(connectionView.size()));
                 while (clipper.Step())
                 {
                     for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
                     {
                         const Core::NetworkConnection* connection =
-                            selectedConnections[static_cast<std::size_t>(rowIndex)];
+                            selectedConnections[connectionView[static_cast<std::size_t>(rowIndex)]];
                         if (connection == nullptr)
                         {
                             continue;
                         }
 
                         ImGui::TableNextRow();
+                        ImGui::PushID(static_cast<const void*>(connection));
                         ImGui::TableSetColumnIndex(0);
                         TextWide(connection->protocol);
+                        RenderInspectorValueContextMenu(
+                            "NetworkProtocolValueContext",
+                            connection->protocol,
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         const bool pushedEndpointFont = PushFontIfAvailable(fonts_.monospace);
                         ImGui::TableSetColumnIndex(1);
-                        ClippedTextWithTooltip(NetworkEndpoint(*connection, false));
+                        const std::wstring localEndpoint = NetworkEndpoint(*connection, false);
+                        RenderInspectorClippedValue("NetworkLocalValueContext", localEndpoint);
                         ImGui::TableSetColumnIndex(2);
-                        ClippedTextWithTooltip(NetworkEndpoint(*connection, true));
+                        const std::wstring remoteEndpoint = NetworkEndpoint(*connection, true);
+                        RenderInspectorClippedValue("NetworkRemoteValueContext", remoteEndpoint);
                         ImGui::TableSetColumnIndex(3);
-                        TextWide(connection->state.empty() ? L"-" : connection->state);
+                        const std::wstring stateText = connection->state.empty() ? L"-" : connection->state;
+                        TextWide(stateText);
+                        const bool stateContextRequested =
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
                         PopFontIfPushed(pushedEndpointFont);
+                        RenderInspectorValueContextMenu(
+                            "NetworkStateValueContext",
+                            stateText,
+                            stateContextRequested);
 
                         ImGui::TableSetColumnIndex(4);
+                        const std::wstring scopeText = NetworkScopeText(*connection);
                         if (connection->isPublicRemote)
                         {
-                            ImGui::TextColored(SeverityColor(Core::Severity::Low), "%s", WideToUtf8(NetworkScopeText(*connection)).c_str());
+                            ImGui::TextColored(SeverityColor(Core::Severity::Low), "%s", WideToUtf8(scopeText).c_str());
                         }
                         else
                         {
-                            TextWide(NetworkScopeText(*connection));
+                            TextWide(scopeText);
                         }
+                        RenderInspectorValueContextMenu(
+                            "NetworkScopeValueContext",
+                            scopeText,
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         ImGui::TableSetColumnIndex(5);
                         const std::vector<const Core::NetworkIndicatorMatch*> intelMatches =
                             NetworkIntelMatchesForConnection(*connection);
+                        std::wstring intelText = L"-";
+                        bool intelHovered = false;
                         if (intelMatches.empty())
                         {
                             ImGui::TextDisabled("-");
+                            intelHovered = ImGui::IsItemHovered();
                         }
                         else
                         {
                             const Core::NetworkIndicatorMatch& firstMatch = *intelMatches.front();
+                            intelText = NetworkIndicatorMatchLabel(firstMatch);
                             const Core::Severity intelSeverity =
                                 NetworkIndicatorSeverityAsCoreSeverity(firstMatch.indicator.severity);
                             ImGui::TextColored(
                                 SeverityColor(intelSeverity),
                                 "%s",
-                                WideToUtf8(NetworkIndicatorMatchLabel(firstMatch)).c_str());
-                            if (ImGui::IsItemHovered())
+                                WideToUtf8(intelText).c_str());
+                            intelHovered = ImGui::IsItemHovered();
+                            if (intelHovered)
                             {
                                 RenderWrappedTooltip(NetworkIndicatorTooltipText(intelMatches), 560.0f);
                             }
                         }
+                        RenderInspectorValueContextMenu(
+                            "NetworkIntelValueContext",
+                            intelText,
+                            intelHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
+                        ImGui::PopID();
                     }
                 }
 
@@ -1318,7 +1968,7 @@
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review runtime information.");
                 return;
             }
 
@@ -1331,7 +1981,7 @@
             PopFontIfPushed(pushedRuntimePidFont);
 
             ImGui::Separator();
-            if (ImGui::Button("Refresh Runtime"))
+            if (LoadedSnapshotLiveActionButton("Refresh Runtime"))
             {
                 RefreshRuntime(true);
             }
@@ -1340,21 +1990,35 @@
             {
                 ImGui::Spacing();
                 BeginInspectorCard("runtime_empty_state", "Runtime", fonts_.bold);
-                WrappedTextDisabled("Runtime data is not loaded for this process.");
-                WrappedTextDisabled("Click Refresh Runtime to inspect read-only scheduling, memory, CPU, and thread metadata.");
+                if (loadedSnapshotActive_)
+                {
+                    RenderEmptyState(
+                        "Runtime information was not collected in this saved snapshot.",
+                        "Return to Live View to collect live runtime information.");
+                }
+                else
+                {
+                    RenderEmptyState(
+                        "Runtime information has not been collected for this process.",
+                        "Use Refresh Runtime to collect read-only scheduling, CPU, and thread metadata.");
+                }
                 EndInspectorCard();
                 return;
+            }
+
+            if (loadedSnapshotActive_)
+            {
+                WrappedTextDisabled("Showing metadata preserved in saved snapshot.");
             }
 
             const Core::RuntimeInfo& runtime = selectedRuntime_;
             if (!runtime.success)
             {
                 BeginInspectorCard("runtime_unavailable", "Runtime", fonts_.bold);
-                WrappedTextColored(
-                    ImVec4(0.96f, 0.52f, 0.20f, 1.0f),
-                    "Runtime unavailable: " + WideToUtf8(runtime.errorMessage.empty()
-                        ? L"access denied or process exited"
-                        : runtime.errorMessage));
+                const std::string runtimeDetail = WideToUtf8(runtime.errorMessage.empty()
+                    ? L"Access was denied or the process exited."
+                    : runtime.errorMessage);
+                RenderEmptyState("Runtime information is unavailable.", runtimeDetail.c_str());
                 if (!runtime.threads.empty())
                 {
                     WrappedTextDisabled("Thread snapshot data may still be partial.");
@@ -1399,7 +2063,10 @@
             }
 
             const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(process->executablePath);
+            Core::FileIdentity loadedSnapshotFileIdentity;
+            const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
+                ? loadedSnapshotFileIdentity
+                : CachedFileIdentity(*process);
             const std::vector<Core::Finding>& findings =
                 FindingsForSelectedProcess(*process, chain, fileIdentity);
             bool hasRuntimeContext = !runtime.contextNotes.empty();
@@ -1445,7 +2112,7 @@
             BeginInspectorCard("runtime_threads", "Threads", fonts_.bold);
             if (runtime.threads.empty())
             {
-                WrappedTextDisabled("No thread metadata returned for this process.");
+                RenderEmptyState("No thread information was returned for this process.");
                 EndInspectorCard();
                 return;
             }
@@ -1456,39 +2123,100 @@
                 ImGuiTableFlags_Resizable |
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
-                ImGuiTableFlags_NoSavedSettings;
+                ImGuiTableFlags_NoSavedSettings |
+                ImGuiTableFlags_Sortable |
+                ImGuiTableFlags_SortTristate;
             AcknowledgeTableAutoSizeRequest(runtimeTableNeedsAutoSize_);
             if (ImGui::BeginTable("RuntimeThreadsTable##RuntimePanel", 5, flags, ImVec2(0.0f, 270.0f)))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Thread ID", ImGuiTableColumnFlags_WidthFixed, 88.0f);
-                ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, 64.0f);
-                ImGui::TableSetupColumn("Current", ImGuiTableColumnFlags_WidthFixed, 76.0f);
-                ImGui::TableSetupColumn("Start Address", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn(
+                    "Thread ID",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    88.0f);
+                ImGui::TableSetupColumn(
+                    "Base",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    64.0f);
+                ImGui::TableSetupColumn(
+                    "Current",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    76.0f);
+                ImGui::TableSetupColumn(
+                    "Start Address",
+                    ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortAscending);
+                ImGui::TableSetupColumn(
+                    "Module",
+                    ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortAscending);
                 ImGui::TableHeadersRow();
 
+                std::vector<std::size_t> threadView = NaturalInspectorIndexView(runtime.threads.size());
+                SortInspectorIndexView(
+                    threadView,
+                    ImGui::TableGetSortSpecs(),
+                    [&runtime](std::size_t leftIndex, std::size_t rightIndex, int columnIndex) {
+                        const Core::ThreadInfo& left = runtime.threads[leftIndex];
+                        const Core::ThreadInfo& right = runtime.threads[rightIndex];
+                        switch (columnIndex)
+                        {
+                        case 0:
+                            return CompareInspectorUnsigned(left.threadId, right.threadId);
+                        case 1:
+                            return CompareInspectorSigned(left.basePriority, right.basePriority);
+                        case 2:
+                            if (left.hasCurrentPriority != right.hasCurrentPriority)
+                            {
+                                return left.hasCurrentPriority ? -1 : 1;
+                            }
+                            return CompareInspectorSigned(left.currentPriority, right.currentPriority);
+                        case 3:
+                            return CompareInspectorUnsigned(
+                                InspectorNumericAddress(left.startAddress),
+                                InspectorNumericAddress(right.startAddress));
+                        case 4:
+                            return CompareInspectorTextCaseInsensitive(
+                                left.startAddressResolvedModule,
+                                right.startAddressResolvedModule);
+                        default:
+                            return 0;
+                        }
+                    });
+
                 ImGuiListClipper clipper;
-                clipper.Begin(static_cast<int>(runtime.threads.size()));
+                clipper.Begin(static_cast<int>(threadView.size()));
                 while (clipper.Step())
                 {
                     for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
                     {
-                        const Core::ThreadInfo& thread = runtime.threads[static_cast<std::size_t>(rowIndex)];
+                        const std::size_t threadIndex = threadView[static_cast<std::size_t>(rowIndex)];
+                        const Core::ThreadInfo& thread = runtime.threads[threadIndex];
                         ImGui::TableNextRow();
+                        ImGui::PushID(static_cast<int>(threadIndex));
 
                         const bool pushedThreadFont = PushFontIfAvailable(fonts_.monospace);
                         ImGui::TableSetColumnIndex(0);
                         ImGui::Text("%u", thread.threadId);
-                        if (ImGui::IsItemHovered() && !thread.errorMessage.empty())
+                        const bool threadIdHovered = ImGui::IsItemHovered();
+                        if (threadIdHovered && !thread.errorMessage.empty())
                         {
                             RenderWrappedTooltip(thread.errorMessage, 560.0f);
                         }
+                        RenderInspectorValueContextMenu(
+                            "RuntimeThreadIdValueContext",
+                            std::to_wstring(thread.threadId),
+                            threadIdHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         ImGui::TableSetColumnIndex(1);
                         ImGui::Text("%d", thread.basePriority);
+                        RenderInspectorValueContextMenu(
+                            "RuntimeBasePriorityValueContext",
+                            std::to_wstring(thread.basePriority),
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         ImGui::TableSetColumnIndex(2);
+                        const std::wstring currentPriorityText = thread.hasCurrentPriority
+                            ? std::to_wstring(thread.currentPriority)
+                            : L"N/A";
                         if (thread.hasCurrentPriority)
                         {
                             ImGui::Text("%d", thread.currentPriority);
@@ -1497,15 +2225,23 @@
                         {
                             ImGui::TextDisabled("N/A");
                         }
+                        RenderInspectorValueContextMenu(
+                            "RuntimeCurrentPriorityValueContext",
+                            currentPriorityText,
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         ImGui::TableSetColumnIndex(3);
-                        ClippedTextWithTooltip(thread.startAddress.empty() ? L"Unavailable" : thread.startAddress);
+                        const std::wstring startAddress =
+                            thread.startAddress.empty() ? L"Unavailable" : thread.startAddress;
+                        RenderInspectorClippedValue("RuntimeStartAddressValueContext", startAddress);
 
                         ImGui::TableSetColumnIndex(4);
-                        ClippedTextWithTooltip(thread.startAddressResolvedModule.empty()
+                        const std::wstring resolvedModule = thread.startAddressResolvedModule.empty()
                             ? L"(unresolved)"
-                            : thread.startAddressResolvedModule);
+                            : thread.startAddressResolvedModule;
+                        RenderInspectorClippedValue("RuntimeModuleValueContext", resolvedModule);
                         PopFontIfPushed(pushedThreadFont);
+                        ImGui::PopID();
                     }
                 }
 
@@ -1519,7 +2255,7 @@
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                ImGui::TextUnformatted("No process selected.");
+                RenderEmptyState("No process is selected.", "Select a process to review memory regions.");
                 return;
             }
 
@@ -1532,7 +2268,7 @@
             PopFontIfPushed(pushedMemoryPidFont);
 
             ImGui::Separator();
-            if (ImGui::Button("Refresh Memory"))
+            if (LoadedSnapshotLiveActionButton("Refresh Memory"))
             {
                 RefreshMemory(true);
             }
@@ -1541,21 +2277,35 @@
             {
                 ImGui::Spacing();
                 BeginInspectorCard("memory_empty_state", "Memory", fonts_.bold);
-                WrappedTextDisabled("Memory region metadata is not loaded for this process.");
-                WrappedTextDisabled("Click Refresh Memory to inspect virtual memory region metadata. GlassPane does not dump or read region contents.");
+                if (loadedSnapshotActive_)
+                {
+                    RenderEmptyState(
+                        "Memory region information was not collected in this saved snapshot.",
+                        "Return to Live View to collect live memory region information.");
+                }
+                else
+                {
+                    RenderEmptyState(
+                        "Memory region information has not been collected for this process.",
+                        "Use Refresh Memory to inspect metadata only; memory contents are not read or saved.");
+                }
                 EndInspectorCard();
                 return;
+            }
+
+            if (loadedSnapshotActive_)
+            {
+                WrappedTextDisabled("Showing metadata preserved in saved snapshot.");
             }
 
             const Core::MemoryCollectionResult& memory = selectedMemory_;
             if (!memory.success)
             {
                 BeginInspectorCard("memory_unavailable", "Memory", fonts_.bold);
-                WrappedTextColored(
-                    ImVec4(0.96f, 0.52f, 0.20f, 1.0f),
-                    "Memory unavailable: " + WideToUtf8(memory.statusMessage.empty()
-                        ? L"access denied, protected process, or process exited"
-                        : memory.statusMessage));
+                const std::string memoryDetail = WideToUtf8(memory.statusMessage.empty()
+                    ? L"Access was denied, the process is protected, or it exited."
+                    : memory.statusMessage);
+                RenderEmptyState("Memory region information is unavailable.", memoryDetail.c_str());
                 EndInspectorCard();
                 if (memory.regions.empty())
                 {
@@ -1671,7 +2421,7 @@
             LabelValue("Visible", std::to_wstring(visibleMemoryRegionIndexes_.size()));
             if (visibleMemoryRegionIndexes_.empty())
             {
-                WrappedTextDisabled("No memory regions match the current filters.");
+                RenderEmptyState("No memory regions match the current filters.");
                 EndInspectorCard();
                 return;
             }
@@ -1682,28 +2432,75 @@
                 ImGuiTableFlags_Resizable |
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp |
-                ImGuiTableFlags_NoSavedSettings;
+                ImGuiTableFlags_NoSavedSettings |
+                ImGuiTableFlags_Sortable |
+                ImGuiTableFlags_SortTristate;
             AcknowledgeTableAutoSizeRequest(memoryTableNeedsAutoSize_);
             if (ImGui::BeginTable("MemoryRegionsTable##MemoryPanel", 7, flags, ImVec2(0.0f, 340.0f)))
             {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Base", ImGuiTableColumnFlags_WidthFixed, 124.0f);
-                ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthFixed, 82.0f);
-                ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 78.0f);
-                ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 76.0f);
-                ImGui::TableSetupColumn("Protection", ImGuiTableColumnFlags_WidthFixed, 108.0f);
-                ImGui::TableSetupColumn("Mapped file", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("Indicators", ImGuiTableColumnFlags_WidthFixed, 140.0f);
+                ImGui::TableSetupColumn(
+                    "Base",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    124.0f);
+                ImGui::TableSetupColumn(
+                    "Size",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    82.0f);
+                ImGui::TableSetupColumn(
+                    "State",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    78.0f);
+                ImGui::TableSetupColumn(
+                    "Type",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    76.0f);
+                ImGui::TableSetupColumn(
+                    "Protection",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
+                    108.0f);
+                ImGui::TableSetupColumn(
+                    "Mapped file",
+                    ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortAscending);
+                ImGui::TableSetupColumn(
+                    "Indicators",
+                    ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
+                    140.0f);
                 ImGui::TableHeadersRow();
 
+                std::vector<std::size_t> regionView = visibleMemoryRegionIndexes_;
+                SortInspectorIndexView(
+                    regionView,
+                    ImGui::TableGetSortSpecs(),
+                    [&memory](std::size_t leftIndex, std::size_t rightIndex, int columnIndex) {
+                        const Core::MemoryRegionInfo& left = memory.regions[leftIndex];
+                        const Core::MemoryRegionInfo& right = memory.regions[rightIndex];
+                        switch (columnIndex)
+                        {
+                        case 0:
+                            return CompareInspectorUnsigned(left.baseAddress, right.baseAddress);
+                        case 1:
+                            return CompareInspectorUnsigned(left.regionSize, right.regionSize);
+                        case 2:
+                            return CompareInspectorTextCaseInsensitive(left.stateName, right.stateName);
+                        case 3:
+                            return CompareInspectorTextCaseInsensitive(left.typeName, right.typeName);
+                        case 4:
+                            return CompareInspectorTextCaseInsensitive(left.protectName, right.protectName);
+                        case 5:
+                            return CompareInspectorTextCaseInsensitive(left.mappedFilePath, right.mappedFilePath);
+                        default:
+                            return 0;
+                        }
+                    });
+
                 ImGuiListClipper clipper;
-                clipper.Begin(static_cast<int>(visibleMemoryRegionIndexes_.size()));
+                clipper.Begin(static_cast<int>(regionView.size()));
                 while (clipper.Step())
                 {
                     for (int rowIndex = clipper.DisplayStart; rowIndex < clipper.DisplayEnd; ++rowIndex)
                     {
-                        const std::size_t visibleIndex = static_cast<std::size_t>(rowIndex);
-                        const std::size_t regionIndex = visibleMemoryRegionIndexes_[visibleIndex];
+                        const std::size_t regionIndex = regionView[static_cast<std::size_t>(rowIndex)];
                         if (regionIndex >= memory.regions.size())
                         {
                             continue;
@@ -1719,31 +2516,53 @@
                             ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ColorU32(ImVec4(0.12f, 0.14f, 0.18f, 0.48f)));
                         }
 
-                        ImGui::PushID(rowIndex);
+                        ImGui::PushID(static_cast<int>(regionIndex));
                         const bool pushedAddressFont = PushFontIfAvailable(fonts_.monospace);
                         ImGui::TableSetColumnIndex(0);
-                        ClippedTextWithTooltip(region.baseAddressString);
+                        RenderInspectorClippedValue("MemoryBaseValueContext", region.baseAddressString);
                         ImGui::TableSetColumnIndex(1);
                         TextWide(region.regionSizeString);
+                        const bool sizeContextRequested =
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
                         PopFontIfPushed(pushedAddressFont);
+                        RenderInspectorValueContextMenu(
+                            "MemorySizeValueContext",
+                            region.regionSizeString,
+                            sizeContextRequested);
 
                         ImGui::TableSetColumnIndex(2);
                         TextWide(region.stateName);
+                        RenderInspectorValueContextMenu(
+                            "MemoryStateValueContext",
+                            region.stateName,
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
                         ImGui::TableSetColumnIndex(3);
                         TextWide(region.typeName);
+                        RenderInspectorValueContextMenu(
+                            "MemoryTypeValueContext",
+                            region.typeName,
+                            ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
                         ImGui::TableSetColumnIndex(4);
                         const bool pushedProtectFont = PushFontIfAvailable(fonts_.monospace);
-                        ClippedTextWithTooltip(region.protectName);
+                        RenderInspectorClippedValue("MemoryProtectionValueContext", region.protectName);
                         PopFontIfPushed(pushedProtectFont);
 
                         ImGui::TableSetColumnIndex(5);
-                        ClippedTextWithTooltip(region.mappedFilePath.empty() ? L"(none)" : region.mappedFilePath);
+                        const std::wstring mappedFile =
+                            region.mappedFilePath.empty() ? L"(none)" : region.mappedFilePath;
+                        RenderInspectorClippedValue(
+                            "MemoryMappedFileValueContext",
+                            mappedFile,
+                            region.mappedFilePath.empty() ? nullptr : &region.mappedFilePath);
 
                         ImGui::TableSetColumnIndex(6);
                         const std::wstring indicators = MemoryIndicatorText(region);
+                        const std::wstring displayedIndicators = indicators.empty() ? L"None" : indicators;
+                        bool indicatorsHovered = false;
                         if (indicators.empty())
                         {
                             ImGui::TextDisabled("None");
+                            indicatorsHovered = ImGui::IsItemHovered();
                         }
                         else
                         {
@@ -1751,11 +2570,16 @@
                                 region.isSuspicious ? SeverityColor(Core::Severity::Medium) : SeverityColor(Core::Severity::Info),
                                 "%s",
                                 WideToUtf8(indicators).c_str());
-                            if (ImGui::IsItemHovered())
+                            indicatorsHovered = ImGui::IsItemHovered();
+                            if (indicatorsHovered)
                             {
                                 RenderWrappedTooltip(indicators, 600.0f);
                             }
                         }
+                        RenderInspectorValueContextMenu(
+                            "MemoryIndicatorsValueContext",
+                            displayedIndicators,
+                            indicatorsHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
                         ImGui::PopID();
                     }
                 }

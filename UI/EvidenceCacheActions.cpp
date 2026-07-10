@@ -199,6 +199,174 @@
             handlesTableNeedsAutoSize_ = true;
         }
 
+        static bool EvidenceStatusWasAttempted(const Export::EvidenceCollectionStatus& status)
+        {
+            return !status.status.empty() && status.status != L"not_attempted";
+        }
+
+        static std::wstring LoadedEvidenceStatusMessage(
+            const wchar_t* label,
+            const Export::EvidenceCollectionStatus& status)
+        {
+            if (status.status == L"ok")
+            {
+                return std::wstring(label) + L" metadata was preserved in this saved snapshot.";
+            }
+            if (status.status == L"partial")
+            {
+                std::wstring message = std::wstring(label) + L" metadata was partially collected for this process.";
+                if (!status.message.empty())
+                {
+                    message += L" " + status.message;
+                }
+                return message;
+            }
+            if (status.status == L"access_denied")
+            {
+                std::wstring message = std::wstring(label) + L" metadata was unavailable: access denied.";
+                if (!status.message.empty())
+                {
+                    message += L" " + status.message;
+                }
+                return message;
+            }
+            if (status.status == L"process_exited")
+            {
+                std::wstring message = std::wstring(label) + L" metadata was not collected because the process exited.";
+                if (!status.message.empty())
+                {
+                    message += L" " + status.message;
+                }
+                return message;
+            }
+            if (status.status == L"unavailable")
+            {
+                std::wstring message = std::wstring(label) + L" metadata was unavailable.";
+                if (!status.message.empty())
+                {
+                    message += L" " + status.message;
+                }
+                return message;
+            }
+            std::wstring message = std::wstring(label) + L" metadata collection failed.";
+            if (!status.message.empty())
+            {
+                message += L" " + status.message;
+            }
+            return message;
+        }
+
+        static void ApplyLoadedStatusNote(
+            std::wstring& target,
+            const wchar_t* label,
+            const Export::EvidenceCollectionStatus& status)
+        {
+            if (status.status == L"ok" && !status.truncated)
+            {
+                return;
+            }
+
+            const std::wstring note = LoadedEvidenceStatusMessage(label, status);
+            target = target.empty() ? note : target + L" " + note;
+        }
+
+        bool RestoreLoadedSnapshotEvidenceForProcess(const Core::ProcessInfo& process)
+        {
+            if (!loadedSnapshotActive_)
+            {
+                return false;
+            }
+
+            const auto found = loadedSnapshotEvidenceByPid_.find(process.pid);
+            if (found == loadedSnapshotEvidenceByPid_.end() ||
+                found->second >= loadedSnapshotEvidence_.size())
+            {
+                ClearSelectedProcessEvidence();
+                return false;
+            }
+
+            const Export::ProcessEvidenceSnapshot& evidence = loadedSnapshotEvidence_[found->second];
+            ClearSelectedProcessEvidence();
+            const std::uint64_t creationTime = ProcessCacheStamp(process);
+
+            if (EvidenceStatusWasAttempted(evidence.modulesStatus))
+            {
+                selectedModules_ = evidence.modules;
+                selectedModules_.pid = process.pid;
+                ApplyLoadedStatusNote(selectedModules_.statusMessage, L"Module", evidence.modulesStatus);
+                if (!selectedModules_.success && selectedModules_.statusMessage.empty())
+                {
+                    selectedModules_.statusMessage = LoadedEvidenceStatusMessage(L"Module", evidence.modulesStatus);
+                }
+                selectedModulesLoaded_ = true;
+                selectedModulesPid_ = process.pid;
+                selectedModulesCreationTime_ = creationTime;
+                selectedModulePid_ = InvalidPid;
+                selectedModuleIndex_ = 0;
+            }
+
+            if (EvidenceStatusWasAttempted(evidence.tokenStatus))
+            {
+                selectedToken_ = evidence.token;
+                ApplyLoadedStatusNote(selectedToken_.errorMessage, L"Token", evidence.tokenStatus);
+                if (!selectedToken_.success && selectedToken_.errorMessage.empty())
+                {
+                    selectedToken_.errorMessage = LoadedEvidenceStatusMessage(L"Token", evidence.tokenStatus);
+                }
+                selectedTokenLoaded_ = true;
+                selectedTokenPid_ = process.pid;
+                selectedTokenCreationTime_ = creationTime;
+            }
+
+            if (EvidenceStatusWasAttempted(evidence.runtimeStatus))
+            {
+                selectedRuntime_ = evidence.runtime;
+                selectedRuntime_.processId = process.pid;
+                ApplyLoadedStatusNote(selectedRuntime_.errorMessage, L"Runtime", evidence.runtimeStatus);
+                if (!selectedRuntime_.success && selectedRuntime_.errorMessage.empty())
+                {
+                    selectedRuntime_.errorMessage = LoadedEvidenceStatusMessage(L"Runtime", evidence.runtimeStatus);
+                }
+                selectedRuntimeLoaded_ = true;
+                selectedRuntimePid_ = process.pid;
+                selectedRuntimeCreationTime_ = creationTime;
+            }
+
+            if (EvidenceStatusWasAttempted(evidence.memoryStatus))
+            {
+                selectedMemory_ = evidence.memory;
+                selectedMemory_.pid = process.pid;
+                ApplyLoadedStatusNote(selectedMemory_.statusMessage, L"Memory region", evidence.memoryStatus);
+                if (!selectedMemory_.success && selectedMemory_.statusMessage.empty())
+                {
+                    selectedMemory_.statusMessage = LoadedEvidenceStatusMessage(L"Memory region", evidence.memoryStatus);
+                }
+                selectedMemoryLoaded_ = true;
+                selectedMemoryPid_ = process.pid;
+                selectedMemoryCreationTime_ = creationTime;
+                visibleMemoryRegionsDirty_ = true;
+            }
+
+            if (EvidenceStatusWasAttempted(evidence.handlesStatus))
+            {
+                selectedHandles_ = evidence.handles;
+                selectedHandles_.pid = process.pid;
+                ApplyLoadedStatusNote(selectedHandles_.statusMessage, L"Handle", evidence.handlesStatus);
+                if (!selectedHandles_.success && selectedHandles_.statusMessage.empty())
+                {
+                    selectedHandles_.statusMessage = LoadedEvidenceStatusMessage(L"Handle", evidence.handlesStatus);
+                }
+                selectedHandlesLoaded_ = true;
+                selectedHandlesPid_ = process.pid;
+                selectedHandlesCreationTime_ = creationTime;
+                visibleHandlesDirty_ = true;
+            }
+
+            MarkSelectedEvidenceTablesNeedAutoSize();
+            InvalidateFindingsCache();
+            return true;
+        }
+
         void RefreshHandlesForSelectionChange(const Core::ProcessInfo& process)
         {
             if (HandlesLoadedForProcess(process))
@@ -249,6 +417,12 @@
 
         void EnsureSelectedProcessEvidenceLoaded(const Core::ProcessInfo& process)
         {
+            if (loadedSnapshotActive_)
+            {
+                RestoreLoadedSnapshotEvidenceForProcess(process);
+                return;
+            }
+
             std::vector<std::string> refreshed;
             bool hasFailure = false;
 
@@ -317,6 +491,15 @@
 
         void RefreshModules(bool logActivity = true)
         {
+            if (loadedSnapshotActive_)
+            {
+                if (logActivity)
+                {
+                    AddLog(LogLevel::Warning, "Module refresh is unavailable while viewing a saved snapshot. Return to live view first.");
+                }
+                return;
+            }
+
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
@@ -355,6 +538,15 @@
 
         void RefreshToken(bool logActivity = true)
         {
+            if (loadedSnapshotActive_)
+            {
+                if (logActivity)
+                {
+                    AddLog(LogLevel::Warning, "Token refresh is unavailable while viewing a saved snapshot. Return to live view first.");
+                }
+                return;
+            }
+
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
@@ -393,6 +585,15 @@
 
         void RefreshRuntime(bool logActivity = true)
         {
+            if (loadedSnapshotActive_)
+            {
+                if (logActivity)
+                {
+                    AddLog(LogLevel::Warning, "Runtime refresh is unavailable while viewing a saved snapshot. Return to live view first.");
+                }
+                return;
+            }
+
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
@@ -433,6 +634,15 @@
 
         void RefreshMemory(bool logActivity = true)
         {
+            if (loadedSnapshotActive_)
+            {
+                if (logActivity)
+                {
+                    AddLog(LogLevel::Warning, "Memory refresh is unavailable while viewing a saved snapshot. Return to live view first.");
+                }
+                return;
+            }
+
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
@@ -480,6 +690,15 @@
 
         void RefreshHandles(bool logActivity = true)
         {
+            if (loadedSnapshotActive_)
+            {
+                if (logActivity)
+                {
+                    AddLog(LogLevel::Warning, "Handle refresh is unavailable while viewing a saved snapshot. Return to live view first.");
+                }
+                return;
+            }
+
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {

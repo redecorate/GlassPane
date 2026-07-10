@@ -138,12 +138,7 @@ namespace GlassPane::Core
             {
                 Severity severity = Severity::Medium;
 
-                if (loweredParentName == L"codex.exe")
-                {
-                    severity = Severity::Low;
-                    process.contextNotes.push_back(L"Encoded PowerShell launched by Codex developer tooling.");
-                }
-                else if (InSet(encodedCommandHighRiskParents, loweredParentName))
+                if (InSet(encodedCommandHighRiskParents, loweredParentName))
                 {
                     severity = Severity::High;
                 }

@@ -175,16 +175,27 @@
             return CompareEndpointText(endpoint, remote);
         }
 
-        std::wstring FormatCompareSummaryForClipboard() const
+        std::wstring FormatCompareSummaryForClipboard(
+            const Core::ProcessSnapshotCapture& baseline,
+            const Core::ProcessSnapshotCapture& current,
+            const Core::SnapshotCompareResult& result,
+            bool resultValid) const
         {
             constexpr std::size_t MaxNotableItemsPerSection = 10;
 
             std::wstringstream text;
             text << L"GlassPane Snapshot Compare\r\n";
-            text << L"Baseline: " << (baselineCompareSnapshot_.captured ? baselineCompareSnapshot_.captureTimeLocal : L"(not captured)") << L"\r\n";
-            text << L"Current: " << (currentCompareSnapshot_.captured ? currentCompareSnapshot_.captureTimeLocal : L"(not captured)") << L"\r\n\r\n";
+            text << L"Baseline: " << (baseline.captured ? baseline.captureTimeLocal : L"(not captured)") << L"\r\n";
+            text << L"Current: " << (current.captured ? current.captureTimeLocal : L"(not captured)") << L"\r\n\r\n";
 
-            if (!baselineCompareSnapshot_.captured || !currentCompareSnapshot_.captured || !compareResultValid_)
+            const bool hasValidCompare =
+                baseline.captured &&
+                current.captured &&
+                resultValid &&
+                result.hasBaseline &&
+                result.hasCurrent;
+
+            if (!hasValidCompare)
             {
                 text << L"Summary:\r\n";
                 text << L"- Capture both baseline and current snapshots before reviewing differences.\r\n\r\n";
@@ -194,24 +205,31 @@
             }
 
             const std::size_t findingChanges =
-                compareResult_.newFindings.size() +
-                compareResult_.removedFindings.size() +
-                compareResult_.changedFindings.size();
+                result.newFindings.size() +
+                result.removedFindings.size() +
+                result.changedFindings.size();
 
             text << L"Summary:\r\n";
-            text << L"- Baseline processes: " << baselineCompareSnapshot_.processes.size() << L"\r\n";
-            text << L"- Current processes: " << currentCompareSnapshot_.processes.size() << L"\r\n";
-            text << L"- New processes: " << compareResult_.newProcesses.size() << L"\r\n";
-            text << L"- Exited processes: " << compareResult_.exitedProcesses.size() << L"\r\n";
-            text << L"- Changed processes: " << compareResult_.changedProcesses.size() << L"\r\n";
+            text << L"- Baseline processes: " << baseline.processes.size() << L"\r\n";
+            text << L"- Current processes: " << current.processes.size() << L"\r\n";
+            text << L"- New processes: " << result.newProcesses.size() << L"\r\n";
+            text << L"- Exited processes: " << result.exitedProcesses.size() << L"\r\n";
+            text << L"- Changed processes: " << result.changedProcesses.size() << L"\r\n";
             text << L"- New network connections: "
-                << (compareResult_.networkCompared ? std::to_wstring(compareResult_.newNetworkConnections.size()) : L"Unavailable") << L"\r\n";
+                << (result.networkCompared ? std::to_wstring(result.newNetworkConnections.size()) : L"Unavailable") << L"\r\n";
             text << L"- Closed network connections: "
-                << (compareResult_.networkCompared ? std::to_wstring(compareResult_.closedNetworkConnections.size()) : L"Unavailable") << L"\r\n";
+                << (result.networkCompared ? std::to_wstring(result.closedNetworkConnections.size()) : L"Unavailable") << L"\r\n";
             text << L"- Finding changes: "
-                << (compareResult_.findingsCompared ? std::to_wstring(findingChanges) : L"Unavailable") << L"\r\n\r\n";
+                << (result.findingsCompared ? std::to_wstring(findingChanges) : L"Unavailable") << L"\r\n\r\n";
 
-            if (CompareHasNoDifferences())
+            if (result.newProcesses.empty() &&
+                result.exitedProcesses.empty() &&
+                result.changedProcesses.empty() &&
+                result.newNetworkConnections.empty() &&
+                result.closedNetworkConnections.empty() &&
+                result.newFindings.empty() &&
+                result.removedFindings.empty() &&
+                result.changedFindings.empty())
             {
                 text << L"Notable changes:\r\n";
                 text << L"- No meaningful differences found.\r\n\r\n";
@@ -227,127 +245,88 @@
                     }
                 };
 
-                const std::size_t newProcessCount = std::min(MaxNotableItemsPerSection, compareResult_.newProcesses.size());
+                const std::size_t newProcessCount = std::min(MaxNotableItemsPerSection, result.newProcesses.size());
                 for (std::size_t index = 0; index < newProcessCount; ++index)
                 {
-                    const Core::SnapshotProcessRecord& process = compareResult_.newProcesses[index];
+                    const Core::SnapshotProcessRecord& process = result.newProcesses[index];
                     text << L"- New process observed: "
                         << (process.processName.empty() ? L"(unknown)" : process.processName)
                         << L" PID " << process.pid << L"\r\n";
                 }
-                appendTruncation(compareResult_.newProcesses.size());
+                appendTruncation(result.newProcesses.size());
 
-                const std::size_t exitedProcessCount = std::min(MaxNotableItemsPerSection, compareResult_.exitedProcesses.size());
+                const std::size_t exitedProcessCount = std::min(MaxNotableItemsPerSection, result.exitedProcesses.size());
                 for (std::size_t index = 0; index < exitedProcessCount; ++index)
                 {
-                    const Core::SnapshotProcessRecord& process = compareResult_.exitedProcesses[index];
+                    const Core::SnapshotProcessRecord& process = result.exitedProcesses[index];
                     text << L"- Process exited: "
                         << (process.processName.empty() ? L"(unknown)" : process.processName)
                         << L" PID " << process.pid << L"\r\n";
                 }
-                appendTruncation(compareResult_.exitedProcesses.size());
+                appendTruncation(result.exitedProcesses.size());
 
-                const std::size_t changedProcessCount = std::min(MaxNotableItemsPerSection, compareResult_.changedProcesses.size());
+                const std::size_t changedProcessCount = std::min(MaxNotableItemsPerSection, result.changedProcesses.size());
                 for (std::size_t index = 0; index < changedProcessCount; ++index)
                 {
-                    const Core::SnapshotProcessChange& change = compareResult_.changedProcesses[index];
+                    const Core::SnapshotProcessChange& change = result.changedProcesses[index];
                     text << L"- Process changed: "
                         << (change.current.processName.empty() ? L"(unknown)" : change.current.processName)
                         << L" PID " << change.current.pid
                         << L" (" << change.fields.size() << L" field(s))\r\n";
                 }
-                appendTruncation(compareResult_.changedProcesses.size());
+                appendTruncation(result.changedProcesses.size());
 
-                if (compareResult_.networkCompared)
+                if (result.networkCompared)
                 {
-                    const std::size_t newNetworkCount = std::min(MaxNotableItemsPerSection, compareResult_.newNetworkConnections.size());
+                    const std::size_t newNetworkCount = std::min(MaxNotableItemsPerSection, result.newNetworkConnections.size());
                     for (std::size_t index = 0; index < newNetworkCount; ++index)
                     {
-                        const Core::SnapshotNetworkEndpoint& endpoint = compareResult_.newNetworkConnections[index];
+                        const Core::SnapshotNetworkEndpoint& endpoint = result.newNetworkConnections[index];
                         text << L"- Network connection appeared: "
                             << (endpoint.processName.empty() ? L"(unknown)" : endpoint.processName)
                             << L" -> " << FormatCompareEndpointSummary(endpoint, true) << L"\r\n";
                     }
-                    appendTruncation(compareResult_.newNetworkConnections.size());
+                    appendTruncation(result.newNetworkConnections.size());
 
-                    const std::size_t closedNetworkCount = std::min(MaxNotableItemsPerSection, compareResult_.closedNetworkConnections.size());
+                    const std::size_t closedNetworkCount = std::min(MaxNotableItemsPerSection, result.closedNetworkConnections.size());
                     for (std::size_t index = 0; index < closedNetworkCount; ++index)
                     {
-                        const Core::SnapshotNetworkEndpoint& endpoint = compareResult_.closedNetworkConnections[index];
+                        const Core::SnapshotNetworkEndpoint& endpoint = result.closedNetworkConnections[index];
                         text << L"- Network connection closed: "
                             << (endpoint.processName.empty() ? L"(unknown)" : endpoint.processName)
                             << L" -> " << FormatCompareEndpointSummary(endpoint, true) << L"\r\n";
                     }
-                    appendTruncation(compareResult_.closedNetworkConnections.size());
+                    appendTruncation(result.closedNetworkConnections.size());
                 }
 
-                if (compareResult_.findingsCompared)
+                if (result.findingsCompared)
                 {
-                    const std::size_t newFindingCount = std::min(MaxNotableItemsPerSection, compareResult_.newFindings.size());
+                    const std::size_t newFindingCount = std::min(MaxNotableItemsPerSection, result.newFindings.size());
                     for (std::size_t index = 0; index < newFindingCount; ++index)
                     {
-                        const Core::SnapshotFindingRecord& finding = compareResult_.newFindings[index];
+                        const Core::SnapshotFindingRecord& finding = result.newFindings[index];
                         text << L"- New finding: "
                             << Core::FindingSeverityToString(finding.severity)
                             << L" "
                             << (finding.title.empty() ? L"(untitled)" : finding.title)
                             << L" (PID " << finding.pid << L")\r\n";
                     }
-                    appendTruncation(compareResult_.newFindings.size());
+                    appendTruncation(result.newFindings.size());
                 }
 
                 text << L"\r\n";
             }
 
             text << L"Notes:\r\n";
-            if (!compareResult_.networkCompared)
+            if (!result.networkCompared)
             {
                 text << L"- Network comparison unavailable because network data was not loaded for both snapshots.\r\n";
             }
-            if (!compareResult_.findingsCompared)
+            if (!result.findingsCompared)
             {
                 text << L"- Finding comparison unavailable for one or both snapshots.\r\n";
             }
             text << L"Snapshot differences are evidence worth reviewing, not proof of malicious activity.\r\n";
             return text.str();
-        }
-
-        void ExportCompareReport()
-        {
-            if (!baselineCompareSnapshot_.captured || !currentCompareSnapshot_.captured || !compareResultValid_)
-            {
-                AddLog(LogLevel::Warning, "Compare report export requires baseline and current snapshots.");
-                return;
-            }
-
-            wchar_t fileName[MAX_PATH] = {};
-            const std::wstring defaultName = L"glasspane-compare-" + FileTimestamp() + L".md";
-            wcsncpy_s(fileName, defaultName.c_str(), _TRUNCATE);
-            if (!PromptForMarkdownPath(fileName))
-            {
-                return;
-            }
-
-            Export::SnapshotCompareMarkdownReportContext context;
-            context.baseline = &baselineCompareSnapshot_;
-            context.current = &currentCompareSnapshot_;
-            context.result = &compareResult_;
-            context.appVersion = Utf8ToWide(GlassPaneVersion().c_str());
-            context.buildConfiguration = Utf8ToWide(BuildConfiguration());
-
-            std::wstring error;
-            const ULONGLONG started = GetTickCount64();
-            if (!Export::ExportSnapshotCompareMarkdownReport(context, fileName, &error))
-            {
-                timings_.markdownReportMs = ElapsedMs(started);
-                AddLog(LogLevel::High, "Compare report export failed: " + WideToUtf8(error));
-                MessageBoxW(hwnd_, error.c_str(), L"Compare report export failed", MB_ICONERROR | MB_OK);
-                return;
-            }
-            timings_.markdownReportMs = ElapsedMs(started);
-            AddLog(
-                LogLevel::Info,
-                "Compare report exported: " + WideToUtf8(fileName) +
-                    " (" + std::to_string(timings_.markdownReportMs) + " ms).");
         }
 

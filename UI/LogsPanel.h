@@ -9,6 +9,8 @@
 
 namespace GlassPane::UI
 {
+    inline constexpr float AppStatusBarHeight = 28.0f;
+
     enum class LogsPanelLevel
     {
         Info,
@@ -57,7 +59,20 @@ namespace GlassPane::UI
         IndicatorsPanelContext indicators;
     };
 
+    struct AppStatusBarContext
+    {
+        std::string statusText = "Ready";
+        std::string osBuild;
+        std::string architecture;
+        ImVec4 indicatorColor = ImVec4(0.32f, 0.74f, 0.46f, 1.0f);
+        ImVec4 textColor = ImVec4(0.86f, 0.90f, 0.95f, 1.0f);
+        ImVec4 mutedTextColor = ImVec4(0.58f, 0.66f, 0.76f, 1.0f);
+        ImVec4 backgroundColor = ImVec4(0.025f, 0.035f, 0.048f, 1.0f);
+        ImVec4 borderColor = ImVec4(0.16f, 0.22f, 0.30f, 1.0f);
+    };
+
     void RenderLogsPanelContent(const LogsPanelContext& context);
     void RenderIndicatorsPanelContent(const IndicatorsPanelContext& context);
     void RenderLogsAndIndicatorsPanel(const LogsAndIndicatorsPanelContext& context);
+    void RenderAppStatusBar(const AppStatusBarContext& context);
 }

@@ -207,6 +207,44 @@ namespace GlassPane::UI
             return value.substr(0, maxLength - 3) + "...";
         }
 
+        std::string EllipsizeToWidth(const std::string& value, float maxWidth)
+        {
+            if (value.empty() || maxWidth <= 1.0f)
+            {
+                return {};
+            }
+
+            if (ImGui::CalcTextSize(value.c_str()).x <= maxWidth)
+            {
+                return value;
+            }
+
+            constexpr const char* Ellipsis = "...";
+            const float ellipsisWidth = ImGui::CalcTextSize(Ellipsis).x;
+            if (maxWidth <= ellipsisWidth)
+            {
+                return ".";
+            }
+
+            std::size_t low = 0;
+            std::size_t high = value.size();
+            while (low < high)
+            {
+                const std::size_t mid = (low + high + 1) / 2;
+                const std::string candidate = value.substr(0, mid) + Ellipsis;
+                if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth)
+                {
+                    low = mid;
+                }
+                else
+                {
+                    high = mid - 1;
+                }
+            }
+
+            return value.substr(0, low) + Ellipsis;
+        }
+
         std::wstring OptionalSessionId(const std::optional<std::uint32_t>& sessionId)
         {
             return sessionId.has_value() ? std::to_wstring(sessionId.value()) : L"(unknown)";
@@ -328,6 +366,54 @@ namespace GlassPane::UI
             return ImGui::ColorConvertFloat4ToU32(color);
         }
 
+        ImVec4 GlassPrimaryTextColor()
+        {
+            return ImVec4(0.91f, 0.95f, 0.99f, 1.0f);
+        }
+
+        ImVec4 GlassMutedTextColor()
+        {
+            return ImVec4(0.58f, 0.66f, 0.76f, 1.0f);
+        }
+
+        ImVec4 GlassPanelBackground()
+        {
+            return ImVec4(0.031f, 0.041f, 0.058f, 1.0f);
+        }
+
+        ImVec4 GlassRaisedPanelBackground()
+        {
+            return ImVec4(0.046f, 0.061f, 0.084f, 1.0f);
+        }
+
+        ImVec4 GlassCardBackground()
+        {
+            return ImVec4(0.040f, 0.054f, 0.076f, 1.0f);
+        }
+
+        ImVec4 GlassHoverColor()
+        {
+            return ImVec4(0.066f, 0.091f, 0.128f, 1.0f);
+        }
+
+        ImVec4 GlassBorderColor()
+        {
+            return ImVec4(0.105f, 0.140f, 0.195f, 0.86f);
+        }
+
+        ImVec4 GlassSelectedRowColor(const ImVec4& accent)
+        {
+            return ImVec4(accent.x * 0.18f, accent.y * 0.30f, accent.z * 0.42f, 0.92f);
+        }
+
+        namespace
+        {
+            ImVec4 GlassButtonActive()
+            {
+                return ImVec4(0.105f, 0.164f, 0.235f, 1.0f);
+            }
+        }
+
         void TextWide(const std::wstring& value)
         {
             const std::string text = WideToUtf8(value);
@@ -379,6 +465,50 @@ namespace GlassPane::UI
         void RenderWrappedTooltip(const std::wstring& text, float wrapWidth)
         {
             RenderWrappedTooltip(WideToUtf8(text), wrapWidth);
+        }
+
+        void RenderEmptyState(const char* primary, const char* detail)
+        {
+            if (primary == nullptr || primary[0] == '\0')
+            {
+                return;
+            }
+
+            ImVec4 primaryColor = GlassPrimaryTextColor();
+            primaryColor.w = 0.84f;
+            ImGui::PushStyleColor(ImGuiCol_Text, primaryColor);
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextUnformatted(primary);
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+
+            if (detail != nullptr && detail[0] != '\0')
+            {
+                ImGui::PushStyleColor(ImGuiCol_Text, GlassMutedTextColor());
+                ImGui::PushTextWrapPos(0.0f);
+                ImGui::TextUnformatted(detail);
+                ImGui::PopTextWrapPos();
+                ImGui::PopStyleColor();
+            }
+        }
+
+        void RenderDisabledReasonTooltip(const char* reason)
+        {
+            if (reason != nullptr && reason[0] != '\0' &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            {
+                RenderWrappedTooltip(reason, 360.0f);
+            }
+        }
+
+        void TextEllipsizedWithTooltip(const std::string& value, float maxWidth, float tooltipWrapWidth)
+        {
+            const std::string clipped = EllipsizeToWidth(value, maxWidth);
+            ImGui::TextUnformatted(clipped.c_str());
+            if (clipped != value && ImGui::IsItemHovered() && !value.empty())
+            {
+                RenderWrappedTooltip(value, tooltipWrapWidth);
+            }
         }
 
         void ClippedTextWithTooltip(const std::wstring& value, float tooltipWrapWidth)
@@ -455,15 +585,109 @@ namespace GlassPane::UI
             const std::string label = WideToUtf8(Core::SeverityToString(severity));
             const ImVec2 textSize = ImGui::CalcTextSize(label.c_str());
             const ImVec2 min = ImGui::GetCursorScreenPos();
-            const ImVec2 max(min.x + textSize.x + 18.0f, min.y + textSize.y + 8.0f);
+            const ImVec2 max(min.x + textSize.x + 20.0f, min.y + textSize.y + 10.0f);
             ImDrawList* drawList = ImGui::GetWindowDrawList();
-            const ImU32 border = SeverityU32(severity);
-            const ImU32 fill = Core::SeverityRank(severity) >= Core::SeverityRank(Core::Severity::Low)
-                ? IM_COL32(38, 28, 24, 255)
-                : IM_COL32(24, 30, 38, 255);
-            drawList->AddRectFilled(min, max, fill, 4.0f);
-            drawList->AddRect(min, max, border, 4.0f, 0, 1.4f);
-            drawList->AddText(ImVec2(min.x + 9.0f, min.y + 4.0f), border, label.c_str());
-            ImGui::Dummy(ImVec2(textSize.x + 18.0f, textSize.y + 8.0f));
+            const ImVec4 accent = SeverityColor(severity);
+            const ImVec4 fill = Core::SeverityRank(severity) >= Core::SeverityRank(Core::Severity::Low)
+                ? ImVec4(
+                    std::max(0.030f, accent.x * 0.115f),
+                    std::max(0.034f, accent.y * 0.085f),
+                    std::max(0.044f, accent.z * 0.075f),
+                    1.0f)
+                : GlassRaisedPanelBackground();
+            drawList->AddRectFilled(min, max, ColorU32(fill), 6.0f);
+            drawList->AddRect(min, max, ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.74f)), 6.0f, 0, 1.2f);
+            drawList->AddText(ImVec2(min.x + 10.0f, min.y + 5.0f), ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.96f)), label.c_str());
+            ImGui::Dummy(ImVec2(textSize.x + 20.0f, textSize.y + 10.0f));
+        }
+
+        void RenderGlassSectionHeader(const char* label, ImFont* font, const ImVec4& accent)
+        {
+            const bool pushedFont = PushFontIfAvailable(font);
+            ImGui::TextColored(ImVec4(accent.x, accent.y, accent.z, 0.96f), "%s", label);
+            PopFontIfPushed(pushedFont);
+
+            const ImVec2 lineStart = ImGui::GetCursorScreenPos();
+            const float lineWidth = ImGui::GetContentRegionAvail().x;
+            if (lineWidth > 1.0f)
+            {
+                ImGui::GetWindowDrawList()->AddLine(
+                    lineStart,
+                    ImVec2(lineStart.x + lineWidth, lineStart.y),
+                    ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.24f)),
+                    1.0f);
+            }
+            ImGui::Dummy(ImVec2(0.0f, 5.0f));
+        }
+
+        void RenderGlassSubtleSeparator()
+        {
+            const ImVec2 lineStart = ImGui::GetCursorScreenPos();
+            const float lineWidth = ImGui::GetContentRegionAvail().x;
+            if (lineWidth > 1.0f)
+            {
+                ImGui::GetWindowDrawList()->AddLine(
+                    lineStart,
+                    ImVec2(lineStart.x + lineWidth, lineStart.y),
+                    ColorU32(ImVec4(GlassBorderColor().x, GlassBorderColor().y, GlassBorderColor().z, 0.58f)),
+                    1.0f);
+            }
+            ImGui::Dummy(ImVec2(0.0f, 7.0f));
+        }
+
+        void PushGlassCardStyle()
+        {
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, GlassCardBackground());
+            ImGui::PushStyleColor(ImGuiCol_Border, GlassBorderColor());
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(13.0f, 11.0f));
+        }
+
+        void PopGlassCardStyle()
+        {
+            ImGui::PopStyleVar();
+            ImGui::PopStyleColor(2);
+        }
+
+        void PushGlassButtonStyle()
+        {
+            ImGui::PushStyleColor(ImGuiCol_Button, GlassCardBackground());
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, GlassHoverColor());
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, GlassButtonActive());
+            ImGui::PushStyleColor(ImGuiCol_Border, GlassBorderColor());
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(11.0f, 6.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        }
+
+        void PopGlassButtonStyle()
+        {
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor(4);
+        }
+
+        void PushGlassChipStyle(bool active, const ImVec4& accent)
+        {
+            const ImVec4 inactive = GlassCardBackground();
+            ImGui::PushStyleColor(
+                ImGuiCol_Button,
+                active ? ImVec4(accent.x * 0.30f, accent.y * 0.30f, accent.z * 0.30f, 1.0f) : inactive);
+            ImGui::PushStyleColor(
+                ImGuiCol_ButtonHovered,
+                active ? ImVec4(accent.x * 0.40f, accent.y * 0.40f, accent.z * 0.40f, 1.0f) : GlassHoverColor());
+            ImGui::PushStyleColor(
+                ImGuiCol_ButtonActive,
+                active ? ImVec4(accent.x * 0.50f, accent.y * 0.50f, accent.z * 0.50f, 1.0f) : GlassButtonActive());
+            ImGui::PushStyleColor(
+                ImGuiCol_Border,
+                active ? ImVec4(accent.x, accent.y, accent.z, 0.65f) : GlassBorderColor());
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(11.0f, 6.0f));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+        }
+
+        void PopGlassChipStyle()
+        {
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor(4);
         }
 }

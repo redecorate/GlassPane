@@ -1,9 +1,14 @@
 #include "ComparePanel.h"
+#include "UiHelpers.h"
 
 #include <algorithm>
 
 namespace GlassPane::UI
 {
+    void PushGlassButtonStyle();
+    void PopGlassButtonStyle();
+    void RenderGlassSectionHeader(const char* label, ImFont* font, const ImVec4& accent);
+
     namespace
     {
         bool PushFontIfAvailable(ImFont* font)
@@ -47,6 +52,23 @@ namespace GlassPane::UI
                 ImGui::SameLine(0.0f, spacing);
             }
         }
+
+        bool ActionButton(const char* label, bool enabled = true, const char* disabledReason = nullptr)
+        {
+            PushGlassButtonStyle();
+            if (!enabled)
+            {
+                ImGui::BeginDisabled();
+            }
+            const bool clicked = ImGui::Button(label);
+            if (!enabled)
+            {
+                ImGui::EndDisabled();
+                RenderDisabledReasonTooltip(disabledReason);
+            }
+            PopGlassButtonStyle();
+            return enabled && clicked;
+        }
     }
 
     void RenderComparePanel(
@@ -55,36 +77,33 @@ namespace GlassPane::UI
         ImFont* titleFont,
         const ImVec4& accentColor)
     {
-        const bool pushedTitleFont = PushFontIfAvailable(titleFont);
-        ImGui::TextColored(accentColor, "Snapshot Compare");
-        PopFontIfPushed(pushedTitleFont);
+        RenderGlassSectionHeader("Snapshot Compare", titleFont, accentColor);
         WrappedTextDisabled("Compare local in-memory snapshots. Changes are evidence worth reviewing, not proof of malicious activity.");
         WrappedTextDisabled("Capture Baseline and Capture Current refresh the process snapshot first. Capture Current replaces the previous current snapshot and compares it to the baseline.");
         ImGui::Spacing();
 
-        if (ImGui::Button("Capture Baseline##Compare") && callbacks.captureBaseline)
+        if (ActionButton("Capture Baseline##Compare") && callbacks.captureBaseline)
         {
             callbacks.captureBaseline();
         }
         SameLineIfFits(StandardButtonWidth("Capture Current"), 8.0f);
-        if (ImGui::Button("Capture Current##Compare") && callbacks.captureCurrent)
+        if (ActionButton("Capture Current##Compare") && callbacks.captureCurrent)
         {
             callbacks.captureCurrent();
         }
         SameLineIfFits(StandardButtonWidth("Clear Compare"), 8.0f);
-        if (ImGui::Button("Clear Compare##Compare") && callbacks.clearCompare)
+        const bool hasCompareState = state.baselineCaptured || state.currentCaptured || state.resultValid;
+        if (ActionButton(
+                "Clear Compare##Compare",
+                hasCompareState,
+                "There is no captured comparison to clear.") && callbacks.clearCompare)
         {
             callbacks.clearCompare();
         }
         SameLineIfFits(StandardButtonWidth("Copy Compare Summary"), 8.0f);
-        if (ImGui::Button("Copy Compare Summary##Compare") && callbacks.copySummary)
+        if (ActionButton("Copy Compare Summary##Compare") && callbacks.copySummary)
         {
             callbacks.copySummary();
-        }
-        SameLineIfFits(StandardButtonWidth("Export Compare Report"), 8.0f);
-        if (ImGui::Button("Export Compare Report##Compare") && callbacks.exportReport)
-        {
-            callbacks.exportReport();
         }
 
         ImGui::Spacing();
@@ -96,22 +115,22 @@ namespace GlassPane::UI
 
         if (!state.baselineCaptured && !state.currentCaptured)
         {
-            WrappedTextDisabled("Capture a baseline snapshot, then capture a current snapshot to compare changes.");
+            RenderEmptyState("Capture a baseline and current snapshot to review differences.");
             return;
         }
         if (state.baselineCaptured && !state.currentCaptured)
         {
-            WrappedTextDisabled("Baseline captured. Capture a current snapshot to compare changes.");
+            RenderEmptyState("Baseline captured.", "Capture a current snapshot to review differences.");
             return;
         }
         if (!state.baselineCaptured && state.currentCaptured)
         {
-            WrappedTextDisabled("Current snapshot captured. Capture a baseline snapshot to compare changes.");
+            RenderEmptyState("Current snapshot captured.", "Capture a baseline snapshot to review differences.");
             return;
         }
         if (!state.resultValid)
         {
-            WrappedTextDisabled("Capture both snapshots to compute a comparison.");
+            RenderEmptyState("The comparison is not available.", "Capture both snapshots to compute it.");
             return;
         }
 

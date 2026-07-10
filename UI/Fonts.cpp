@@ -57,18 +57,32 @@ namespace GlassPane::UI
         }
 
         bold = AddFontIfAvailable(
-            L"C:\\Windows\\Fonts\\segoeuib.ttf",
-            "C:\\Windows\\Fonts\\segoeuib.ttf",
+            L"C:\\Windows\\Fonts\\seguisb.ttf",
+            "C:\\Windows\\Fonts\\seguisb.ttf",
             17.2f);
+        if (bold == nullptr)
+        {
+            bold = AddFontIfAvailable(
+                L"C:\\Windows\\Fonts\\segoeuib.ttf",
+                "C:\\Windows\\Fonts\\segoeuib.ttf",
+                17.2f);
+        }
         if (bold == nullptr)
         {
             bold = ui;
         }
 
         title = AddFontIfAvailable(
-            L"C:\\Windows\\Fonts\\segoeuib.ttf",
-            "C:\\Windows\\Fonts\\segoeuib.ttf",
+            L"C:\\Windows\\Fonts\\seguisb.ttf",
+            "C:\\Windows\\Fonts\\seguisb.ttf",
             22.0f);
+        if (title == nullptr)
+        {
+            title = AddFontIfAvailable(
+                L"C:\\Windows\\Fonts\\segoeuib.ttf",
+                "C:\\Windows\\Fonts\\segoeuib.ttf",
+                22.0f);
+        }
         if (title == nullptr)
         {
             title = bold != nullptr ? bold : ui;

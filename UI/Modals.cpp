@@ -307,4 +307,67 @@ namespace GlassPane::UI
             }
         }
     }
+
+    void RenderDeepEvidenceSnapshotModal(const DeepEvidenceSnapshotModalContext& context)
+    {
+        if (context.popupRequested != nullptr && *context.popupRequested)
+        {
+            ImGui::OpenPopup("Save Deep Evidence Snapshot?");
+            if (context.openedFrame != nullptr)
+            {
+                *context.openedFrame = ImGui::GetFrameCount();
+            }
+            *context.popupRequested = false;
+        }
+
+        const int openedFrame = context.openedFrame != nullptr ? *context.openedFrame : -1;
+        bool closeRequested = false;
+        if (BeginGlassPaneModal(
+                "Save Deep Evidence Snapshot?",
+                openedFrame,
+                ImVec2(560.0f, 0.0f),
+                context.mutedTextColor,
+                &closeRequested))
+        {
+            const bool pushedTitleFont = PushFontIfAvailable(context.titleFont);
+            ImGui::TextColored(context.accentColor, "Save Deep Evidence Snapshot?");
+            PopFontIfPushed(pushedTitleFont);
+            ImGui::Spacing();
+            WrappedText("This may produce a large file and take longer.");
+            WrappedText("Memory contents are not saved.");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            bool continueSave = false;
+            bool cancelSave = false;
+            if (ImGui::Button("Continue"))
+            {
+                continueSave = true;
+                closeRequested = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel"))
+            {
+                cancelSave = true;
+                closeRequested = true;
+            }
+
+            if (closeRequested && !continueSave && !cancelSave)
+            {
+                cancelSave = true;
+            }
+
+            EndGlassPaneModal(closeRequested);
+
+            if (continueSave && context.onContinue)
+            {
+                context.onContinue();
+            }
+            else if (cancelSave && context.onCancel)
+            {
+                context.onCancel();
+            }
+        }
+    }
 }

@@ -10,6 +10,7 @@
 #include <array>
 #include <cctype>
 #include <filesystem>
+#include <functional>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -468,6 +469,20 @@ namespace GlassPane::Core
     NetworkIndicatorUpdateResult UpdateNetworkIndicatorFeed(
         const std::wstring& indicatorsDirectory)
     {
+        return UpdateNetworkIndicatorFeed(indicatorsDirectory, {});
+    }
+
+    NetworkIndicatorUpdateResult UpdateNetworkIndicatorFeed(
+        const std::wstring& indicatorsDirectory,
+        const std::function<void(const std::wstring&, float)>& progress)
+    {
+        const auto reportProgress = [&progress](const std::wstring& message, float value) {
+            if (progress)
+            {
+                progress(message, value);
+            }
+        };
+
         NetworkIndicatorUpdateResult result;
         const std::filesystem::path directory(indicatorsDirectory);
         const std::filesystem::path finalJsonPath = directory / FeedJsonFileName;
@@ -483,6 +498,7 @@ namespace GlassPane::Core
         result.shaTempPath = shaTempPath.wstring();
 
         std::error_code fsError;
+        reportProgress(L"Preparing portable Indicators folder...", 0.05f);
         std::filesystem::create_directories(directory, fsError);
         if (fsError)
         {
@@ -496,6 +512,7 @@ namespace GlassPane::Core
         DeleteFileIfExists(shaTempPath);
 
         std::wstring error;
+        reportProgress(L"Downloading network-indicators.json...", 0.18f);
         if (!DownloadFileToPath(
                 NetworkIndicatorsJsonUrl,
                 jsonTempPath,
@@ -510,6 +527,7 @@ namespace GlassPane::Core
         }
         result.jsonDownloaded = true;
 
+        reportProgress(L"Downloading network-indicators.sha256...", 0.32f);
         if (!DownloadFileToPath(
                 NetworkIndicatorsShaUrl,
                 shaTempPath,
@@ -524,6 +542,7 @@ namespace GlassPane::Core
         }
         result.shaDownloaded = true;
 
+        reportProgress(L"Parsing checksum file...", 0.46f);
         if (!ParseSha256File(shaTempPath, result.expectedSha256, error))
         {
             result.statusMessage = error;
@@ -533,6 +552,7 @@ namespace GlassPane::Core
         }
         result.checksumParsed = true;
 
+        reportProgress(L"Verifying SHA256...", 0.58f);
         if (!ComputeFileSha256(jsonTempPath, result.computedSha256, error))
         {
             result.statusMessage = error.empty()
@@ -551,6 +571,7 @@ namespace GlassPane::Core
             return result;
         }
 
+        reportProgress(L"Validating feed JSON...", 0.70f);
         const NetworkIndicatorLoadResult validation = LoadNetworkIndicatorFeedFromFile(jsonTempPath.wstring());
         if (!validation.success)
         {
@@ -569,6 +590,7 @@ namespace GlassPane::Core
         }
         result.jsonValidated = true;
 
+        reportProgress(L"Replacing local feed files...", 0.82f);
         bool hadJson = false;
         bool hadSha = false;
         if (!ReplaceOneFile(jsonTempPath, finalJsonPath, jsonBackupPath, hadJson, error))
@@ -591,6 +613,7 @@ namespace GlassPane::Core
         }
         result.filesReplaced = true;
 
+        reportProgress(L"Reloading verified feed...", 0.92f);
         result.loadResult = LoadNetworkIndicatorFeedFromFile(finalJsonPath.wstring());
         if (!result.loadResult.success)
         {

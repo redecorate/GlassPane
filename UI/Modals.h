@@ -45,7 +45,19 @@ namespace GlassPane::UI
         std::function<void()> onCancel;
     };
 
+    struct DeepEvidenceSnapshotModalContext
+    {
+        bool* popupRequested = nullptr;
+        int* openedFrame = nullptr;
+        ImFont* titleFont = nullptr;
+        ImVec4 accentColor = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
+        ImVec4 mutedTextColor = ImVec4(0.65f, 0.70f, 0.78f, 1.0f);
+        std::function<void()> onContinue;
+        std::function<void()> onCancel;
+    };
+
     void RenderAboutPanel(const AboutPanelContext& context);
     void RenderResetLayoutModal(const ResetLayoutModalContext& context);
     void RenderNetworkIntelUpdateModal(const NetworkIntelUpdateModalContext& context);
+    void RenderDeepEvidenceSnapshotModal(const DeepEvidenceSnapshotModalContext& context);
 }

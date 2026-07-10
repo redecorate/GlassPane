@@ -17,6 +17,7 @@ namespace GlassPane::UI
     std::string DisplayName(const std::wstring& value);
     std::string WrapForCurrentWidth(const std::string& text);
     std::string Shorten(const std::string& value, std::size_t maxLength);
+    std::string EllipsizeToWidth(const std::string& value, float maxWidth);
     std::wstring OptionalSessionId(const std::optional<std::uint32_t>& sessionId);
     std::wstring LocalTimestamp();
     std::wstring FileTimestamp();
@@ -26,6 +27,14 @@ namespace GlassPane::UI
     ImVec4 SeverityColor(Core::Severity severity);
     ImU32 SeverityU32(Core::Severity severity);
     ImU32 ColorU32(const ImVec4& color);
+    ImVec4 GlassPrimaryTextColor();
+    ImVec4 GlassMutedTextColor();
+    ImVec4 GlassPanelBackground();
+    ImVec4 GlassRaisedPanelBackground();
+    ImVec4 GlassCardBackground();
+    ImVec4 GlassHoverColor();
+    ImVec4 GlassBorderColor();
+    ImVec4 GlassSelectedRowColor(const ImVec4& accent);
 
     void TextWide(const std::wstring& value);
     void WrappedTextWide(const std::wstring& value);
@@ -34,6 +43,9 @@ namespace GlassPane::UI
     void WrappedTextDisabled(const std::string& value);
     void RenderWrappedTooltip(const std::string& text, float wrapWidth = 520.0f);
     void RenderWrappedTooltip(const std::wstring& text, float wrapWidth = 520.0f);
+    void RenderEmptyState(const char* primary, const char* detail = nullptr);
+    void RenderDisabledReasonTooltip(const char* reason);
+    void TextEllipsizedWithTooltip(const std::string& value, float maxWidth, float tooltipWrapWidth = 520.0f);
     void ClippedTextWithTooltip(const std::wstring& value, float tooltipWrapWidth = 600.0f);
     bool PushFontIfAvailable(ImFont* font);
     void PopFontIfPushed(bool pushed);
@@ -41,4 +53,12 @@ namespace GlassPane::UI
     void LabelValue(const char* label, const char* value);
     void SeverityText(Core::Severity severity);
     void SeverityBadge(Core::Severity severity);
+    void RenderGlassSectionHeader(const char* label, ImFont* font, const ImVec4& accent);
+    void RenderGlassSubtleSeparator();
+    void PushGlassCardStyle();
+    void PopGlassCardStyle();
+    void PushGlassButtonStyle();
+    void PopGlassButtonStyle();
+    void PushGlassChipStyle(bool active, const ImVec4& accent);
+    void PopGlassChipStyle();
 }

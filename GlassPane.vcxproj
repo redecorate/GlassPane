@@ -162,6 +162,7 @@
     <ClCompile Include="Core\TokenCollector.cpp" />
     <ClCompile Include="Export\JsonExporter.cpp" />
     <ClCompile Include="Export\MarkdownReportExporter.cpp" />
+    <ClCompile Include="Export\SavedSnapshot.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_dx11.cpp" />
     <ClCompile Include="third_party\imgui\backends\imgui_impl_win32.cpp" />
     <ClCompile Include="third_party\imgui\imgui.cpp" />
@@ -210,6 +211,7 @@
     <ClInclude Include="Core\TokenInfo.h" />
     <ClInclude Include="Export\JsonExporter.h" />
     <ClInclude Include="Export\MarkdownReportExporter.h" />
+    <ClInclude Include="Export\SavedSnapshot.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="third_party\imgui\backends\imgui_impl_dx11.h" />
     <ClInclude Include="third_party\imgui\backends\imgui_impl_win32.h" />
@@ -258,6 +260,12 @@
     <None Include="UI\SnapshotCompareActions.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target
+    Name="CleanReleaseNetworkIndicatorStaging"
+    BeforeTargets="PrepareForBuild"
+    Condition="'$(Configuration)|$(Platform)'=='Release|x64' and Exists('$(OutDir)Indicators')">
+    <RemoveDir Directories="$(OutDir)Indicators" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>
