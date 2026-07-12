@@ -352,6 +352,29 @@ namespace GlassPane::Export
             return EscapeMarkdownInline(WideToUtf8(value));
         }
 
+        std::string EscapeServiceMarkdownInline(const std::wstring& value)
+        {
+            const std::string utf8 = WideToUtf8(value);
+            std::string htmlSafe;
+            htmlSafe.reserve(utf8.size() + 8);
+            for (const char ch : utf8)
+            {
+                if (ch == '&')
+                {
+                    htmlSafe += "&amp;";
+                }
+                else if (ch == '<')
+                {
+                    htmlSafe += "&lt;";
+                }
+                else
+                {
+                    htmlSafe.push_back(ch);
+                }
+            }
+            return EscapeMarkdownInline(htmlSafe);
+        }
+
         std::size_t MaxBacktickRun(const std::string& value)
         {
             std::size_t maxRun = 0;
@@ -407,6 +430,273 @@ namespace GlassPane::Export
                 output << " " << EscapeMarkdownInline(cell.empty() ? L"(empty)" : cell) << " |";
             }
             output << "\n";
+        }
+
+        std::wstring JoinServiceTruncationNotes(const Core::ServiceInfo& service)
+        {
+            std::vector<std::wstring> notes;
+            if (service.serviceNameTruncated)
+            {
+                notes.emplace_back(L"service name");
+            }
+            if (service.displayNameTruncated)
+            {
+                notes.emplace_back(L"display name");
+            }
+            if (service.descriptionTruncated)
+            {
+                notes.emplace_back(L"description");
+            }
+            if (service.serviceAccountTruncated)
+            {
+                notes.emplace_back(L"configured account");
+            }
+            if (service.rawImagePathTruncated)
+            {
+                notes.emplace_back(L"raw ImagePath");
+            }
+            if (service.expandedImagePathTruncated)
+            {
+                notes.emplace_back(L"expanded ImagePath");
+            }
+            if (service.svchostGroupTruncated)
+            {
+                notes.emplace_back(L"svchost group");
+            }
+            if (service.pathParseMessageTruncated)
+            {
+                notes.emplace_back(L"path parse message");
+            }
+            if (service.statusMessageTruncated)
+            {
+                notes.emplace_back(L"service status message");
+            }
+
+            std::wstring summary;
+            for (std::size_t index = 0; index < notes.size(); ++index)
+            {
+                if (index != 0)
+                {
+                    summary += L", ";
+                }
+                summary += notes[index];
+            }
+            return summary;
+        }
+
+        void WriteServiceContextSection(
+            std::ostream& output,
+            const Core::ServiceCollectionResult* serviceContext,
+            std::uint32_t selectedPid)
+        {
+            constexpr std::size_t ServiceRenderCap = 32;
+
+            const bool attempted = serviceContext != nullptr && serviceContext->attempted;
+            const bool renderablePartial =
+                attempted &&
+                serviceContext->partial &&
+                !serviceContext->services.empty();
+            const bool unavailable =
+                attempted &&
+                !serviceContext->success &&
+                !renderablePartial;
+            const bool partial =
+                attempted &&
+                !unavailable &&
+                (serviceContext->partial || serviceContext->truncated || !serviceContext->success);
+
+            std::vector<const Core::ServiceInfo*> correlatedServices;
+            if (attempted && !unavailable)
+            {
+                const auto correlation = serviceContext->serviceIndexesByPid.find(selectedPid);
+                if (correlation != serviceContext->serviceIndexesByPid.end())
+                {
+                    std::vector<bool> includedIndexes(serviceContext->services.size(), false);
+                    correlatedServices.reserve(
+                        (std::min)(correlation->second.size(), Core::ServiceMaxRecords));
+                    for (const std::size_t serviceIndex : correlation->second)
+                    {
+                        if (serviceIndex >= serviceContext->services.size())
+                        {
+                            continue;
+                        }
+
+                        const Core::ServiceInfo& service = serviceContext->services[serviceIndex];
+                        if (service.scmProcessId == 0 ||
+                            service.scmProcessId != selectedPid ||
+                            !service.pidReliableForState)
+                        {
+                            continue;
+                        }
+                        if (includedIndexes[serviceIndex])
+                        {
+                            continue;
+                        }
+                        includedIndexes[serviceIndex] = true;
+                        correlatedServices.push_back(&service);
+                    }
+                }
+            }
+
+            const std::size_t retainedCount = serviceContext == nullptr
+                ? 0
+                : serviceContext->services.size();
+            const std::size_t visibleRecordCount = serviceContext == nullptr
+                ? 0
+                : (std::max)(serviceContext->totalEnumerated, retainedCount);
+            const wchar_t* collectionStatus = !attempted
+                ? L"Not captured"
+                : unavailable
+                    ? L"Unavailable"
+                    : partial
+                        ? L"Partial"
+                        : L"Complete";
+
+            output << "## Service Context\n\n";
+            output << "- Selected PID: `" << selectedPid << "`\n";
+            output << "- Correlated service count: " << correlatedServices.size() << "\n";
+            output << "- Active service records visible to the collection: " << visibleRecordCount << "\n";
+            output << "- Collection status: " << EscapeServiceMarkdownInline(collectionStatus) << "\n";
+            output << "- Association: SCM-reported PID association\n\n";
+
+            if (!attempted)
+            {
+                output << "> Service context was not captured in this snapshot.\n\n";
+                return;
+            }
+
+            if (unavailable)
+            {
+                output << "> Service context could not be collected.\n\n";
+                if (!serviceContext->statusMessage.empty())
+                {
+                    output << "Collection detail: "
+                           << EscapeServiceMarkdownInline(serviceContext->statusMessage)
+                           << "\n\n";
+                }
+                return;
+            }
+
+            if (partial)
+            {
+                output << "> Service context is partial. Some configuration details may be unavailable.\n\n";
+            }
+            if (serviceContext->truncated && visibleRecordCount > retainedCount)
+            {
+                output << "> " << (visibleRecordCount - retainedCount)
+                       << " active service records were omitted from the collected context.\n\n";
+            }
+            if (serviceContext->configurationUnavailableCount != 0)
+            {
+                output << "- Configuration records unavailable: "
+                       << serviceContext->configurationUnavailableCount << "\n";
+            }
+            if (serviceContext->descriptionUnavailableCount != 0)
+            {
+                output << "- Description records unavailable: "
+                       << serviceContext->descriptionUnavailableCount << "\n";
+            }
+            if (!serviceContext->statusMessage.empty())
+            {
+                output << "- Collection detail: "
+                       << EscapeServiceMarkdownInline(serviceContext->statusMessage) << "\n";
+            }
+            if (serviceContext->configurationUnavailableCount != 0 ||
+                serviceContext->descriptionUnavailableCount != 0 ||
+                !serviceContext->statusMessage.empty())
+            {
+                output << "\n";
+            }
+
+            if (correlatedServices.empty())
+            {
+                output << "> No active Windows services were correlated to this process by SCM-reported PID.\n\n";
+                return;
+            }
+
+            const std::size_t renderCount = (std::min)(correlatedServices.size(), ServiceRenderCap);
+            for (std::size_t serviceNumber = 0; serviceNumber < renderCount; ++serviceNumber)
+            {
+                const Core::ServiceInfo& service = *correlatedServices[serviceNumber];
+                output << "### Associated service " << (serviceNumber + 1) << "\n\n";
+                output << "- Service name: "
+                       << EscapeServiceMarkdownInline(ValueOr(service.serviceName, L"(empty)")) << "\n";
+                output << "- Display name: "
+                       << EscapeServiceMarkdownInline(ValueOr(service.displayName, L"(empty)")) << "\n";
+                output << "- Description: "
+                       << (service.descriptionAvailable
+                            ? EscapeServiceMarkdownInline(ValueOr(service.description, L"(empty)"))
+                            : std::string("Unavailable"))
+                       << "\n";
+
+                output << "- State: "
+                       << EscapeServiceMarkdownInline(Core::ServiceStateDisplayText(service.stateRaw)) << "\n";
+                output << "- SCM-reported PID: `" << service.scmProcessId << "`\n";
+                output << "- Process model: "
+                       << EscapeServiceMarkdownInline(Core::ServiceProcessModelDisplayText(service.processModel)) << "\n";
+                output << "- Service type: "
+                       << EscapeServiceMarkdownInline(Core::ServiceTypeDisplayText(service.serviceTypeRaw)) << "\n";
+                if (!service.svchostGroup.empty())
+                {
+                    output << "- svchost group: " << EscapeServiceMarkdownInline(service.svchostGroup) << "\n";
+                }
+
+                if (service.configurationAvailable)
+                {
+                    output << "- Configured start type: "
+                           << EscapeServiceMarkdownInline(Core::ServiceStartTypeDisplayText(service.startTypeRaw)) << "\n";
+                    output << "- Configured account: "
+                           << EscapeServiceMarkdownInline(ValueOr(service.serviceAccount, L"(empty)")) << "\n";
+                    output << "- Path parse status: "
+                           << EscapeServiceMarkdownInline(Core::ServicePathParseStatusDisplayText(service.pathParseStatus)) << "\n";
+                    output << "- Path confidence: "
+                           << EscapeServiceMarkdownInline(Core::ServicePathConfidenceDisplayText(service.pathConfidence)) << "\n";
+                    if (!service.pathParseMessage.empty())
+                    {
+                        output << "- Path parse detail: "
+                               << EscapeServiceMarkdownInline(service.pathParseMessage) << "\n";
+                    }
+                    output << "\nConfigured raw ImagePath:\n\n";
+                    WriteCodeBlock(output, service.rawImagePath);
+                    if (!service.expandedImagePath.empty() &&
+                        service.expandedImagePath != service.rawImagePath)
+                    {
+                        output << "\nExpanded ImagePath:\n\n";
+                        WriteCodeBlock(output, service.expandedImagePath);
+                    }
+                    if (!service.executablePath.empty())
+                    {
+                        output << "\nParsed executable path:\n\n";
+                        WriteCodeBlock(output, service.executablePath);
+                    }
+                }
+                else
+                {
+                    output << "- Configured context: Unavailable\n";
+                }
+
+                output << "\n- Configuration metadata: "
+                       << (service.configurationAvailable ? "Available" : "Unavailable") << "\n";
+                output << "- Description metadata: "
+                       << (service.descriptionAvailable ? "Available" : "Unavailable") << "\n";
+                const std::wstring truncationNotes = JoinServiceTruncationNotes(service);
+                if (!truncationNotes.empty())
+                {
+                    output << "- Truncated fields: " << EscapeServiceMarkdownInline(truncationNotes) << "\n";
+                }
+                if (!service.statusMessage.empty())
+                {
+                    output << "- Service status: "
+                           << EscapeServiceMarkdownInline(service.statusMessage) << "\n";
+                }
+                output << "\n";
+            }
+
+            if (correlatedServices.size() > renderCount)
+            {
+                output << "> " << (correlatedServices.size() - renderCount)
+                       << " additional correlated services were omitted from this report.\n\n";
+            }
         }
 
         std::wstring SignatureText(const Core::FileIdentity& identity)
@@ -540,6 +830,8 @@ namespace GlassPane::Export
         output << "\nCommand line:\n\n";
         WriteCodeBlock(output, process->commandLine.empty() ? L"(empty or not accessible)" : process->commandLine);
         output << "\n";
+
+        WriteServiceContextSection(output, context.serviceContext, process->pid);
 
         output << "## Parent Chain\n\n";
         if (chain.parentChain.empty())

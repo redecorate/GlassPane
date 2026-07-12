@@ -104,6 +104,12 @@
     <ClCompile Include="Core\SnapshotCompare.cpp">
       <Filter>Source Files\Core</Filter>
     </ClCompile>
+    <ClCompile Include="Core\ServicePathParser.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="Core\ServiceCollector.cpp">
+      <Filter>Source Files\Core</Filter>
+    </ClCompile>
     <ClCompile Include="UI\ImGuiApp.cpp">
       <Filter>Source Files\UI</Filter>
     </ClCompile>
@@ -239,6 +245,15 @@
       <Filter>Header Files\Core</Filter>
     </ClInclude>
     <ClInclude Include="Core\SnapshotCompare.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\ServiceInfo.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\ServiceCollector.h">
+      <Filter>Header Files\Core</Filter>
+    </ClInclude>
+    <ClInclude Include="Core\ServicePathParser.h">
       <Filter>Header Files\Core</Filter>
     </ClInclude>
     <ClInclude Include="UI\ImGuiApp.h">

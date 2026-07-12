@@ -156,6 +156,8 @@
     <ClCompile Include="Core\ProcessCollector.cpp" />
     <ClCompile Include="Core\ProcessTree.cpp" />
     <ClCompile Include="Core\RuntimeCollector.cpp" />
+    <ClCompile Include="Core\ServiceCollector.cpp" />
+    <ClCompile Include="Core\ServicePathParser.cpp" />
     <ClCompile Include="Core\SnapshotCompare.cpp" />
     <ClCompile Include="Core\SuspicionRules.cpp" />
     <ClCompile Include="Core\TimelineModel.cpp" />
@@ -204,6 +206,9 @@
     <ClInclude Include="Core\ProcessTree.h" />
     <ClInclude Include="Core\RuntimeCollector.h" />
     <ClInclude Include="Core\RuntimeInfo.h" />
+    <ClInclude Include="Core\ServiceCollector.h" />
+    <ClInclude Include="Core\ServiceInfo.h" />
+    <ClInclude Include="Core\ServicePathParser.h" />
     <ClInclude Include="Core\SnapshotCompare.h" />
     <ClInclude Include="Core\SuspicionRules.h" />
     <ClInclude Include="Core\TimelineModel.h" />

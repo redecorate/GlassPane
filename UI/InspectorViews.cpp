@@ -210,6 +210,118 @@
                 fileSystemPath);
         }
 
+        void RenderServiceInspectorField(
+            const char* id,
+            const char* label,
+            const std::wstring& value,
+            ImFont* valueFont = nullptr,
+            const std::wstring* fileSystemPath = nullptr,
+            const wchar_t* emptyText = L"(unavailable)")
+        {
+            ImGui::PushID(id);
+            const float availableWidth = ImGui::GetContentRegionAvail().x;
+            const bool useVerticalLayout = availableWidth < 300.0f;
+            const auto renderValue = [&]() {
+                if (value.empty())
+                {
+                    ImGui::TextDisabled("%s", WideToUtf8(emptyText).c_str());
+                    return;
+                }
+                const bool pushedValueFont = PushFontIfAvailable(valueFont);
+                RenderInspectorClippedValue("ServiceValueContext", value, fileSystemPath);
+                PopFontIfPushed(pushedValueFont);
+            };
+
+            if (useVerticalLayout)
+            {
+                ImGui::TextDisabled("%s", label);
+                renderValue();
+            }
+            else
+            {
+                const ImGuiTableFlags flags =
+                    ImGuiTableFlags_SizingStretchProp |
+                    ImGuiTableFlags_NoSavedSettings |
+                    ImGuiTableFlags_PadOuterX;
+                if (ImGui::BeginTable("ServiceFieldTable", 2, flags))
+                {
+                    const float labelWidth = std::clamp(availableWidth * 0.31f, 104.0f, 142.0f);
+                    ImGui::TableSetupColumn("Label", ImGuiTableColumnFlags_WidthFixed, labelWidth);
+                    ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextDisabled("%s", label);
+                    ImGui::TableSetColumnIndex(1);
+                    renderValue();
+                    ImGui::EndTable();
+                }
+            }
+            ImGui::PopID();
+        }
+
+        void RenderServiceInspectorWrappedField(
+            const char* id,
+            const char* label,
+            const std::wstring& value,
+            ImFont* valueFont = nullptr,
+            const wchar_t* emptyText = L"(unavailable)")
+        {
+            ImGui::PushID(id);
+            ImGui::TextDisabled("%s", label);
+            if (value.empty())
+            {
+                WrappedTextDisabled(emptyText);
+            }
+            else
+            {
+                const bool pushedValueFont = PushFontIfAvailable(valueFont);
+                WrappedTextWide(value);
+                const bool openRequested =
+                    ImGui::IsItemHovered() &&
+                    ImGui::IsMouseReleased(ImGuiMouseButton_Right);
+                RenderInspectorValueContextMenu(
+                    "ServiceWrappedValueContext",
+                    value,
+                    openRequested);
+                PopFontIfPushed(pushedValueFont);
+            }
+            ImGui::PopID();
+        }
+
+        std::wstring ServiceTruncationSummary(const Core::ServiceInfo& service)
+        {
+            std::wstring summary;
+            const auto append = [&](bool truncated, const wchar_t* label) {
+                if (!truncated)
+                {
+                    return;
+                }
+                if (!summary.empty())
+                {
+                    summary += L", ";
+                }
+                summary += label;
+            };
+            append(service.serviceNameTruncated, L"service name");
+            append(service.displayNameTruncated, L"display name");
+            append(service.descriptionTruncated, L"description");
+            append(service.serviceAccountTruncated, L"service account");
+            append(service.rawImagePathTruncated, L"raw ImagePath");
+            append(service.expandedImagePathTruncated, L"expanded ImagePath");
+            append(service.svchostGroupTruncated, L"svchost group");
+            append(service.pathParseMessageTruncated, L"parse message");
+            append(service.statusMessageTruncated, L"status message");
+            return summary.empty() ? L"None observed" : summary;
+        }
+
+        static bool ServiceExecutablePathCanOpen(const Core::ServiceInfo& service)
+        {
+            return !service.executablePath.empty() &&
+                service.pathConfidence == Core::ServicePathConfidence::High &&
+                (service.pathParseStatus == Core::ServicePathParseStatus::ParsedQuoted ||
+                 service.pathParseStatus == Core::ServicePathParseStatus::ParsedUnquoted);
+        }
+
         float InspectorSummaryChipWidth(const char* label, const std::wstring& value)
         {
             const std::string chipText = std::string(label) + ": " + WideToUtf8(value);
@@ -690,6 +802,333 @@
                 }
             }
             EndInspectorCard();
+        }
+
+        void RenderServiceContextSummaryCard(
+            std::uint32_t pid,
+            std::size_t correlatedCount,
+            std::size_t activeRecordCount,
+            const std::wstring& collectionStatus,
+            bool inventoryAvailable)
+        {
+            const std::string title = "Services for PID " + std::to_string(pid);
+            BeginInspectorCard("services_summary", title.c_str(), fonts_.bold);
+            RenderServiceInspectorField(
+                "summary_pid",
+                "Selected PID",
+                std::to_wstring(pid),
+                fonts_.monospace);
+            RenderServiceInspectorField(
+                "summary_status",
+                "Collection status",
+                collectionStatus);
+            RenderServiceInspectorField(
+                "summary_source",
+                "Association source",
+                L"SCM-reported PID association");
+            if (inventoryAvailable)
+            {
+                RenderServiceInspectorField(
+                    "summary_correlated",
+                    "Correlated services",
+                    std::to_wstring(correlatedCount) + L" service record(s)");
+                RenderServiceInspectorField(
+                    "summary_active_records",
+                    "Active records visible",
+                    std::to_wstring(activeRecordCount) +
+                        L" to the current security context");
+            }
+            EndInspectorCard();
+        }
+
+        void RenderServiceInspectorCard(
+            const Core::ServiceInfo& service,
+            std::size_t serviceIndex)
+        {
+            ImGui::PushID(static_cast<int>(serviceIndex));
+            BeginInspectorCard("service_card", "Associated Service", fonts_.bold);
+
+            const std::wstring primaryName = service.displayName.empty()
+                ? service.serviceName
+                : service.displayName;
+            const bool pushedPrimaryFont = PushFontIfAvailable(fonts_.bold);
+            RenderInspectorClippedValue("ServicePrimaryNameContext", primaryName);
+            PopFontIfPushed(pushedPrimaryFont);
+            ImGui::Spacing();
+
+            ImGui::SeparatorText("Identity");
+            RenderServiceInspectorField(
+                "service_name",
+                "Service name",
+                service.serviceName);
+            RenderServiceInspectorField(
+                "display_name",
+                "Display name",
+                service.displayName,
+                nullptr,
+                nullptr,
+                L"(empty)");
+            if (service.descriptionAvailable)
+            {
+                RenderServiceInspectorWrappedField(
+                    "description",
+                    "Description",
+                    service.description,
+                    nullptr,
+                    L"(empty)");
+            }
+
+            ImGui::SeparatorText("Runtime");
+            RenderServiceInspectorField(
+                "state",
+                "State",
+                Core::ServiceStateDisplayText(service.stateRaw));
+            RenderServiceInspectorField(
+                "scm_pid",
+                "SCM-reported PID",
+                std::to_wstring(service.scmProcessId),
+                fonts_.monospace);
+            RenderServiceInspectorField(
+                "process_model",
+                "Process model",
+                Core::ServiceProcessModelDisplayText(service.processModel));
+            RenderServiceInspectorField(
+                "service_type",
+                "Service type",
+                Core::ServiceTypeDisplayText(service.serviceTypeRaw));
+            if (!service.svchostGroup.empty())
+            {
+                RenderServiceInspectorField(
+                    "svchost_group",
+                    "svchost group",
+                    service.svchostGroup);
+            }
+
+            ImGui::SeparatorText("Configured Context");
+            if (service.configurationAvailable)
+            {
+                RenderServiceInspectorField(
+                    "start_type",
+                    "Start type",
+                    Core::ServiceStartTypeDisplayText(service.startTypeRaw));
+                RenderServiceInspectorField(
+                    "service_account",
+                    "Service account",
+                    service.serviceAccount,
+                    nullptr,
+                    nullptr,
+                    L"(empty)");
+                RenderServiceInspectorField(
+                    "raw_image_path",
+                    "Raw ImagePath",
+                    service.rawImagePath,
+                    fonts_.monospace,
+                    nullptr,
+                    L"(empty)");
+                if (!service.expandedImagePath.empty() &&
+                    service.expandedImagePath != service.rawImagePath)
+                {
+                    RenderServiceInspectorField(
+                        "expanded_image_path",
+                        "Expanded ImagePath",
+                        service.expandedImagePath,
+                        fonts_.monospace);
+                }
+
+                const std::wstring* openableExecutablePath =
+                    ServiceExecutablePathCanOpen(service)
+                        ? &service.executablePath
+                        : nullptr;
+                if (!service.executablePath.empty())
+                {
+                    RenderServiceInspectorField(
+                        "executable_path",
+                        "Parsed executable",
+                        service.executablePath,
+                        fonts_.monospace,
+                        openableExecutablePath);
+                }
+                RenderServiceInspectorField(
+                    "path_parse_status",
+                    "Path parse status",
+                    Core::ServicePathParseStatusDisplayText(service.pathParseStatus));
+                RenderServiceInspectorField(
+                    "path_confidence",
+                    "Path confidence",
+                    Core::ServicePathConfidenceDisplayText(service.pathConfidence));
+                if (!service.pathParseMessage.empty())
+                {
+                    RenderServiceInspectorWrappedField(
+                        "path_parse_message",
+                        "Parse detail",
+                        service.pathParseMessage);
+                }
+            }
+            else
+            {
+                WrappedTextDisabled(
+                    "Configuration metadata is unavailable in this service context. "
+                    "Configured start type, account, and ImagePath values are not shown.");
+            }
+
+            ImGui::SeparatorText("Availability");
+            RenderServiceInspectorField(
+                "configuration_availability",
+                "Configuration",
+                service.configurationAvailable ? L"Available" : L"Unavailable");
+            RenderServiceInspectorField(
+                "description_availability",
+                "Description",
+                service.descriptionAvailable ? L"Available" : L"Unavailable");
+            RenderServiceInspectorField(
+                "truncation",
+                "Bounded fields",
+                ServiceTruncationSummary(service));
+            if (!service.statusMessage.empty())
+            {
+                RenderServiceInspectorWrappedField(
+                    "service_status_message",
+                    "Service status",
+                    service.statusMessage);
+            }
+
+            EndInspectorCard();
+            ImGui::PopID();
+        }
+
+        void RenderServicesPanel()
+        {
+            constexpr std::size_t MaxRenderedServicesPerPid = 64;
+
+            const Core::ProcessInfo* process =
+                Core::FindProcessByPid(snapshot_, selectedPid_);
+            if (process == nullptr)
+            {
+                RenderEmptyState(
+                    "Select a process to review associated service context.");
+                return;
+            }
+
+            if (!serviceSnapshot_.attempted)
+            {
+                RenderServiceContextSummaryCard(
+                    process->pid,
+                    0,
+                    0,
+                    loadedSnapshotActive_ ? L"Not captured" : L"Unavailable",
+                    false);
+                RenderEmptyState(
+                    loadedSnapshotActive_
+                        ? "Service context was not captured in this snapshot."
+                        : "Service context has not been collected. Refresh the live endpoint to collect it.");
+                return;
+            }
+
+            const auto correlation =
+                serviceSnapshot_.serviceIndexesByPid.find(process->pid);
+            const std::vector<std::size_t>* correlatedServiceIndexes =
+                correlation == serviceSnapshot_.serviceIndexesByPid.end()
+                    ? nullptr
+                    : &correlation->second;
+            const std::size_t correlatedCount =
+                correlatedServiceIndexes == nullptr
+                    ? 0
+                    : correlatedServiceIndexes->size();
+            const std::size_t activeRecordCount = (std::max)(
+                serviceSnapshot_.services.size(),
+                serviceSnapshot_.totalEnumerated);
+            const bool renderablePartial =
+                serviceSnapshot_.partial &&
+                !serviceSnapshot_.services.empty();
+            const bool unavailable =
+                !serviceSnapshot_.success &&
+                !renderablePartial;
+            const bool partial =
+                !unavailable &&
+                (serviceSnapshot_.partial ||
+                 serviceSnapshot_.truncated ||
+                 !serviceSnapshot_.success);
+
+            RenderServiceContextSummaryCard(
+                process->pid,
+                correlatedCount,
+                activeRecordCount,
+                unavailable ? L"Unavailable" : (partial ? L"Partial" : L"Complete"),
+                !unavailable);
+
+            if (unavailable)
+            {
+                const std::string detail = WideToUtf8(serviceSnapshot_.statusMessage);
+                RenderEmptyState(
+                    "Service context could not be collected.",
+                    detail.empty() ? nullptr : detail.c_str());
+                return;
+            }
+
+            if (partial)
+            {
+                BeginInspectorCard(
+                    "services_partial_context",
+                    "Partial Service Context",
+                    fonts_.bold);
+                WrappedTextColored(
+                    ImVec4(0.95f, 0.72f, 0.25f, 1.0f),
+                    "Service context is partial. Some configuration details may be unavailable.");
+
+                const std::size_t omittedCount =
+                    activeRecordCount > serviceSnapshot_.services.size()
+                        ? activeRecordCount - serviceSnapshot_.services.size()
+                        : 0;
+                if (omittedCount != 0)
+                {
+                    WrappedTextDisabled(
+                        std::to_wstring(omittedCount) +
+                        L" active service record(s) were omitted by the service cap.");
+                }
+                if (serviceSnapshot_.configurationUnavailableCount != 0 ||
+                    serviceSnapshot_.descriptionUnavailableCount != 0)
+                {
+                    WrappedTextDisabled(
+                        std::to_wstring(serviceSnapshot_.configurationUnavailableCount) +
+                        L" configuration record(s) and " +
+                        std::to_wstring(serviceSnapshot_.descriptionUnavailableCount) +
+                        L" description record(s) are unavailable in the retained service context.");
+                }
+                if (!serviceSnapshot_.statusMessage.empty())
+                {
+                    WrappedTextDisabled(serviceSnapshot_.statusMessage);
+                }
+                EndInspectorCard();
+            }
+
+            if (correlatedCount == 0)
+            {
+                RenderEmptyState(
+                    "No active Windows services were correlated to this process by SCM-reported PID.");
+                return;
+            }
+
+            const std::size_t renderCount =
+                (std::min)(correlatedCount, MaxRenderedServicesPerPid);
+            for (std::size_t viewIndex = 0; viewIndex < renderCount; ++viewIndex)
+            {
+                const std::size_t serviceIndex =
+                    (*correlatedServiceIndexes)[viewIndex];
+                if (serviceIndex >= serviceSnapshot_.services.size())
+                {
+                    continue;
+                }
+                RenderServiceInspectorCard(
+                    serviceSnapshot_.services[serviceIndex],
+                    serviceIndex);
+            }
+
+            if (correlatedCount > renderCount)
+            {
+                WrappedTextDisabled(
+                    std::to_wstring(correlatedCount - renderCount) +
+                    L" additional services omitted from this view.");
+            }
         }
 
         void RenderChainPanel()

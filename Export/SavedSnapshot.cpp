@@ -15,9 +15,11 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <string>
@@ -734,6 +736,841 @@ namespace GlassPane::Export
         {
             const JsonValue* member = ObjectMember(value, name);
             return member != nullptr && member->type == JsonValue::Type::Array ? member : nullptr;
+        }
+
+        std::wstring ServiceFieldPath(const std::wstring& scope, const wchar_t* name)
+        {
+            return scope + L"." + name;
+        }
+
+        bool ReadRequiredServiceString(
+            const JsonValue& value,
+            const wchar_t* name,
+            std::size_t maxCharacters,
+            const std::wstring& scope,
+            std::wstring& destination,
+            std::wstring& error)
+        {
+            const JsonValue* member = ObjectMember(value, name);
+            const std::wstring path = ServiceFieldPath(scope, name);
+            if (member == nullptr || member->type != JsonValue::Type::String)
+            {
+                error = path + L" must be a string.";
+                return false;
+            }
+
+            const std::size_t effectiveCap = (std::min)(maxCharacters, SnapshotMaxStringLength);
+            if (member->stringValue.size() > effectiveCap)
+            {
+                error = path + L" exceeds its saved-snapshot string cap.";
+                return false;
+            }
+            destination = member->stringValue;
+            return true;
+        }
+
+        bool ReadRequiredServiceBool(
+            const JsonValue& value,
+            const wchar_t* name,
+            const std::wstring& scope,
+            bool& destination,
+            std::wstring& error)
+        {
+            const JsonValue* member = ObjectMember(value, name);
+            const std::wstring path = ServiceFieldPath(scope, name);
+            if (member == nullptr || member->type != JsonValue::Type::Boolean)
+            {
+                error = path + L" must be a boolean.";
+                return false;
+            }
+            destination = member->boolValue;
+            return true;
+        }
+
+        bool ReadRequiredServiceUInt32(
+            const JsonValue& value,
+            const wchar_t* name,
+            const std::wstring& scope,
+            std::uint32_t& destination,
+            std::wstring& error)
+        {
+            const JsonValue* member = ObjectMember(value, name);
+            const std::wstring path = ServiceFieldPath(scope, name);
+            if (member == nullptr ||
+                member->type != JsonValue::Type::Number ||
+                !std::isfinite(member->numberValue) ||
+                member->numberValue < 0.0 ||
+                member->numberValue > static_cast<double>((std::numeric_limits<std::uint32_t>::max)()) ||
+                std::floor(member->numberValue) != member->numberValue)
+            {
+                error = path + L" must be an unsigned 32-bit integer.";
+                return false;
+            }
+            destination = static_cast<std::uint32_t>(member->numberValue);
+            return true;
+        }
+
+        bool ReadRequiredServiceSize(
+            const JsonValue& value,
+            const wchar_t* name,
+            const std::wstring& scope,
+            std::size_t& destination,
+            std::wstring& error)
+        {
+            std::uint32_t parsed = 0;
+            if (!ReadRequiredServiceUInt32(value, name, scope, parsed, error))
+            {
+                return false;
+            }
+            destination = static_cast<std::size_t>(parsed);
+            return true;
+        }
+
+        bool ServiceHasPersistedTruncation(const Core::ServiceInfo& service)
+        {
+            return service.serviceNameTruncated ||
+                   service.displayNameTruncated ||
+                   service.descriptionTruncated ||
+                   service.serviceAccountTruncated ||
+                   service.rawImagePathTruncated ||
+                   service.expandedImagePathTruncated ||
+                   service.svchostGroupTruncated ||
+                   service.pathParseMessageTruncated ||
+                   service.statusMessageTruncated;
+        }
+
+        bool ValidateServiceStringForSnapshot(
+            const std::wstring& value,
+            std::size_t maxCharacters,
+            const std::wstring& path,
+            std::wstring& error)
+        {
+            if (value.size() > (std::min)(maxCharacters, SnapshotMaxStringLength))
+            {
+                error = path + L" exceeds its saved-snapshot string cap.";
+                return false;
+            }
+            return true;
+        }
+
+        bool ValidateServiceInfoForSnapshot(
+            const Core::ServiceInfo& service,
+            std::size_t index,
+            std::wstring& error)
+        {
+            const std::wstring scope =
+                L"service_context.services[" + std::to_wstring(index) + L"]";
+            if (!ValidateServiceStringForSnapshot(
+                    service.serviceName,
+                    Core::ServiceNameMaxCharacters,
+                    ServiceFieldPath(scope, L"service_name"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.displayName,
+                    Core::ServiceDisplayNameMaxCharacters,
+                    ServiceFieldPath(scope, L"display_name"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.description,
+                    Core::ServiceDescriptionMaxCharacters,
+                    ServiceFieldPath(scope, L"description"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.serviceAccount,
+                    Core::ServiceAccountMaxCharacters,
+                    ServiceFieldPath(scope, L"service_account"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.rawImagePath,
+                    Core::ServiceImagePathMaxCharacters,
+                    ServiceFieldPath(scope, L"raw_image_path"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.expandedImagePath,
+                    Core::ServiceImagePathMaxCharacters,
+                    ServiceFieldPath(scope, L"expanded_image_path"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.executablePath,
+                    Core::ServiceImagePathMaxCharacters,
+                    ServiceFieldPath(scope, L"executable_path"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.pathParseMessage,
+                    Core::ServiceMessageMaxCharacters,
+                    ServiceFieldPath(scope, L"parse_message"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.svchostGroup,
+                    Core::ServiceSvchostGroupMaxCharacters,
+                    ServiceFieldPath(scope, L"svchost_group"),
+                    error) ||
+                !ValidateServiceStringForSnapshot(
+                    service.statusMessage,
+                    Core::ServiceMessageMaxCharacters,
+                    ServiceFieldPath(scope, L"status_message"),
+                    error))
+            {
+                return false;
+            }
+            if (service.serviceName.empty())
+            {
+                error = ServiceFieldPath(scope, L"service_name") + L" must not be empty.";
+                return false;
+            }
+
+            if (static_cast<std::uint32_t>(service.pathParseStatus) >
+                static_cast<std::uint32_t>(Core::ServicePathParseStatus::InputTruncated))
+            {
+                error = ServiceFieldPath(scope, L"path_parse_status") + L" is invalid.";
+                return false;
+            }
+            if (static_cast<std::uint32_t>(service.pathConfidence) >
+                static_cast<std::uint32_t>(Core::ServicePathConfidence::High))
+            {
+                error = ServiceFieldPath(scope, L"path_confidence") + L" is invalid.";
+                return false;
+            }
+            if (static_cast<std::uint32_t>(service.processModel) >
+                static_cast<std::uint32_t>(Core::ServiceProcessModel::SharedProcess))
+            {
+                error = ServiceFieldPath(scope, L"process_model") + L" is invalid.";
+                return false;
+            }
+            if (service.processModel != Core::ServiceProcessModelFromType(service.serviceTypeRaw))
+            {
+                error = ServiceFieldPath(scope, L"process_model") +
+                    L" contradicts service_type_raw.";
+                return false;
+            }
+
+            constexpr std::uint32_t ServiceRunning = 0x00000004;
+            constexpr std::uint32_t ServicePaused = 0x00000007;
+            const bool expectedReliablePid =
+                service.scmProcessId != 0 &&
+                (service.stateRaw == ServiceRunning || service.stateRaw == ServicePaused);
+            if (service.pidReliableForState != expectedReliablePid)
+            {
+                error = ServiceFieldPath(scope, L"pid_reliable_for_state") +
+                    L" contradicts state_raw or scm_pid.";
+                return false;
+            }
+            return true;
+        }
+
+        bool ValidateServiceContextForSnapshot(
+            const Core::ServiceCollectionResult& serviceContext,
+            std::wstring& error)
+        {
+            if (serviceContext.services.size() > Core::ServiceMaxRecords)
+            {
+                error = L"service_context.services exceeds the retained service cap.";
+                return false;
+            }
+            if (serviceContext.totalEnumerated > (std::numeric_limits<std::uint32_t>::max)() ||
+                serviceContext.configurationUnavailableCount > (std::numeric_limits<std::uint32_t>::max)() ||
+                serviceContext.descriptionUnavailableCount > (std::numeric_limits<std::uint32_t>::max)())
+            {
+                error = L"service_context collection counts exceed the supported range.";
+                return false;
+            }
+            if (!ValidateServiceStringForSnapshot(
+                    serviceContext.statusMessage,
+                    Core::ServiceMessageMaxCharacters,
+                    L"service_context.status_message",
+                    error))
+            {
+                return false;
+            }
+
+            std::size_t unavailableConfigurations = 0;
+            std::size_t unavailableDescriptions = 0;
+            bool hasTruncatedFields = false;
+            for (std::size_t index = 0; index < serviceContext.services.size(); ++index)
+            {
+                const Core::ServiceInfo& service = serviceContext.services[index];
+                if (!ValidateServiceInfoForSnapshot(service, index, error))
+                {
+                    return false;
+                }
+                if (!service.configurationAvailable)
+                {
+                    ++unavailableConfigurations;
+                }
+                if (!service.descriptionAvailable)
+                {
+                    ++unavailableDescriptions;
+                }
+                hasTruncatedFields = hasTruncatedFields || ServiceHasPersistedTruncation(service);
+            }
+
+            if (!serviceContext.attempted &&
+                (serviceContext.success ||
+                 serviceContext.partial ||
+                 serviceContext.truncated ||
+                 serviceContext.totalEnumerated != 0 ||
+                 serviceContext.configurationUnavailableCount != 0 ||
+                 serviceContext.descriptionUnavailableCount != 0 ||
+                 !serviceContext.services.empty()))
+            {
+                error = L"service_context contains collection results although attempted is false.";
+                return false;
+            }
+            if (serviceContext.totalEnumerated < serviceContext.services.size())
+            {
+                error = L"service_context.total_enumerated is smaller than the retained service count.";
+                return false;
+            }
+            const bool expectedTruncated =
+                serviceContext.totalEnumerated > serviceContext.services.size();
+            if (serviceContext.truncated != expectedTruncated)
+            {
+                error = L"service_context.truncated contradicts the enumerated and retained counts.";
+                return false;
+            }
+            if (serviceContext.configurationUnavailableCount != unavailableConfigurations)
+            {
+                error = L"service_context.configuration_unavailable_count contradicts retained service rows.";
+                return false;
+            }
+            if (serviceContext.descriptionUnavailableCount != unavailableDescriptions)
+            {
+                error = L"service_context.description_unavailable_count contradicts retained service rows.";
+                return false;
+            }
+            const bool expectedPartial = serviceContext.success
+                ? serviceContext.truncated ||
+                    serviceContext.configurationUnavailableCount != 0 ||
+                    serviceContext.descriptionUnavailableCount != 0 ||
+                    hasTruncatedFields
+                : !serviceContext.services.empty();
+            if (serviceContext.partial != expectedPartial)
+            {
+                error = L"service_context.partial contradicts the persisted collection result.";
+                return false;
+            }
+            return true;
+        }
+
+        void WriteServiceStringField(
+            std::ostream& output,
+            const std::string& indent,
+            const char* name,
+            const std::wstring& value,
+            bool trailingComma = true)
+        {
+            output << indent << '"' << name << "\": ";
+            WriteJsonString(output, value);
+            output << (trailingComma ? ",\n" : "\n");
+        }
+
+        void WriteServiceBoolField(
+            std::ostream& output,
+            const std::string& indent,
+            const char* name,
+            bool value,
+            bool trailingComma = true)
+        {
+            output << indent << '"' << name << "\": " << (value ? "true" : "false")
+                   << (trailingComma ? ",\n" : "\n");
+        }
+
+        template <typename Value>
+        void WriteServiceNumberField(
+            std::ostream& output,
+            const std::string& indent,
+            const char* name,
+            Value value,
+            bool trailingComma = true)
+        {
+            output << indent << '"' << name << "\": " << value
+                   << (trailingComma ? ",\n" : "\n");
+        }
+
+        void WriteServiceInfo(
+            std::ostream& output,
+            const Core::ServiceInfo& service,
+            const std::string& indent,
+            bool trailingComma)
+        {
+            output << indent << "{\n";
+            const std::string fieldIndent = indent + "  ";
+            WriteServiceStringField(output, fieldIndent, "service_name", service.serviceName);
+            WriteServiceStringField(output, fieldIndent, "display_name", service.displayName);
+            WriteServiceStringField(output, fieldIndent, "description", service.description);
+            WriteServiceNumberField(output, fieldIndent, "state_raw", service.stateRaw);
+            WriteServiceNumberField(output, fieldIndent, "start_type_raw", service.startTypeRaw);
+            WriteServiceNumberField(output, fieldIndent, "service_type_raw", service.serviceTypeRaw);
+            WriteServiceNumberField(output, fieldIndent, "service_flags_raw", service.serviceFlagsRaw);
+            WriteServiceStringField(output, fieldIndent, "service_account", service.serviceAccount);
+            WriteServiceStringField(output, fieldIndent, "raw_image_path", service.rawImagePath);
+            WriteServiceStringField(output, fieldIndent, "expanded_image_path", service.expandedImagePath);
+            WriteServiceStringField(output, fieldIndent, "executable_path", service.executablePath);
+            WriteServiceNumberField(
+                output,
+                fieldIndent,
+                "path_parse_status",
+                static_cast<std::uint32_t>(service.pathParseStatus));
+            WriteServiceNumberField(
+                output,
+                fieldIndent,
+                "path_confidence",
+                static_cast<std::uint32_t>(service.pathConfidence));
+            WriteServiceStringField(output, fieldIndent, "parse_message", service.pathParseMessage);
+            WriteServiceNumberField(output, fieldIndent, "scm_pid", service.scmProcessId);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "pid_reliable_for_state",
+                service.pidReliableForState);
+            WriteServiceNumberField(
+                output,
+                fieldIndent,
+                "process_model",
+                static_cast<std::uint32_t>(service.processModel));
+            WriteServiceStringField(output, fieldIndent, "svchost_group", service.svchostGroup);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "configuration_available",
+                service.configurationAvailable);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "description_available",
+                service.descriptionAvailable);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "service_name_truncated",
+                service.serviceNameTruncated);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "display_name_truncated",
+                service.displayNameTruncated);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "description_truncated",
+                service.descriptionTruncated);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "service_account_truncated",
+                service.serviceAccountTruncated);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "raw_image_path_truncated",
+                service.rawImagePathTruncated);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "expanded_image_path_truncated",
+                service.expandedImagePathTruncated);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "svchost_group_truncated",
+                service.svchostGroupTruncated);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "parse_message_truncated",
+                service.pathParseMessageTruncated);
+            WriteServiceBoolField(
+                output,
+                fieldIndent,
+                "status_message_truncated",
+                service.statusMessageTruncated);
+            WriteServiceStringField(
+                output,
+                fieldIndent,
+                "status_message",
+                service.statusMessage,
+                false);
+            output << indent << '}' << (trailingComma ? ",\n" : "\n");
+        }
+
+        void WriteServiceContext(
+            std::ostream& output,
+            const Core::ServiceCollectionResult& serviceContext,
+            const std::string& indent)
+        {
+            output << indent << "\"service_context\": {\n";
+            const std::string fieldIndent = indent + "  ";
+            WriteServiceBoolField(output, fieldIndent, "attempted", serviceContext.attempted);
+            WriteServiceBoolField(output, fieldIndent, "success", serviceContext.success);
+            WriteServiceBoolField(output, fieldIndent, "partial", serviceContext.partial);
+            WriteServiceBoolField(output, fieldIndent, "truncated", serviceContext.truncated);
+            WriteServiceNumberField(
+                output,
+                fieldIndent,
+                "total_enumerated",
+                serviceContext.totalEnumerated);
+            WriteServiceNumberField(
+                output,
+                fieldIndent,
+                "configuration_unavailable_count",
+                serviceContext.configurationUnavailableCount);
+            WriteServiceNumberField(
+                output,
+                fieldIndent,
+                "description_unavailable_count",
+                serviceContext.descriptionUnavailableCount);
+            WriteServiceStringField(
+                output,
+                fieldIndent,
+                "status_message",
+                serviceContext.statusMessage);
+            output << fieldIndent << "\"services\": [\n";
+            for (std::size_t index = 0; index < serviceContext.services.size(); ++index)
+            {
+                WriteServiceInfo(
+                    output,
+                    serviceContext.services[index],
+                    fieldIndent + "  ",
+                    index + 1 < serviceContext.services.size());
+            }
+            output << fieldIndent << "]\n";
+            output << indent << "},\n";
+        }
+
+        bool ParseServiceInfo(
+            const JsonValue& value,
+            std::size_t index,
+            Core::ServiceInfo& service,
+            std::wstring& error)
+        {
+            const std::wstring scope =
+                L"service_context.services[" + std::to_wstring(index) + L"]";
+            if (value.type != JsonValue::Type::Object)
+            {
+                error = scope + L" must be an object.";
+                return false;
+            }
+
+            if (!ReadRequiredServiceString(
+                    value,
+                    L"service_name",
+                    Core::ServiceNameMaxCharacters,
+                    scope,
+                    service.serviceName,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"display_name",
+                    Core::ServiceDisplayNameMaxCharacters,
+                    scope,
+                    service.displayName,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"description",
+                    Core::ServiceDescriptionMaxCharacters,
+                    scope,
+                    service.description,
+                    error) ||
+                !ReadRequiredServiceUInt32(
+                    value,
+                    L"state_raw",
+                    scope,
+                    service.stateRaw,
+                    error) ||
+                !ReadRequiredServiceUInt32(
+                    value,
+                    L"start_type_raw",
+                    scope,
+                    service.startTypeRaw,
+                    error) ||
+                !ReadRequiredServiceUInt32(
+                    value,
+                    L"service_type_raw",
+                    scope,
+                    service.serviceTypeRaw,
+                    error) ||
+                !ReadRequiredServiceUInt32(
+                    value,
+                    L"service_flags_raw",
+                    scope,
+                    service.serviceFlagsRaw,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"service_account",
+                    Core::ServiceAccountMaxCharacters,
+                    scope,
+                    service.serviceAccount,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"raw_image_path",
+                    Core::ServiceImagePathMaxCharacters,
+                    scope,
+                    service.rawImagePath,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"expanded_image_path",
+                    Core::ServiceImagePathMaxCharacters,
+                    scope,
+                    service.expandedImagePath,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"executable_path",
+                    Core::ServiceImagePathMaxCharacters,
+                    scope,
+                    service.executablePath,
+                    error))
+            {
+                return false;
+            }
+
+            std::uint32_t pathParseStatus = 0;
+            std::uint32_t pathConfidence = 0;
+            std::uint32_t processModel = 0;
+            if (!ReadRequiredServiceUInt32(
+                    value,
+                    L"path_parse_status",
+                    scope,
+                    pathParseStatus,
+                    error) ||
+                !ReadRequiredServiceUInt32(
+                    value,
+                    L"path_confidence",
+                    scope,
+                    pathConfidence,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"parse_message",
+                    Core::ServiceMessageMaxCharacters,
+                    scope,
+                    service.pathParseMessage,
+                    error) ||
+                !ReadRequiredServiceUInt32(
+                    value,
+                    L"scm_pid",
+                    scope,
+                    service.scmProcessId,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"pid_reliable_for_state",
+                    scope,
+                    service.pidReliableForState,
+                    error) ||
+                !ReadRequiredServiceUInt32(
+                    value,
+                    L"process_model",
+                    scope,
+                    processModel,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"svchost_group",
+                    Core::ServiceSvchostGroupMaxCharacters,
+                    scope,
+                    service.svchostGroup,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"configuration_available",
+                    scope,
+                    service.configurationAvailable,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"description_available",
+                    scope,
+                    service.descriptionAvailable,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"service_name_truncated",
+                    scope,
+                    service.serviceNameTruncated,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"display_name_truncated",
+                    scope,
+                    service.displayNameTruncated,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"description_truncated",
+                    scope,
+                    service.descriptionTruncated,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"service_account_truncated",
+                    scope,
+                    service.serviceAccountTruncated,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"raw_image_path_truncated",
+                    scope,
+                    service.rawImagePathTruncated,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"expanded_image_path_truncated",
+                    scope,
+                    service.expandedImagePathTruncated,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"svchost_group_truncated",
+                    scope,
+                    service.svchostGroupTruncated,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"parse_message_truncated",
+                    scope,
+                    service.pathParseMessageTruncated,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"status_message_truncated",
+                    scope,
+                    service.statusMessageTruncated,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"status_message",
+                    Core::ServiceMessageMaxCharacters,
+                    scope,
+                    service.statusMessage,
+                    error))
+            {
+                return false;
+            }
+
+            if (pathParseStatus >
+                static_cast<std::uint32_t>(Core::ServicePathParseStatus::InputTruncated))
+            {
+                error = ServiceFieldPath(scope, L"path_parse_status") + L" is invalid.";
+                return false;
+            }
+            if (pathConfidence >
+                static_cast<std::uint32_t>(Core::ServicePathConfidence::High))
+            {
+                error = ServiceFieldPath(scope, L"path_confidence") + L" is invalid.";
+                return false;
+            }
+            if (processModel >
+                static_cast<std::uint32_t>(Core::ServiceProcessModel::SharedProcess))
+            {
+                error = ServiceFieldPath(scope, L"process_model") + L" is invalid.";
+                return false;
+            }
+
+            service.pathParseStatus = static_cast<Core::ServicePathParseStatus>(pathParseStatus);
+            service.pathConfidence = static_cast<Core::ServicePathConfidence>(pathConfidence);
+            service.processModel = static_cast<Core::ServiceProcessModel>(processModel);
+            return true;
+        }
+
+        bool ParseServiceContext(
+            const JsonValue& value,
+            Core::ServiceCollectionResult& serviceContext,
+            std::wstring& error)
+        {
+            constexpr const wchar_t* Scope = L"service_context";
+            if (value.type != JsonValue::Type::Object)
+            {
+                error = L"service_context must be an object.";
+                return false;
+            }
+
+            if (!ReadRequiredServiceBool(
+                    value,
+                    L"attempted",
+                    Scope,
+                    serviceContext.attempted,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"success",
+                    Scope,
+                    serviceContext.success,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"partial",
+                    Scope,
+                    serviceContext.partial,
+                    error) ||
+                !ReadRequiredServiceBool(
+                    value,
+                    L"truncated",
+                    Scope,
+                    serviceContext.truncated,
+                    error) ||
+                !ReadRequiredServiceSize(
+                    value,
+                    L"total_enumerated",
+                    Scope,
+                    serviceContext.totalEnumerated,
+                    error) ||
+                !ReadRequiredServiceSize(
+                    value,
+                    L"configuration_unavailable_count",
+                    Scope,
+                    serviceContext.configurationUnavailableCount,
+                    error) ||
+                !ReadRequiredServiceSize(
+                    value,
+                    L"description_unavailable_count",
+                    Scope,
+                    serviceContext.descriptionUnavailableCount,
+                    error) ||
+                !ReadRequiredServiceString(
+                    value,
+                    L"status_message",
+                    Core::ServiceMessageMaxCharacters,
+                    Scope,
+                    serviceContext.statusMessage,
+                    error))
+            {
+                return false;
+            }
+
+            const JsonValue* services = ObjectMember(value, L"services");
+            if (services == nullptr || services->type != JsonValue::Type::Array)
+            {
+                error = L"service_context.services must be an array.";
+                return false;
+            }
+            if (services->arrayValue.size() > Core::ServiceMaxRecords)
+            {
+                error = L"service_context.services exceeds the retained service cap.";
+                return false;
+            }
+
+            serviceContext.services.reserve(services->arrayValue.size());
+            for (std::size_t index = 0; index < services->arrayValue.size(); ++index)
+            {
+                Core::ServiceInfo service;
+                if (!ParseServiceInfo(services->arrayValue[index], index, service, error))
+                {
+                    return false;
+                }
+                serviceContext.services.push_back(std::move(service));
+            }
+
+            if (!ValidateServiceContextForSnapshot(serviceContext, error))
+            {
+                return false;
+            }
+            serviceContext.ReindexCorrelations();
+            return true;
         }
 
         void WriteStatus(std::ostream& output, const EvidenceCollectionStatus& status, const std::string& indent)
@@ -1760,6 +2597,24 @@ namespace GlassPane::Export
             }
             return false;
         }
+        if (context.serviceContext == nullptr)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"No service context is available to save.";
+            }
+            return false;
+        }
+
+        std::wstring serviceValidationError;
+        if (!ValidateServiceContextForSnapshot(*context.serviceContext, serviceValidationError))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Service context is invalid: " + serviceValidationError;
+            }
+            return false;
+        }
 
         {
             std::ofstream output(std::filesystem::path(filePath), std::ios::binary | std::ios::trunc);
@@ -1828,6 +2683,7 @@ namespace GlassPane::Export
             WriteJsonString(output, context.networkIntel.localFeedSha256);
             output << "\n";
             output << "  },\n";
+            WriteServiceContext(output, *context.serviceContext, "  ");
             output << "  \"processes\": [\n";
             for (std::size_t index = 0; index < context.snapshot->processes.size(); ++index)
             {
@@ -1964,8 +2820,23 @@ namespace GlassPane::Export
             return false;
         }
 
-        const int schemaVersion = IntMember(root, L"schema_version");
+        const JsonValue* schemaVersionValue = ObjectMember(root, L"schema_version");
+        if (schemaVersionValue == nullptr ||
+            schemaVersionValue->type != JsonValue::Type::Number ||
+            !std::isfinite(schemaVersionValue->numberValue) ||
+            std::floor(schemaVersionValue->numberValue) != schemaVersionValue->numberValue ||
+            schemaVersionValue->numberValue < 0.0 ||
+            schemaVersionValue->numberValue > static_cast<double>((std::numeric_limits<int>::max)()))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Snapshot schema version must be a non-negative integer.";
+            }
+            return false;
+        }
+        const int schemaVersion = static_cast<int>(schemaVersionValue->numberValue);
         if (schemaVersion != GlassPaneSnapshotSchemaVersion &&
+            schemaVersion != GlassPaneSnapshotPreviousSchemaVersion &&
             schemaVersion != GlassPaneSnapshotLegacySchemaVersion)
         {
             if (errorMessage != nullptr)
@@ -2008,6 +2879,31 @@ namespace GlassPane::Export
             loaded.networkIntel.source = StringMember(*intel, L"source");
             loaded.networkIntel.status = StringMember(*intel, L"status");
             loaded.networkIntel.localFeedSha256 = StringMember(*intel, L"local_feed_sha256");
+        }
+
+        if (schemaVersion == GlassPaneSnapshotSchemaVersion)
+        {
+            const JsonValue* serviceContext = ObjectMember(root, L"service_context");
+            if (serviceContext == nullptr)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = L"Schema 3 snapshot is missing service_context.";
+                }
+                return false;
+            }
+
+            std::wstring serviceError;
+            if (!ParseServiceContext(*serviceContext, loaded.serviceContext, serviceError))
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = serviceError.empty()
+                        ? L"Malformed service_context in saved snapshot."
+                        : serviceError;
+                }
+                return false;
+            }
         }
 
         const JsonValue* processes = ObjectMember(root, L"processes");

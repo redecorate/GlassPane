@@ -100,6 +100,7 @@
 
             Export::SelectedProcessMarkdownReportContext reportContext;
             reportContext.snapshot = &snapshot_;
+            reportContext.serviceContext = &serviceSnapshot_;
             reportContext.pid = selectedPid_;
             reportContext.appVersion = Utf8ToWide(appVersion.c_str());
             reportContext.buildConfiguration = Utf8ToWide(BuildConfiguration());
@@ -566,6 +567,7 @@
         {
             Export::SavedSnapshotExportContext context;
             context.snapshot = &snapshot_;
+            context.serviceContext = &serviceSnapshot_;
             context.networkLoaded = networkLoaded_;
             context.network = &networkSnapshot_;
             context.networkIndicatorMatches = loadedSnapshotActive_
@@ -624,6 +626,7 @@
             }
 
             Core::ProcessSnapshot snapshotCopy = snapshot_;
+            Core::ServiceCollectionResult serviceContextCopy = serviceSnapshot_;
             const bool loadedSnapshotActive = loadedSnapshotActive_;
             const bool networkLoaded = networkLoaded_;
             Core::NetworkCollectionResult networkCopy = networkSnapshot_;
@@ -668,6 +671,7 @@
                 kind,
                 "Preparing snapshot...",
                 [snapshotCopy = std::move(snapshotCopy),
+                 serviceContextCopy = std::move(serviceContextCopy),
                  networkCopy = std::move(networkCopy),
                  networkMatchesCopy = std::move(networkMatchesCopy),
                  loadedEvidenceCopy = std::move(loadedEvidenceCopy),
@@ -705,6 +709,7 @@
                     progress("Writing snapshot...", 0.78f);
                     Export::SavedSnapshotExportContext context;
                     context.snapshot = &snapshotCopy;
+                    context.serviceContext = &serviceContextCopy;
                     context.networkLoaded = networkLoaded;
                     context.network = &networkCopy;
                     context.networkIndicatorMatches = &networkMatchesCopy;
@@ -775,6 +780,7 @@
             }
 
             liveSnapshotBeforeLoad_ = snapshot_;
+            liveServiceSnapshotBeforeLoad_ = serviceSnapshot_;
             liveNetworkSnapshotBeforeLoad_ = networkSnapshot_;
             liveNetworkLoadedBeforeLoad_ = networkLoaded_;
             liveSelectedPidBeforeLoad_ = selectedPid_;
@@ -801,6 +807,7 @@
             loadedSnapshotStatus_ = L"Viewing saved snapshot captured " +
                 (document.metadata.capturedAt.empty() ? std::wstring(L"(unknown time)") : document.metadata.capturedAt);
 
+            serviceSnapshot_ = document.serviceContext;
             snapshot_ = document.snapshot;
             networkLoaded_ = document.networkLoaded;
             networkSnapshot_ = document.network;
@@ -826,11 +833,21 @@
             RequestGraphFit();
             RebuildVisibleProcessRowsIfNeeded();
             RebuildGraphWorldLayoutIfNeeded();
+            const std::string serviceSummary =
+                document.metadata.schemaVersion >= Export::GlassPaneSnapshotSchemaVersion
+                    ? (document.serviceContext.attempted
+                        ? ", " + std::to_string(document.serviceContext.services.size()) +
+                            " persisted service record(s)"
+                        : ", service context not captured")
+                    : ", legacy snapshot without service context";
             AddLog(
                 LogLevel::Info,
-                "Loaded saved snapshot: " +
+                "Loaded saved snapshot schema " +
+                    std::to_string(document.metadata.schemaVersion) + ": " +
                     std::to_string(snapshot_.processes.size()) +
-                    " process(es) from " +
+                    " process(es)" +
+                    serviceSummary +
+                    " from " +
                     WideToUtf8(sourcePath) +
                     ".");
         }
@@ -911,6 +928,7 @@
             if (liveSnapshotPreserved_)
             {
                 snapshot_ = liveSnapshotBeforeLoad_;
+                serviceSnapshot_ = liveServiceSnapshotBeforeLoad_;
                 networkSnapshot_ = liveNetworkSnapshotBeforeLoad_;
                 networkLoaded_ = liveNetworkLoadedBeforeLoad_;
                 selectedPid_ = liveSelectedPidBeforeLoad_;
@@ -920,6 +938,7 @@
             }
 
             liveSnapshotBeforeLoad_ = {};
+            liveServiceSnapshotBeforeLoad_ = {};
             liveNetworkSnapshotBeforeLoad_ = {};
             liveNetworkLoadedBeforeLoad_ = false;
             liveSelectedPidBeforeLoad_ = InvalidPid;
@@ -999,6 +1018,7 @@
 
             Export::SelectedProcessMarkdownReportContext reportContext;
             reportContext.snapshot = &snapshot_;
+            reportContext.serviceContext = &serviceSnapshot_;
             reportContext.pid = selectedPid_;
             reportContext.appVersion = Utf8ToWide(GlassPaneVersion().c_str());
             reportContext.buildConfiguration = Utf8ToWide(BuildConfiguration());
@@ -1145,6 +1165,7 @@
 
         static bool WriteSelectedMarkdownReportPackage(
             const SelectedMarkdownPackageData& data,
+            const Core::ServiceCollectionResult& serviceContext,
             const std::wstring& filePath,
             std::wstring* error)
         {
@@ -1159,6 +1180,7 @@
 
             Export::SelectedProcessMarkdownReportContext reportContext;
             reportContext.snapshot = &data.snapshot;
+            reportContext.serviceContext = &serviceContext;
             reportContext.pid = data.pid;
             reportContext.appVersion = data.appVersion;
             reportContext.buildConfiguration = data.buildConfiguration;
@@ -1262,6 +1284,7 @@
 
             const bool loadedSnapshotActive = loadedSnapshotActive_;
             Core::ProcessSnapshot snapshotCopy = snapshot_;
+            Core::ServiceCollectionResult serviceContextCopy = serviceSnapshot_;
             const bool networkLoaded = networkLoaded_;
             Core::NetworkCollectionResult networkCopy = networkSnapshot_;
             const std::vector<Core::NetworkIndicatorMatch> networkMatchesCopy =
@@ -1305,6 +1328,7 @@
                 [packagePath,
                  generatedAt,
                  snapshotCopy = std::move(snapshotCopy),
+                 serviceContextCopy = std::move(serviceContextCopy),
                  networkCopy = std::move(networkCopy),
                  networkMatchesCopy = std::move(networkMatchesCopy),
                  loadedEvidenceCopy = std::move(loadedEvidenceCopy),
@@ -1370,6 +1394,7 @@
                     progress("Writing snapshot...", 0.72f);
                     Export::SavedSnapshotExportContext snapshotContext;
                     snapshotContext.snapshot = &snapshotCopy;
+                    snapshotContext.serviceContext = &serviceContextCopy;
                     snapshotContext.networkLoaded = networkLoaded;
                     snapshotContext.network = &networkCopy;
                     snapshotContext.networkIndicatorMatches = &networkMatchesCopy;
@@ -1400,6 +1425,7 @@
                     {
                         if (WriteSelectedMarkdownReportPackage(
                                 selectedReportData,
+                                serviceContextCopy,
                                 (packagePath / L"selected-process-report.md").wstring(),
                                 &error))
                         {

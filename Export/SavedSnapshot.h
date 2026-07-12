@@ -7,6 +7,7 @@
 #include "../Core/NetworkIndicatorFeed.h"
 #include "../Core/ProcessInfo.h"
 #include "../Core/RuntimeInfo.h"
+#include "../Core/ServiceInfo.h"
 #include "../Core/TokenInfo.h"
 
 #include <cstdint>
@@ -16,7 +17,8 @@
 
 namespace GlassPane::Export
 {
-    constexpr int GlassPaneSnapshotSchemaVersion = 2;
+    constexpr int GlassPaneSnapshotSchemaVersion = 3;
+    constexpr int GlassPaneSnapshotPreviousSchemaVersion = 2;
     constexpr int GlassPaneSnapshotLegacySchemaVersion = 1;
     constexpr const wchar_t* GlassPaneSnapshotFormat = L"glasspane_snapshot";
 
@@ -114,6 +116,7 @@ namespace GlassPane::Export
         Core::ProcessSnapshot snapshot;
         bool networkLoaded = false;
         Core::NetworkCollectionResult network;
+        Core::ServiceCollectionResult serviceContext;
         NetworkIntelligenceSnapshotMetadata networkIntel;
         std::vector<Core::NetworkIndicatorMatch> networkIndicatorMatches;
         std::vector<ProcessEvidenceSnapshot> processEvidence;
@@ -124,6 +127,7 @@ namespace GlassPane::Export
         const Core::ProcessSnapshot* snapshot = nullptr;
         bool networkLoaded = false;
         const Core::NetworkCollectionResult* network = nullptr;
+        const Core::ServiceCollectionResult* serviceContext = nullptr;
         const std::vector<Core::NetworkIndicatorMatch>* networkIndicatorMatches = nullptr;
         NetworkIntelligenceSnapshotMetadata networkIntel;
         std::wstring glassPaneVersion;

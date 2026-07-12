@@ -23,6 +23,7 @@
 #include "../Core/ProcessCollector.h"
 #include "../Core/ProcessTree.h"
 #include "../Core/RuntimeCollector.h"
+#include "../Core/ServiceCollector.h"
 #include "../Core/SnapshotCompare.h"
 #include "../Core/TimelineModel.h"
 #include "../Core/TokenCollector.h"
@@ -88,7 +89,7 @@ namespace GlassPane::UI
         constexpr UINT WindowWidth = 1440;
         constexpr UINT WindowHeight = 900;
         constexpr std::uint32_t InvalidPid = 0;
-        constexpr const char* GlassPaneBaseVersion = "V0.6.0";
+        constexpr const char* GlassPaneBaseVersion = "V0.7.0";
 #ifdef _DEBUG
         constexpr const char* GlassPaneBuildSuffix = "-Debug";
 #else
@@ -156,6 +157,7 @@ namespace GlassPane::UI
         struct CollectorTimings
         {
             std::uint64_t processSnapshotMs = 0;
+            std::uint64_t servicesMs = 0;
             std::uint64_t graphLayoutMs = 0;
             std::uint64_t processFilterMs = 0;
             std::uint64_t modulesMs = 0;
@@ -176,6 +178,7 @@ namespace GlassPane::UI
             Triage,
             Details,
             Chain,
+            Services,
             Modules,
             Network,
             Runtime,
@@ -257,10 +260,11 @@ namespace GlassPane::UI
             InspectorTab tab;
         };
 
-        constexpr std::array<InspectorTabSpec, 9> InspectorTabs = {
+        constexpr std::array<InspectorTabSpec, 10> InspectorTabs = {
             InspectorTabSpec{"Triage", InspectorTab::Triage},
             InspectorTabSpec{"Details", InspectorTab::Details},
             InspectorTabSpec{"Chain", InspectorTab::Chain},
+            InspectorTabSpec{"Services", InspectorTab::Services},
             InspectorTabSpec{"Memory", InspectorTab::Memory},
             InspectorTabSpec{"Runtime", InspectorTab::Runtime},
             InspectorTabSpec{"Handles", InspectorTab::Handles},
@@ -303,6 +307,8 @@ namespace GlassPane::UI
                 return "Details##InspectorDockView";
             case InspectorTab::Chain:
                 return "Chain##InspectorDockView";
+            case InspectorTab::Services:
+                return "Services##InspectorDockView";
             case InspectorTab::Memory:
                 return "Memory##InspectorDockView";
             case InspectorTab::Runtime:
@@ -325,7 +331,8 @@ namespace GlassPane::UI
             return tab == InspectorTab::Memory ||
                 tab == InspectorTab::Handles ||
                 tab == InspectorTab::Modules ||
-                tab == InspectorTab::Network;
+                tab == InspectorTab::Network ||
+                tab == InspectorTab::Services;
         }
 
         ImVec2 InspectorDockDefaultSize(InspectorTab tab)
@@ -3455,6 +3462,103 @@ namespace GlassPane::UI
             visibleMemoryRegionsDirty_ = false;
         }
 
+        void LogServiceSnapshotRefresh()
+        {
+            const std::string status = WideToUtf8(serviceSnapshot_.statusMessage);
+            const bool partialEnumeration =
+                !serviceSnapshot_.success &&
+                serviceSnapshot_.partial &&
+                !serviceSnapshot_.services.empty();
+            if (!serviceSnapshot_.success && !partialEnumeration)
+            {
+                std::string message =
+                    "Service context could not be collected in " +
+                    std::to_string(timings_.servicesMs) + " ms";
+                if (!status.empty())
+                {
+                    message += ": " + status;
+                }
+                else
+                {
+                    message += ".";
+                }
+                AddLog(LogLevel::Warning, message);
+                return;
+            }
+
+            std::size_t correlationCount = 0;
+            for (const auto& entry : serviceSnapshot_.serviceIndexesByPid)
+            {
+                correlationCount += entry.second.size();
+            }
+
+            const std::size_t retainedCount = serviceSnapshot_.services.size();
+            const std::size_t totalCount = (std::max)(
+                retainedCount,
+                serviceSnapshot_.totalEnumerated);
+            const std::size_t omittedCount = totalCount - retainedCount;
+            const bool partial =
+                partialEnumeration ||
+                serviceSnapshot_.partial ||
+                serviceSnapshot_.truncated;
+            std::string message = partialEnumeration
+                ? "Service snapshot collection stopped with partial results: "
+                : (partial
+                    ? "Service snapshot loaded with partial metadata: "
+                    : "Service snapshot loaded: ");
+
+            if (omittedCount != 0)
+            {
+                message +=
+                    std::to_string(retainedCount) + " of " +
+                    std::to_string(totalCount) +
+                    " active Win32 service record(s) visible to the current security context retained";
+            }
+            else
+            {
+                message +=
+                    std::to_string(retainedCount) +
+                    " active Win32 service record(s) visible to the current security context";
+            }
+            message +=
+                ", " + std::to_string(correlationCount) +
+                " SCM-reported service-to-PID correlation(s)";
+
+            if (serviceSnapshot_.configurationUnavailableCount != 0)
+            {
+                message +=
+                    ", " +
+                    std::to_string(serviceSnapshot_.configurationUnavailableCount) +
+                    " configuration record(s) unavailable";
+            }
+            if (serviceSnapshot_.descriptionUnavailableCount != 0)
+            {
+                message +=
+                    ", " +
+                    std::to_string(serviceSnapshot_.descriptionUnavailableCount) +
+                    " description record(s) unavailable";
+            }
+            if (omittedCount != 0)
+            {
+                message +=
+                    ", " + std::to_string(omittedCount) +
+                    " record(s) omitted by the service cap";
+            }
+            else if (partial && !partialEnumeration &&
+                serviceSnapshot_.configurationUnavailableCount == 0 &&
+                serviceSnapshot_.descriptionUnavailableCount == 0)
+            {
+                message += ", one or more metadata fields bounded to collection limits";
+            }
+
+            message += " in " + std::to_string(timings_.servicesMs) + " ms.";
+            if (partialEnumeration && !status.empty())
+            {
+                message += " " + status;
+            }
+            AddLog(partial ? LogLevel::Warning : LogLevel::Info, message);
+        }
+
         void RefreshSnapshot(bool refreshSelectedEvidence = false)
         {
             if (loadedSnapshotActive_)
@@ -3474,6 +3578,10 @@ namespace GlassPane::UI
             const ULONGLONG started = GetTickCount64();
             snapshot_ = Core::CollectProcessSnapshot();
             timings_.processSnapshotMs = ElapsedMs(started);
+            const ULONGLONG servicesStarted = GetTickCount64();
+            serviceSnapshot_ = Core::CollectServiceSnapshot();
+            timings_.servicesMs = ElapsedMs(servicesStarted);
+            LogServiceSnapshotRefresh();
             MarkSnapshotDependentCachesDirty();
             ClearSelectedProcessEvidence();
             lastRefreshTime_ = LocalTimestamp();
@@ -4785,6 +4893,9 @@ namespace GlassPane::UI
             case InspectorTab::Chain:
                 RenderChainPanel();
                 break;
+            case InspectorTab::Services:
+                RenderServicesPanel();
+                break;
             case InspectorTab::Modules:
                 RenderModulesPanel();
                 break;
@@ -5415,6 +5526,7 @@ namespace GlassPane::UI
         ID3D11RenderTargetView* renderTargetView_ = nullptr;
 
         Core::ProcessSnapshot snapshot_;
+        Core::ServiceCollectionResult serviceSnapshot_;
         Core::FocusedGraph focusedGraph_;
         Core::ProcessSnapshotCapture baselineCompareSnapshot_;
         Core::ProcessSnapshotCapture currentCompareSnapshot_;
@@ -5431,6 +5543,7 @@ namespace GlassPane::UI
         Core::ModuleCollectionResult selectedModules_;
         Core::NetworkCollectionResult networkSnapshot_;
         Core::ProcessSnapshot liveSnapshotBeforeLoad_;
+        Core::ServiceCollectionResult liveServiceSnapshotBeforeLoad_;
         Core::NetworkCollectionResult liveNetworkSnapshotBeforeLoad_;
         Core::TokenInfo selectedToken_;
         Core::RuntimeInfo selectedRuntime_;

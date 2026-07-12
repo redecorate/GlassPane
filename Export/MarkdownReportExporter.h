@@ -9,6 +9,7 @@
 #include "../Core/NetworkIndicatorFeed.h"
 #include "../Core/ProcessInfo.h"
 #include "../Core/RuntimeInfo.h"
+#include "../Core/ServiceInfo.h"
 #include "../Core/SnapshotCompare.h"
 #include "../Core/TokenInfo.h"
 
@@ -21,6 +22,7 @@ namespace GlassPane::Export
     struct SelectedProcessMarkdownReportContext
     {
         const Core::ProcessSnapshot* snapshot = nullptr;
+        const Core::ServiceCollectionResult* serviceContext = nullptr;
         std::uint32_t pid = 0;
         std::wstring appVersion;
         std::wstring buildConfiguration;
