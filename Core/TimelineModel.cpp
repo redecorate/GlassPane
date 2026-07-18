@@ -9,14 +9,17 @@ namespace GlassPane::Core
 {
     namespace
     {
-        bool IncludeProcess(const ProcessInfo& process, TimelineFilter filter)
+        bool IncludeProcess(
+            Severity severity,
+            bool suspicious,
+            TimelineFilter filter)
         {
             switch (filter)
             {
             case TimelineFilter::SuspiciousOnly:
-                return process.IsSuspicious();
+                return suspicious;
             case TimelineFilter::HighSeverityOnly:
-                return process.severity == Severity::High;
+                return severity == Severity::High;
             case TimelineFilter::All:
             default:
                 return true;
@@ -26,14 +29,31 @@ namespace GlassPane::Core
 
     std::vector<TimelineRow> BuildTimelineRows(
         const ProcessSnapshot& snapshot,
-        TimelineFilter filter)
+        TimelineFilter filter,
+        const std::vector<Severity>& authoritativeSeverities,
+        const std::vector<std::uint8_t>& authoritativeSuspicious,
+        const std::vector<std::uint8_t>& authoritativeAvailable)
     {
         std::vector<TimelineRow> rows;
         rows.reserve(snapshot.processes.size());
 
-        for (const ProcessInfo& process : snapshot.processes)
+        for (std::size_t processIndex = 0;
+            processIndex < snapshot.processes.size();
+            ++processIndex)
         {
-            if (!IncludeProcess(process, filter))
+            const ProcessInfo& process = snapshot.processes[processIndex];
+            const bool authorityAvailable =
+                processIndex < authoritativeSeverities.size() &&
+                processIndex < authoritativeSuspicious.size() &&
+                processIndex < authoritativeAvailable.size() &&
+                authoritativeAvailable[processIndex] != 0;
+            const Severity severity = authorityAvailable
+                ? authoritativeSeverities[processIndex]
+                : Severity::None;
+            const bool suspicious = authorityAvailable
+                ? authoritativeSuspicious[processIndex] != 0
+                : false;
+            if (!IncludeProcess(severity, suspicious, filter))
             {
                 continue;
             }
@@ -43,14 +63,15 @@ namespace GlassPane::Core
                     ? FindProcessByPid(snapshot, process.parentPid)
                     : nullptr;
             TimelineRow row;
+            row.sourceProcessIndex = processIndex;
             row.pid = process.pid;
             row.parentPid = process.parentPid;
             row.parentName = parent == nullptr ? L"" : parent->name;
             row.processName = process.name;
             row.creationTimeLocal = process.creationTimeLocal;
             row.hasCreationTime = process.hasCreationTime;
-            row.severity = process.severity;
-            row.firstIndicator = process.indicators.empty() ? L"" : process.indicators.front();
+            row.authorityAvailable = authorityAvailable;
+            row.severity = severity;
             rows.push_back(std::move(row));
         }
 

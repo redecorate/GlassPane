@@ -12,7 +12,18 @@
         void RebuildFocusedGraph(const char*)
         {
             const ULONGLONG started = GetTickCount64();
-            focusedGraph_ = Core::BuildFocusedTree(snapshot_, selectedPid_, 2);
+            const std::vector<Core::Severity> emptySeverities;
+            const std::vector<std::uint8_t> emptySuspicious;
+            const std::vector<std::uint8_t> emptyAvailable;
+            const bool authorityCurrent =
+                ProcessAuthorityProjectionMatchesCurrent();
+            focusedGraph_ = Core::BuildFocusedTree(
+                snapshot_,
+                selectedPid_,
+                authorityCurrent ? processAuthoritySeverities_ : emptySeverities,
+                authorityCurrent ? processAuthoritySuspicious_ : emptySuspicious,
+                authorityCurrent ? processAuthorityAvailable_ : emptyAvailable,
+                2);
             timings_.graphLayoutMs = ElapsedMs(started);
             graphLayoutDirty_ = true;
         }
@@ -267,8 +278,6 @@
             const ImVec2 canvasSize = ImGui::GetWindowSize();
             const ImVec2 canvasMax(canvasOrigin.x + canvasSize.x, canvasOrigin.y + canvasSize.y);
             ImDrawList* drawList = ImGui::GetWindowDrawList();
-            const bool selectedHasHighTriageFinding = SelectedProcessHasHighTriageFinding();
-
             drawList->PushClipRect(canvasOrigin, canvasMax, true);
             drawList->AddRectFilledMultiColor(
                 canvasOrigin,
@@ -465,10 +474,7 @@
                     if (visual.nodeIndex < focusedGraph_.nodes.size())
                     {
                         const Core::FocusedGraphNode& node = focusedGraph_.nodes[visual.nodeIndex];
-                        visual.displaySeverity =
-                            node.pid == selectedPid_ && selectedHasHighTriageFinding
-                                ? Core::Severity::High
-                                : node.severity;
+                        visual.displaySeverity = node.severity;
                     }
                 }
             };
@@ -642,10 +648,7 @@
                 }
 
                 Core::Severity cardSeverity = visual.displaySeverity;
-                if (node.suspicious && Core::SeverityRank(cardSeverity) < Core::SeverityRank(Core::Severity::Medium))
-                {
-                    cardSeverity = Core::Severity::Medium;
-                }
+                const bool triageUnavailable = !node.authorityAvailable;
                 const bool severityNode = Core::SeverityRank(cardSeverity) >= Core::SeverityRank(Core::Severity::Low);
                 const ImVec4 accent = severityNode
                     ? SeverityColor(cardSeverity)
@@ -756,7 +759,9 @@
                 const float textX = iconMax.x + std::clamp(10.0f * nodeDrawScale, 8.0f, 12.0f);
                 const float titleY = visual.min.y + std::clamp(13.0f * nodeDrawScale, 10.0f, 14.0f);
                 const float pidY = titleY + std::clamp(22.0f * nodeDrawScale, 17.0f, 22.0f);
-                const float rightReserve = severityNode ? std::clamp(58.0f * nodeDrawScale, 44.0f, 68.0f) : 14.0f;
+                const float rightReserve = severityNode
+                    ? std::clamp(58.0f * nodeDrawScale, 44.0f, 68.0f)
+                    : (triageUnavailable ? 82.0f : 14.0f);
                 const float titleMaxWidth = std::max(24.0f, visual.max.x - rightReserve - textX);
                 const std::string title = EllipsizeToWidth(displayTitle, titleMaxWidth);
                 drawList->PushClipRect(
@@ -807,6 +812,17 @@
                         drawList->AddCircleFilled(alertCenter, 8.0f, ColorU32(ImVec4(accent.x, accent.y, accent.z, 0.96f)), 16);
                         drawList->AddText(ImVec2(alertCenter.x - 2.5f, alertCenter.y - 7.5f), IM_COL32(255, 255, 255, 245), "!");
                     }
+                }
+                else if (triageUnavailable)
+                {
+                    const char* unavailableLabel = "unavailable";
+                    const ImVec2 labelSize = ImGui::CalcTextSize(unavailableLabel);
+                    drawList->AddText(
+                        ImVec2(
+                            visual.max.x - labelSize.x - 13.0f,
+                            visual.max.y - labelSize.y - 11.0f),
+                        ColorU32(MutedText()),
+                        unavailableLabel);
                 }
                 else if (node.inSelectedChain)
                 {
@@ -868,23 +884,19 @@
                     };
 
                     std::vector<GraphSummaryBadge> badges;
-                    const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*summaryProcess);
-                    const Core::FileIdentity& fileIdentity = CachedFileIdentity(*summaryProcess);
-                    const std::vector<Core::Finding>& findings =
-                        FindingsForSelectedProcess(*summaryProcess, chain, fileIdentity);
-
-                    Core::Severity triageSeverity = Core::Severity::None;
-                    std::string triageValue = "Clean";
-                    if (!findings.empty())
-                    {
-                        triageSeverity = FindingSeverityAsCoreSeverity(Core::HighestFindingSeverity(findings));
-                        triageValue = WideToUtf8(Core::SeverityToString(triageSeverity));
-                    }
-                    else if (!summaryProcess->indicators.empty() || !summaryProcess->contextNotes.empty())
-                    {
-                        triageSeverity = Core::Severity::Info;
-                        triageValue = "Info";
-                    }
+                    const std::size_t summaryProcessIndex =
+                        ProcessIndexForAuthority(*summaryProcess);
+                    const bool triageUnavailable =
+                        summaryProcessIndex >= snapshot_.processes.size() ||
+                        ProcessAuthorityUnavailableAt(summaryProcessIndex);
+                    const Core::Severity triageSeverity =
+                        ProcessAuthoritySeverity(*summaryProcess);
+                    const std::string triageValue =
+                        triageUnavailable
+                            ? "Unavailable"
+                            : (triageSeverity == Core::Severity::None
+                            ? "Informational"
+                            : WideToUtf8(Core::SeverityToString(triageSeverity)));
 
                     badges.push_back({ "Triage", triageValue, SeverityColor(triageSeverity), 0.0f });
                     if (networkLoaded_)

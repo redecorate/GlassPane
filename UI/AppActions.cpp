@@ -12,12 +12,12 @@
                 return;
             }
 
-            if (!ModulesLoadedForProcess(*process))
+            if (!loadedSnapshotActive_ && !ModulesLoadedForProcess(*process))
             {
                 RefreshModules();
             }
 
-            if (!networkLoaded_)
+            if (!loadedSnapshotActive_ && !networkLoaded_)
             {
                 RefreshNetwork(true);
             }
@@ -29,6 +29,41 @@
                 return;
             }
 
+            // The serializer is deliberately I/O-free. Capture live-only file
+            // identity here, and use already-restored snapshot evidence while
+            // offline. A loaded snapshot must never be enriched from the
+            // current endpoint during export.
+            if (!loadedSnapshotActive_ && !TokenLoadedForProcess(*process))
+            {
+                RefreshToken(false);
+            }
+            Export::SelectedProcessJsonEvidenceContext capturedJsonEvidence;
+            capturedJsonEvidence.identity = Core::MakeProcessIdentityKey(*process);
+            capturedJsonEvidence.identityCaptured = true;
+            if (!loadedSnapshotActive_)
+            {
+                capturedJsonEvidence.processFileIdentity =
+                    CachedFileIdentity(*process);
+                capturedJsonEvidence.processFileIdentityCaptured = true;
+
+                if (ModulesLoadedForProcess(*process))
+                {
+                    capturedJsonEvidence.moduleFileIdentities.reserve(
+                        selectedModules_.modules.size());
+                    for (const Core::ModuleInfo& module : selectedModules_.modules)
+                    {
+                        capturedJsonEvidence.moduleFileIdentities.push_back(
+                            CachedFileIdentity(module.modulePath));
+                    }
+                    capturedJsonEvidence.moduleFileIdentitiesCaptured = true;
+                }
+            }
+            if (TokenLoadedForProcess(*process))
+            {
+                capturedJsonEvidence.token = selectedToken_;
+                capturedJsonEvidence.tokenCaptured = true;
+            }
+
             std::wstring error;
             const Core::HandleCollectionResult* handlesForExport =
                 HandlesLoadedForProcess(*process) ? &selectedHandles_ : nullptr;
@@ -36,6 +71,16 @@
                 RuntimeLoadedForProcess(*process) ? &selectedRuntime_ : nullptr;
             const Core::MemoryCollectionResult* memoryForExport =
                 MemoryLoadedForProcess(*process) ? &selectedMemory_ : nullptr;
+            SynchronizeNativeObservationEngineForCurrentEvidence();
+            const Core::PersistedTriageSummary authoritativeTriage =
+                CaptureSelectedAuthoritativeTriageSummary();
+            const std::vector<Core::NativeSourceEvidenceRecord>&
+                nativeSourceEvidence =
+                    SelectedNativeSourceEvidenceForProcess(*process);
+            const std::vector<Core::Finding> historicalEvidence =
+                UsesHistoricalSourceEvidence()
+                    ? HistoricalSourceEvidenceForProcess(*process)
+                    : std::vector<Core::Finding>{};
             const ULONGLONG started = GetTickCount64();
             if (!Export::ExportSelectedProcessDetailsToJson(
                 snapshot_,
@@ -45,6 +90,10 @@
                 handlesForExport,
                 runtimeForExport,
                 memoryForExport,
+                capturedJsonEvidence,
+                authoritativeTriage,
+                &nativeSourceEvidence,
+                historicalEvidence.empty() ? nullptr : &historicalEvidence,
                 fileName,
                 &error))
             {
@@ -84,12 +133,13 @@
                 return;
             }
 
-            const Core::ChainAnalysisResult chain = Core::AnalyzeChain(snapshot_, process->pid);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(*process);
-            const std::vector<Core::FileIdentityIndicator> fileIdentityIndicators =
-                BuildProcessFileIdentityIndicators(*process, fileIdentity);
-            const std::vector<Core::Finding> findings =
-                FindingsForSelectedProcess(*process, chain, fileIdentity);
+            Core::FileIdentity loadedSnapshotFileIdentity;
+            const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
+                ? loadedSnapshotFileIdentity
+                : CachedFileIdentity(*process);
+            SynchronizeNativeObservationEngineForCurrentEvidence();
+            const Core::PersistedTriageSummary authoritativeTriage =
+                CaptureSelectedAuthoritativeTriageSummary();
             const std::vector<Core::NetworkConnection> selectedNetworkConnections =
                 networkLoaded_
                     ? SelectedNetworkConnectionsForExport()
@@ -104,9 +154,16 @@
             reportContext.pid = selectedPid_;
             reportContext.appVersion = Utf8ToWide(appVersion.c_str());
             reportContext.buildConfiguration = Utf8ToWide(BuildConfiguration());
-            reportContext.findings = findings;
-            reportContext.fileIdentity = &fileIdentity;
-            reportContext.fileIdentityIndicators = fileIdentityIndicators;
+            reportContext.authoritativeTriage = authoritativeTriage;
+            reportContext.nativeSourceEvidence =
+                SelectedNativeSourceEvidenceForProcess(*process);
+            reportContext.historicalLegacyEvidence =
+                UsesHistoricalSourceEvidence()
+                    ? HistoricalSourceEvidenceForProcess(*process)
+                    : std::vector<Core::Finding>{};
+            reportContext.fileIdentity = loadedSnapshotActive_
+                ? nullptr
+                : &fileIdentity;
             reportContext.modulesLoaded = ModulesLoadedForProcess(*process);
             reportContext.modules = reportContext.modulesLoaded ? &selectedModules_ : nullptr;
             reportContext.networkLoaded = networkLoaded_;
@@ -197,7 +254,9 @@
             metadata.generatedAt = networkIndicatorFeed_.metadata.generatedAt;
             metadata.expiresAt = networkIndicatorFeed_.metadata.expiresAt;
             metadata.indicatorCount = networkIndicatorFeed_.indicators.size();
-            metadata.source = networkIndicatorUsedFallback_ ? L"development fallback" : L"portable Indicators folder";
+            metadata.source = networkIndicatorUsedFallback_
+                ? L"alternate local Indicators path"
+                : L"portable Indicators folder";
             metadata.status = NetworkIntelStatusText();
 
             const std::filesystem::path feedPath = networkIndicatorFeed_.metadata.sourcePath.empty()
@@ -287,6 +346,24 @@
             }
         }
 
+        static void PreserveHandleCollectionStatus(
+            Export::EvidenceCollectionStatus& status,
+            const Core::HandleCollectionResult& collection)
+        {
+            if (!collection.IsPartial())
+            {
+                return;
+            }
+
+            status.status = L"partial";
+            status.truncated = true;
+            if (status.message.empty())
+            {
+                status.message =
+                    L"Handle metadata was partially collected; retained core rows remain available.";
+            }
+        }
+
         static void SetNotAttemptedStatus(
             Export::EvidenceCollectionStatus& status,
             const std::wstring& message)
@@ -306,11 +383,6 @@
         static const char* EvidenceModeLogText(Export::SavedSnapshotEvidenceMode mode)
         {
             return mode == Export::SavedSnapshotEvidenceMode::Deep ? "deep" : "default bounded";
-        }
-
-        static bool ModuleHasSnapshotIndicator(const Core::ModuleInfo& module)
-        {
-            return !module.indicators.empty();
         }
 
         static bool EvidenceStatusCountsAsCollected(const Export::EvidenceCollectionStatus& status)
@@ -427,16 +499,11 @@
                 }
                 else
                 {
-                    auto& modules = evidence.modules.modules;
-                    modules.erase(
-                        std::remove_if(
-                            modules.begin(),
-                            modules.end(),
-                            [](const Core::ModuleInfo& module) {
-                                return !ModuleHasSnapshotIndicator(module);
-                            }),
-                        modules.end());
-                    TrimSnapshotVector(modules, Export::SnapshotDefaultMaxIndicatorModulesPerProcess);
+                    // Default captures retain the bounded module collection
+                    // status only. Native selected-process source evidence is
+                    // persisted separately; legacy indicator sidecars no
+                    // longer decide which module rows survive schema 5.
+                    evidence.modules.modules.clear();
                 }
                 ApplyCollectionStatus(
                     evidence.modulesStatus,
@@ -448,7 +515,7 @@
                 {
                     evidence.modulesStatus.status = L"partial";
                     evidence.modulesStatus.message =
-                        L"Module summary saved; only module rows with indicators are included in default snapshot mode.";
+                        L"Module collection status saved; module rows are omitted by default snapshot mode.";
                     evidence.modulesStatus.truncated = true;
                 }
                 CountEvidenceStatus(
@@ -482,6 +549,9 @@
                             evidence.handles.statusMessage,
                             originalCount,
                             evidence.handles.handles.size());
+                        PreserveHandleCollectionStatus(
+                            evidence.handlesStatus,
+                            evidence.handles);
                         CountEvidenceStatus(
                             evidence.handlesStatus,
                             summary.handlesOk,
@@ -597,6 +667,9 @@
                     : EvidenceModeText(mode);
             context.selectedPid = selectedPid_;
             context.processEvidence = processEvidence;
+            context.nativeSourceEvidence = CaptureNativeSourceEvidenceContext();
+            context.preserveHistoricalLegacyEvidence =
+                UsesHistoricalSourceEvidence();
             return context;
         }
 
@@ -625,6 +698,10 @@
                 return;
             }
 
+            // Capture-time authority must match the current selected evidence
+            // generation before immutable worker state is assembled.
+            SynchronizeNativeObservationEngineForCurrentEvidence();
+
             Core::ProcessSnapshot snapshotCopy = snapshot_;
             Core::ServiceCollectionResult serviceContextCopy = serviceSnapshot_;
             const bool loadedSnapshotActive = loadedSnapshotActive_;
@@ -635,6 +712,12 @@
             std::vector<Export::ProcessEvidenceSnapshot> loadedEvidenceCopy =
                 loadedSnapshotActive ? loadedSnapshotEvidence_ : std::vector<Export::ProcessEvidenceSnapshot>{};
             Export::NetworkIntelligenceSnapshotMetadata networkIntel = BuildNetworkIntelSnapshotMetadata();
+            Core::PersistedTriageContext triageContextCopy =
+                CaptureAuthoritativeTriageContext();
+            Export::SavedNativeSourceEvidenceContext nativeSourceEvidenceCopy =
+                CaptureNativeSourceEvidenceContext();
+            const bool preserveHistoricalLegacyEvidence =
+                UsesHistoricalSourceEvidence();
             const std::wstring glassPaneVersion = Utf8ToWide(GlassPaneVersion().c_str());
             const std::wstring capturedAt =
                 loadedSnapshotActive && !loadedSnapshotMetadata_.capturedAt.empty()
@@ -675,6 +758,9 @@
                  networkCopy = std::move(networkCopy),
                  networkMatchesCopy = std::move(networkMatchesCopy),
                  loadedEvidenceCopy = std::move(loadedEvidenceCopy),
+                 triageContextCopy = std::move(triageContextCopy),
+                 nativeSourceEvidenceCopy = std::move(nativeSourceEvidenceCopy),
+                 preserveHistoricalLegacyEvidence,
                  outputPath,
                  mode,
                  networkLoaded,
@@ -722,6 +808,10 @@
                     context.evidenceMode = evidenceMode;
                     context.selectedPid = selectedPid;
                     context.processEvidence = &evidence;
+                    context.triageContext = &triageContextCopy;
+                    context.nativeSourceEvidence = nativeSourceEvidenceCopy;
+                    context.preserveHistoricalLegacyEvidence =
+                        preserveHistoricalLegacyEvidence;
 
                     std::wstring error;
                     result.success = Export::SaveGlassPaneSnapshot(context, outputPath, &error);
@@ -794,9 +884,12 @@
         {
             PreserveLiveStateBeforeLoad();
             loadedSnapshotActive_ = true;
+            ++baselineScopeGeneration_;
             loadedSnapshotMetadata_ = document.metadata;
             loadedSnapshotMetadata_.sourcePath = sourcePath;
             loadedSnapshotNetworkIntel_ = document.networkIntel;
+            loadedSnapshotTriage_ = document.triageContext;
+            loadedSnapshotNativeSourceEvidence_ = document.nativeSourceEvidence;
             loadedSnapshotEvidence_ = document.processEvidence;
             loadedSnapshotNetworkIndicatorMatches_ = document.networkIndicatorMatches;
             loadedSnapshotEvidenceByPid_.clear();
@@ -824,17 +917,22 @@
                 RestoreLoadedSnapshotEvidenceForProcess(*selectedProcess);
             }
             fileIdentityCache_.clear();
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence();
             MarkAllTablesNeedAutoSize();
             MarkSnapshotDependentCachesDirty();
+            Core::UpdateSelectedProcessEnrichedSelection(
+                selectedEnrichedLifecycle_,
+                CurrentSelectedProcessEnrichedSourceStamp());
             suspiciousCount_ = CountSuspiciousProcesses();
             RefreshNetworkIntelMatches(false);
+            RebuildProcessTriageCacheAfterEvidenceMutation();
             RebuildFocusedGraph("loaded-snapshot");
             RequestGraphFit();
             RebuildVisibleProcessRowsIfNeeded();
             RebuildGraphWorldLayoutIfNeeded();
             const std::string serviceSummary =
-                document.metadata.schemaVersion >= Export::GlassPaneSnapshotSchemaVersion
+                document.metadata.schemaVersion >=
+                    Export::GlassPaneSnapshotServiceContextSchemaVersion
                     ? (document.serviceContext.attempted
                         ? ", " + std::to_string(document.serviceContext.services.size()) +
                             " persisted service record(s)"
@@ -918,8 +1016,11 @@
             }
 
             loadedSnapshotActive_ = false;
+            ++baselineScopeGeneration_;
             loadedSnapshotMetadata_ = {};
             loadedSnapshotNetworkIntel_ = {};
+            loadedSnapshotTriage_ = {};
+            loadedSnapshotNativeSourceEvidence_ = {};
             loadedSnapshotEvidence_.clear();
             loadedSnapshotEvidenceByPid_.clear();
             loadedSnapshotNetworkIndicatorMatches_.clear();
@@ -949,10 +1050,14 @@
 
             ClearSelectedProcessEvidence();
             fileIdentityCache_.clear();
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence();
             MarkAllTablesNeedAutoSize();
             MarkSnapshotDependentCachesDirty();
             RefreshNetworkIntelMatches(false);
+            if (!refreshAfterRestore)
+            {
+                RebuildProcessTriageCacheAfterEvidenceMutation();
+            }
             RebuildFocusedGraph("return-live");
             RequestGraphFit();
             RebuildVisibleProcessRowsIfNeeded();
@@ -962,6 +1067,14 @@
             if (refreshAfterRestore)
             {
                 RefreshSnapshot(true);
+            }
+            else if (const Core::ProcessInfo* selectedProcess =
+                    Core::FindProcessByPid(snapshot_, selectedPid_);
+                selectedProcess != nullptr)
+            {
+                EnsureSelectedProcessEvidenceLoaded(*selectedProcess);
+                RequestSelectedProcessEnrichedRebuild(
+                    Core::SelectedProcessEnrichedRebuildReason::ReturnToLive);
             }
         }
 
@@ -996,19 +1109,11 @@
                 return false;
             }
 
-            const Core::ChainAnalysisResult chain = Core::AnalyzeChain(snapshot_, process->pid);
             Core::FileIdentity loadedSnapshotFileIdentity;
             const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
                 ? loadedSnapshotFileIdentity
                 : CachedFileIdentity(*process);
-            const std::vector<Core::FileIdentityIndicator> fileIdentityIndicators =
-                loadedSnapshotActive_
-                    ? std::vector<Core::FileIdentityIndicator>{}
-                    : BuildProcessFileIdentityIndicators(*process, fileIdentity);
-            const std::vector<Core::Finding> findings =
-                loadedSnapshotActive_
-                    ? std::vector<Core::Finding>{}
-                    : FindingsForSelectedProcess(*process, chain, fileIdentity);
+            SynchronizeNativeObservationEngineForCurrentEvidence();
             const std::vector<Core::NetworkConnection> selectedNetworkConnections =
                 networkLoaded_
                     ? SelectedNetworkConnectionsForExport()
@@ -1022,9 +1127,15 @@
             reportContext.pid = selectedPid_;
             reportContext.appVersion = Utf8ToWide(GlassPaneVersion().c_str());
             reportContext.buildConfiguration = Utf8ToWide(BuildConfiguration());
-            reportContext.findings = findings;
+            reportContext.authoritativeTriage =
+                CaptureSelectedAuthoritativeTriageSummary();
+            reportContext.nativeSourceEvidence =
+                SelectedNativeSourceEvidenceForProcess(*process);
+            reportContext.historicalLegacyEvidence =
+                UsesHistoricalSourceEvidence()
+                    ? HistoricalSourceEvidenceForProcess(*process)
+                    : std::vector<Core::Finding>{};
             reportContext.fileIdentity = loadedSnapshotActive_ ? nullptr : &fileIdentity;
-            reportContext.fileIdentityIndicators = fileIdentityIndicators;
             reportContext.modulesLoaded = ModulesLoadedForProcess(*process);
             reportContext.modules = reportContext.modulesLoaded ? &selectedModules_ : nullptr;
             reportContext.networkLoaded = networkLoaded_;
@@ -1061,11 +1172,12 @@
             std::uint32_t pid = 0;
             std::wstring appVersion;
             std::wstring buildConfiguration;
-            std::vector<Core::Finding> findings;
+            Core::PersistedTriageSummary authoritativeTriage;
+            std::vector<Core::NativeSourceEvidenceRecord> nativeSourceEvidence;
+            std::vector<Core::Finding> historicalLegacyEvidence;
 
             bool hasFileIdentity = false;
             Core::FileIdentity fileIdentity;
-            std::vector<Core::FileIdentityIndicator> fileIdentityIndicators;
 
             bool modulesLoaded = false;
             Core::ModuleCollectionResult modules;
@@ -1107,15 +1219,20 @@
             data.appVersion = Utf8ToWide(GlassPaneVersion().c_str());
             data.buildConfiguration = Utf8ToWide(BuildConfiguration());
 
-            const Core::ChainAnalysisResult chain = Core::AnalyzeChain(snapshot_, process->pid);
             if (!loadedSnapshotActive_)
             {
                 data.fileIdentity = CachedFileIdentity(*process);
                 data.hasFileIdentity = true;
-                data.fileIdentityIndicators =
-                    BuildProcessFileIdentityIndicators(*process, data.fileIdentity);
-                data.findings = FindingsForSelectedProcess(*process, chain, data.fileIdentity);
             }
+            SynchronizeNativeObservationEngineForCurrentEvidence();
+            data.authoritativeTriage =
+                CaptureSelectedAuthoritativeTriageSummary();
+            data.nativeSourceEvidence =
+                SelectedNativeSourceEvidenceForProcess(*process);
+            data.historicalLegacyEvidence =
+                UsesHistoricalSourceEvidence()
+                    ? HistoricalSourceEvidenceForProcess(*process)
+                    : std::vector<Core::Finding>{};
 
             data.modulesLoaded = ModulesLoadedForProcess(*process);
             if (data.modulesLoaded)
@@ -1184,9 +1301,11 @@
             reportContext.pid = data.pid;
             reportContext.appVersion = data.appVersion;
             reportContext.buildConfiguration = data.buildConfiguration;
-            reportContext.findings = data.findings;
+            reportContext.authoritativeTriage = data.authoritativeTriage;
+            reportContext.nativeSourceEvidence = data.nativeSourceEvidence;
+            reportContext.historicalLegacyEvidence =
+                data.historicalLegacyEvidence;
             reportContext.fileIdentity = data.hasFileIdentity ? &data.fileIdentity : nullptr;
-            reportContext.fileIdentityIndicators = data.fileIdentityIndicators;
             reportContext.modulesLoaded = data.modulesLoaded;
             reportContext.modules = data.modulesLoaded ? &data.modules : nullptr;
             reportContext.networkLoaded = data.networkLoaded;
@@ -1282,6 +1401,8 @@
             const std::filesystem::path packagePath =
                 std::filesystem::path(parentFolder) / (L"GlassPane-Evidence-" + FileTimestamp());
 
+            SynchronizeNativeObservationEngineForCurrentEvidence();
+
             const bool loadedSnapshotActive = loadedSnapshotActive_;
             Core::ProcessSnapshot snapshotCopy = snapshot_;
             Core::ServiceCollectionResult serviceContextCopy = serviceSnapshot_;
@@ -1293,6 +1414,14 @@
                 loadedSnapshotActive ? loadedSnapshotEvidence_ : std::vector<Export::ProcessEvidenceSnapshot>{};
             const Export::NetworkIntelligenceSnapshotMetadata networkIntelMetadata =
                 BuildNetworkIntelSnapshotMetadata();
+            SelectedMarkdownPackageData selectedReportData =
+                BuildSelectedMarkdownPackageData();
+            Core::PersistedTriageContext triageContextCopy =
+                CaptureAuthoritativeTriageContext();
+            Export::SavedNativeSourceEvidenceContext nativeSourceEvidenceCopy =
+                CaptureNativeSourceEvidenceContext();
+            const bool preserveHistoricalLegacyEvidence =
+                UsesHistoricalSourceEvidence();
             const std::wstring glassPaneVersion = Utf8ToWide(GlassPaneVersion().c_str());
             const std::wstring capturedAt =
                 loadedSnapshotActive && !loadedSnapshotMetadata_.capturedAt.empty()
@@ -1315,7 +1444,6 @@
                     ? loadedSnapshotMetadata_.evidenceMode
                     : EvidenceModeText(Export::SavedSnapshotEvidenceMode::Default);
             const std::uint32_t selectedPid = selectedPid_;
-            SelectedMarkdownPackageData selectedReportData = BuildSelectedMarkdownPackageData();
             CompareMarkdownPackageData compareReportData = BuildCompareMarkdownPackageData();
             const std::string appVersionText = GlassPaneVersion();
             const std::string buildConfigurationText = BuildConfiguration();
@@ -1332,6 +1460,9 @@
                  networkCopy = std::move(networkCopy),
                  networkMatchesCopy = std::move(networkMatchesCopy),
                  loadedEvidenceCopy = std::move(loadedEvidenceCopy),
+                 triageContextCopy = std::move(triageContextCopy),
+                 nativeSourceEvidenceCopy = std::move(nativeSourceEvidenceCopy),
+                 preserveHistoricalLegacyEvidence,
                  selectedReportData = std::move(selectedReportData),
                  compareReportData = std::move(compareReportData),
                  networkIntelMetadata,
@@ -1407,6 +1538,10 @@
                     snapshotContext.evidenceMode = evidenceMode;
                     snapshotContext.selectedPid = selectedPid;
                     snapshotContext.processEvidence = &evidence;
+                    snapshotContext.triageContext = &triageContextCopy;
+                    snapshotContext.nativeSourceEvidence = nativeSourceEvidenceCopy;
+                    snapshotContext.preserveHistoricalLegacyEvidence =
+                        preserveHistoricalLegacyEvidence;
                     if (!Export::SaveGlassPaneSnapshot(
                             snapshotContext,
                             (packagePath / snapshotFile).wstring(),
@@ -1483,6 +1618,8 @@
                             std::ios::binary | std::ios::trunc);
                         versionOutput << appVersionText << "\n";
                         versionOutput << "Build: " << buildConfigurationText << "\n";
+                        versionOutput << "Triage model: "
+                            << Core::PersistedTriageModelVersion << "\n";
                         if (!versionOutput)
                         {
                             result.status = "Evidence package failed: could not write version metadata.";

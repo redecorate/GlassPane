@@ -7,6 +7,8 @@
 #include "../Core/ModuleInfo.h"
 #include "../Core/NetworkConnection.h"
 #include "../Core/NetworkIndicatorFeed.h"
+#include "../Core/NativeSourceEvidence.h"
+#include "../Core/PersistedTriage.h"
 #include "../Core/ProcessInfo.h"
 #include "../Core/RuntimeInfo.h"
 #include "../Core/ServiceInfo.h"
@@ -26,11 +28,15 @@ namespace GlassPane::Export
         std::uint32_t pid = 0;
         std::wstring appVersion;
         std::wstring buildConfiguration;
-        std::vector<Core::Finding> findings;
+        // Value-owned capture-time authority. The default represents an older
+        // snapshot/report context where ObservationEngine triage was absent.
+        Core::PersistedTriageSummary authoritativeTriage;
+        std::vector<Core::NativeSourceEvidenceRecord> nativeSourceEvidence;
+        // Narrow compatibility payload for snapshots captured before native
+        // source-evidence persistence. Never used as current verdict input.
+        std::vector<Core::Finding> historicalLegacyEvidence;
 
         const Core::FileIdentity* fileIdentity = nullptr;
-        std::vector<Core::FileIdentityIndicator> fileIdentityIndicators;
-
         bool modulesLoaded = false;
         const Core::ModuleCollectionResult* modules = nullptr;
 

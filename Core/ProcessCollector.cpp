@@ -8,7 +8,6 @@
 #include "ProcessCollector.h"
 
 #include "ProcessTree.h"
-#include "SuspicionRules.h"
 
 #include <Windows.h>
 #include <TlHelp32.h>
@@ -303,7 +302,6 @@ namespace GlassPane::Core
         CloseHandle(toolhelp);
 
         snapshot.Reindex();
-        ApplySuspiciousRules(snapshot);
         BuildProcessTree(snapshot);
         return snapshot;
     }

@@ -23,7 +23,8 @@ namespace GlassPane::UI
     {
         std::size_t processIndex = 0;
         std::size_t depth = 0;
-        Core::Severity filterSeverity = Core::Severity::None;
+        Core::Severity authoritySeverity = Core::Severity::None;
+        bool triageUnavailable = false;
     };
 
     struct ProcessPanelContext
@@ -33,6 +34,7 @@ namespace GlassPane::UI
 
         std::uint32_t selectedPid = 0;
         std::size_t suspiciousCount = 0;
+        std::size_t unavailableCount = 0;
         ProcessFilterMode activeFilter = ProcessFilterMode::All;
         bool searchActive = false;
 
@@ -47,6 +49,9 @@ namespace GlassPane::UI
         ImVec4 mutedTextColor = ImVec4(0.48f, 0.56f, 0.66f, 1.0f);
         ImVec4 selectedRowColor = ImVec4(0.075f, 0.155f, 0.235f, 1.0f);
 
+        // All process surfaces receive textures from the ImGuiApp-owned
+        // canonical resolver. Panels never extract or choose fallbacks.
+        std::function<ImTextureID(const Core::ProcessInfo&)> resolveProcessIcon;
         std::function<void(ProcessFilterMode)> onFilterModeChanged;
         std::function<void(std::uint32_t)> onSelectProcess;
     };

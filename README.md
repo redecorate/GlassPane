@@ -2,7 +2,7 @@
 
 > **A read-only Windows process relationship and forensic analysis dashboard.**
 
-Current release: **V0.7.0**
+Current release: **V0.8.0**
 
 GlassPane is a modern Windows security analysis tool designed to help analysts, researchers, and developers understand **what a process is doing and why it matters**.
 
@@ -24,9 +24,9 @@ It does **not** upload data, kill processes, inject into processes, or remediate
 
 ### Triage
 
-- Explainable correlation engine
-- Human-readable findings
-- Evidence-based severity
+- Explainable TriageEngine verdicts
+- Human-readable Native Source Evidence
+- Typed, evidence-based attention levels
 - Process chain summaries
 - Indicators and contextual notes
 
@@ -51,7 +51,7 @@ It does **not** upload data, kill processes, inject into processes, or remediate
 - Process-owned TCP/UDP sockets
 - Local / remote endpoints
 - Connection ownership
-- Network context within findings
+- Network context within Native Source Evidence
 
 ### Token Analysis
 
@@ -75,7 +75,7 @@ It does **not** upload data, kill processes, inject into processes, or remediate
 
 - JSON export
 - Markdown selected-process report export
-- Structured findings
+- Structured Native Source Evidence
 - Process metadata
 - Token information
 - Network information
@@ -89,7 +89,7 @@ GlassPane is an analysis tool.
 
 The objective is to help answer questions like:
 
-- Why is this process suspicious?
+- Why does this process merit attention?
 - What started it?
 - What privileges does it have?
 - What network connections exist?
@@ -161,6 +161,17 @@ x64
 Release
 ```
 
+## Core tests
+
+All lasting correctness tests belong to `Tests/GlassPane.Core.Tests.vcxproj`
+and its central runner. Build its x64 Debug and Release configurations directly;
+outputs stay under the ignored `x64/Tests/` tree.
+
+Temporary harnesses and phase-specific audit folders must be removed before a
+task is complete. Do not leave manually compiled objects or executables in source
+folders. Reusable scale checks belong in the canonical component tests rather
+than separate benchmark executables.
+
 ---
 
 # Current Feature Set
@@ -176,7 +187,7 @@ Release
 - Network ownership
 - Token inspection
 - Handle inspection
-- Correlation engine
+- Typed ObservationEngine correlations
 - Triage dashboard
 - Exporting results to JSON and Markdown reports
 
@@ -194,7 +205,7 @@ Future active response capabilities are planned as a **separate project**
 
 Issues, feature requests, and pull requests are welcome.
 
-If you discover incorrect findings, false positives, UI issues, or performance regressions, please open an issue with as much detail as possible.
+If you discover incorrect evidence classification, false urgency, UI issues, or performance regressions, please open an issue with as much detail as possible.
 
 ---
 

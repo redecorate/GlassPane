@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -70,15 +71,15 @@ namespace GlassPane::Core
         bool parentRelationshipVerified = false;
         bool parentRelationshipUnverified = false;
         bool parentPidReuseSuspected = false;
+        // Schemas 1-4 historical compatibility metadata. Current live
+        // collection leaves these fields neutral and current authority,
+        // graph, timeline, filters, and metrics must not consume them.
         bool suspicious = false;
         Severity severity = Severity::None;
+        bool historicalSuspiciousCaptured = false;
+        bool historicalSeverityCaptured = false;
         std::vector<std::wstring> indicators;
         std::vector<std::wstring> contextNotes;
-
-        bool IsSuspicious() const
-        {
-            return suspicious;
-        }
     };
 
     struct ProcessSnapshot

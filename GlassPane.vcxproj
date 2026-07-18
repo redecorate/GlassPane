@@ -83,6 +83,9 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Winhttp.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -115,6 +118,9 @@
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
+    <ResourceCompile>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ResourceCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
       <AdditionalDependencies>Comctl32.lib;Comdlg32.lib;Shell32.lib;Psapi.lib;iphlpapi.lib;Bcrypt.lib;Winhttp.lib;Crypt32.lib;Version.lib;Wintrust.lib;Windowscodecs.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -143,25 +149,41 @@
     <ResourceCompile Include="GlassPane.rc" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Core\BaselineObservationBuilder.cpp" />
     <ClCompile Include="Core\ChainAnalysis.cpp" />
-    <ClCompile Include="Core\CorrelationEngine.cpp" />
     <ClCompile Include="Core\FileIdentity.cpp" />
     <ClCompile Include="Core\GraphModel.cpp" />
     <ClCompile Include="Core\HandleCollector.cpp" />
     <ClCompile Include="Core\MemoryCollector.cpp" />
     <ClCompile Include="Core\ModuleCollector.cpp" />
+    <ClCompile Include="Core\NativeHandleObservationBuilder.cpp" />
+    <ClCompile Include="Core\NativeObservationBuilder.cpp" />
+    <ClCompile Include="Core\NativeRuntimeObservationBuilder.cpp" />
+    <ClCompile Include="Core\NativeSourceEvidence.cpp" />
+    <ClCompile Include="Core\NativeTokenObservationBuilder.cpp" />
     <ClCompile Include="Core\NetworkCollector.cpp" />
     <ClCompile Include="Core\NetworkIndicatorMatcher.cpp" />
     <ClCompile Include="Core\NetworkIndicatorUpdater.cpp" />
+    <ClCompile Include="Core\Observation.cpp" />
+    <ClCompile Include="Core\AuthoritativeTriage.cpp" />
+    <ClCompile Include="Core\ObservationInventory.cpp" />
+    <ClCompile Include="Core\ObservationCorrelation.cpp" />
+    <ClCompile Include="Core\ObservationPolicy.cpp" />
+    <ClCompile Include="Core\ObservationRefinement.cpp" />
+    <ClCompile Include="Core\ObservationShadow.cpp" />
+    <ClCompile Include="Core\SelectedProcessEnrichedLifecycle.cpp" />
+    <ClCompile Include="Core\PersistedTriage.cpp" />
+    <ClCompile Include="Core\ProcessIconPolicy.cpp" />
     <ClCompile Include="Core\ProcessCollector.cpp" />
+    <ClCompile Include="Core\ProcessTriageCache.cpp" />
     <ClCompile Include="Core\ProcessTree.cpp" />
     <ClCompile Include="Core\RuntimeCollector.cpp" />
     <ClCompile Include="Core\ServiceCollector.cpp" />
     <ClCompile Include="Core\ServicePathParser.cpp" />
     <ClCompile Include="Core\SnapshotCompare.cpp" />
-    <ClCompile Include="Core\SuspicionRules.cpp" />
     <ClCompile Include="Core\TimelineModel.cpp" />
     <ClCompile Include="Core\TokenCollector.cpp" />
+    <ClCompile Include="Core\TriageEngine.cpp" />
     <ClCompile Include="Export\JsonExporter.cpp" />
     <ClCompile Include="Export\MarkdownReportExporter.cpp" />
     <ClCompile Include="Export\SavedSnapshot.cpp" />
@@ -184,8 +206,8 @@
     <ClCompile Include="UI\UiHelpers.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="Core\BaselineObservationBuilder.h" />
     <ClInclude Include="Core\ChainAnalysis.h" />
-    <ClInclude Include="Core\CorrelationEngine.h" />
     <ClInclude Include="Core\FileIdentity.h" />
     <ClInclude Include="Core\Finding.h" />
     <ClInclude Include="Core\GraphModel.h" />
@@ -195,14 +217,31 @@
     <ClInclude Include="Core\MemoryRegionInfo.h" />
     <ClInclude Include="Core\ModuleCollector.h" />
     <ClInclude Include="Core\ModuleInfo.h" />
+    <ClInclude Include="Core\NativeHandleObservationBuilder.h" />
+    <ClInclude Include="Core\NativeObservationBuilder.h" />
+    <ClInclude Include="Core\NativeRuntimeObservationBuilder.h" />
+    <ClInclude Include="Core\NativeSourceEvidence.h" />
+    <ClInclude Include="Core\NativeTokenObservationBuilder.h" />
     <ClInclude Include="Core\NetworkCollector.h" />
     <ClInclude Include="Core\NetworkConnection.h" />
     <ClInclude Include="Core\NetworkIndicator.h" />
     <ClInclude Include="Core\NetworkIndicatorFeed.h" />
     <ClInclude Include="Core\NetworkIndicatorMatcher.h" />
     <ClInclude Include="Core\NetworkIndicatorUpdater.h" />
+    <ClInclude Include="Core\Observation.h" />
+    <ClInclude Include="Core\AuthoritativeTriage.h" />
+    <ClInclude Include="Core\ObservationInventory.h" />
+    <ClInclude Include="Core\ObservationCorrelation.h" />
+    <ClInclude Include="Core\ObservationPolicy.h" />
+    <ClInclude Include="Core\ObservationRefinement.h" />
+    <ClInclude Include="Core\ObservationShadow.h" />
+    <ClInclude Include="Core\SelectedProcessEnrichedLifecycle.h" />
+    <ClInclude Include="Core\PersistedTriage.h" />
+    <ClInclude Include="Core\ProcessIconPolicy.h" />
     <ClInclude Include="Core\ProcessCollector.h" />
     <ClInclude Include="Core\ProcessInfo.h" />
+    <ClInclude Include="Core\ProductVersion.h" />
+    <ClInclude Include="Core\ProcessTriageCache.h" />
     <ClInclude Include="Core\ProcessTree.h" />
     <ClInclude Include="Core\RuntimeCollector.h" />
     <ClInclude Include="Core\RuntimeInfo.h" />
@@ -210,10 +249,10 @@
     <ClInclude Include="Core\ServiceInfo.h" />
     <ClInclude Include="Core\ServicePathParser.h" />
     <ClInclude Include="Core\SnapshotCompare.h" />
-    <ClInclude Include="Core\SuspicionRules.h" />
     <ClInclude Include="Core\TimelineModel.h" />
     <ClInclude Include="Core\TokenCollector.h" />
     <ClInclude Include="Core\TokenInfo.h" />
+    <ClInclude Include="Core\TriageEngine.h" />
     <ClInclude Include="Export\JsonExporter.h" />
     <ClInclude Include="Export\MarkdownReportExporter.h" />
     <ClInclude Include="Export\SavedSnapshot.h" />
@@ -234,6 +273,7 @@
     <ClInclude Include="UI\HeaderPanel.h" />
     <ClInclude Include="UI\ImGuiApp.h" />
     <ClInclude Include="UI\InspectorViews.h" />
+    <ClInclude Include="UI\InspectorPresentation.h" />
     <ClInclude Include="UI\LogsPanel.h" />
     <ClInclude Include="UI\Modals.h" />
     <ClInclude Include="UI\PickWindowActions.h" />

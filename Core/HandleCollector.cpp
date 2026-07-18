@@ -10,10 +10,14 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <cwctype>
 #include <iomanip>
-#include <memory>
+#include <limits>
+#include <new>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -36,6 +40,23 @@ namespace GlassPane::Core
         {
             NtQuerySystemInformationFn querySystemInformation = nullptr;
             NtQueryObjectFn queryObject = nullptr;
+        };
+
+        enum class SystemHandleQueryStatus
+        {
+            Success,
+            BudgetExceeded,
+            AllocationFailed,
+            ApiFailed
+        };
+
+        struct SystemHandleQueryResult
+        {
+            SystemHandleQueryStatus status = SystemHandleQueryStatus::ApiFailed;
+            std::vector<unsigned char> buffer;
+            std::size_t attemptCount = 0;
+            std::size_t bufferBytes = 0;
+            std::wstring diagnostic;
         };
 
         struct LocalUnicodeString
@@ -85,11 +106,6 @@ namespace GlassPane::Core
                 return static_cast<wchar_t>(std::towlower(ch));
             });
             return value;
-        }
-
-        bool Contains(const std::wstring& haystack, const std::wstring& needle)
-        {
-            return haystack.find(needle) != std::wstring::npos;
         }
 
         bool EqualsIgnoreCase(const std::wstring& left, const std::wstring& right)
@@ -158,33 +174,63 @@ namespace GlassPane::Core
             apis.queryObject =
                 reinterpret_cast<NtQueryObjectFn>(GetProcAddress(ntdll, "NtQueryObject"));
 
-            if (apis.querySystemInformation == nullptr || apis.queryObject == nullptr)
+            if (apis.querySystemInformation == nullptr)
             {
-                errorMessage = L"Required ntdll exports were not available.";
+                errorMessage = L"NtQuerySystemInformation was not available.";
                 apis = {};
             }
 
             return apis;
         }
 
-        std::vector<unsigned char> QuerySystemHandleBuffer(const NtApis& apis, std::wstring& errorMessage)
+        SystemHandleQueryResult QuerySystemHandleBuffer(
+            const NtApis& apis,
+            std::size_t budgetBytes)
         {
-            ULONG bufferLength = 1U << 20;
-            constexpr ULONG MaxBufferLength = 128U << 20;
+            SystemHandleQueryResult result;
+            std::size_t bufferLength = (std::min)(
+                HandleQueryInitialBufferBytes,
+                budgetBytes);
 
-            for (int attempt = 0; attempt < 9; ++attempt)
+            while (bufferLength != 0 &&
+                bufferLength <= static_cast<std::size_t>(
+                    (std::numeric_limits<ULONG>::max)()))
             {
-                std::vector<unsigned char> buffer(bufferLength);
+                ++result.attemptCount;
+                result.bufferBytes = bufferLength;
+                std::vector<unsigned char> buffer;
+                try
+                {
+                    buffer.resize(bufferLength);
+                }
+                catch (const std::bad_alloc&)
+                {
+                    result.status = SystemHandleQueryStatus::AllocationFailed;
+                    result.diagnostic =
+                        L"Could not allocate the temporary system handle query buffer.";
+                    return result;
+                }
+                catch (const std::length_error&)
+                {
+                    result.status = SystemHandleQueryStatus::AllocationFailed;
+                    result.diagnostic =
+                        L"The requested system handle query buffer was not representable.";
+                    return result;
+                }
+
                 ULONG returnLength = 0;
                 const LONG status = apis.querySystemInformation(
                     SystemExtendedHandleInformation,
                     buffer.data(),
-                    bufferLength,
+                    static_cast<ULONG>(bufferLength),
                     &returnLength);
 
                 if (NtSuccess(status))
                 {
-                    return buffer;
+                    result.status = SystemHandleQueryStatus::Success;
+                    result.bufferBytes = buffer.size();
+                    result.buffer = std::move(buffer);
+                    return result;
                 }
 
                 if (status == StatusInfoLengthMismatch ||
@@ -192,17 +238,33 @@ namespace GlassPane::Core
                     status == StatusBufferTooSmall ||
                     returnLength > bufferLength)
                 {
-                    const ULONG requestedLength = returnLength > bufferLength ? returnLength : bufferLength * 2;
-                    bufferLength = std::min(MaxBufferLength, requestedLength + (64U << 10));
+                    const HandleQueryGrowthDecision growth =
+                        PlanHandleQueryBufferGrowth(
+                            bufferLength,
+                            returnLength,
+                            budgetBytes);
+                    if (!growth.canRetry)
+                    {
+                        result.status = SystemHandleQueryStatus::BudgetExceeded;
+                        result.diagnostic =
+                            L"System handle table exceeded the adaptive temporary query budget.";
+                        return result;
+                    }
+                    bufferLength = growth.nextBufferBytes;
                     continue;
                 }
 
-                errorMessage = L"NtQuerySystemInformation(SystemExtendedHandleInformation) failed: " + NtStatusText(status);
-                return {};
+                result.status = SystemHandleQueryStatus::ApiFailed;
+                result.diagnostic =
+                    L"NtQuerySystemInformation(SystemExtendedHandleInformation) failed: " +
+                    NtStatusText(status);
+                return result;
             }
 
-            errorMessage = L"System handle table is too large to query within the configured limit.";
-            return {};
+            result.status = SystemHandleQueryStatus::BudgetExceeded;
+            result.diagnostic =
+                L"System handle table exceeded the adaptive temporary query budget.";
+            return result;
         }
 
         std::wstring UnicodeStringToWstring(const LocalUnicodeString& value)
@@ -223,7 +285,41 @@ namespace GlassPane::Core
                 returnLength = 4096;
             }
 
-            std::vector<unsigned char> buffer(returnLength + 1024);
+            constexpr ULONG MetadataSlackBytes = 1024;
+            if (returnLength >
+                HandleCollectionMaxObjectMetadataBytes - MetadataSlackBytes)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage =
+                        L"Object type metadata exceeded its bounded enrichment buffer.";
+                }
+                return {};
+            }
+
+            std::vector<unsigned char> buffer;
+            try
+            {
+                buffer.resize(returnLength + MetadataSlackBytes);
+            }
+            catch (const std::bad_alloc&)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage =
+                        L"Object type metadata allocation failed.";
+                }
+                return {};
+            }
+            catch (const std::length_error&)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage =
+                        L"Object type metadata size was not representable.";
+                }
+                return {};
+            }
             status = apis.queryObject(
                 handle,
                 ObjectTypeInformation,
@@ -265,7 +361,41 @@ namespace GlassPane::Core
                 returnLength = 4096;
             }
 
-            std::vector<unsigned char> buffer(returnLength + 1024);
+            constexpr ULONG MetadataSlackBytes = 1024;
+            if (returnLength >
+                HandleCollectionMaxObjectMetadataBytes - MetadataSlackBytes)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage =
+                        L"Object name metadata exceeded its bounded enrichment buffer.";
+                }
+                return {};
+            }
+
+            std::vector<unsigned char> buffer;
+            try
+            {
+                buffer.resize(returnLength + MetadataSlackBytes);
+            }
+            catch (const std::bad_alloc&)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage =
+                        L"Object name metadata allocation failed.";
+                }
+                return {};
+            }
+            catch (const std::length_error&)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage =
+                        L"Object name metadata size was not representable.";
+                }
+                return {};
+            }
             status = apis.queryObject(
                 handle,
                 ObjectNameInformation,
@@ -322,78 +452,172 @@ namespace GlassPane::Core
             return decoded;
         }
 
-        bool HasSuspiciousProcessAccess(std::uint32_t access)
+        class ScopedHandle
         {
-            constexpr DWORD SuspiciousAccess =
-                PROCESS_VM_WRITE |
-                PROCESS_VM_OPERATION |
-                PROCESS_CREATE_THREAD |
-                PROCESS_DUP_HANDLE;
-            return (access & SuspiciousAccess) != 0;
-        }
-
-        bool IsSensitiveRegistryPath(const std::wstring& objectName)
-        {
-            const std::wstring loweredName = ToLower(objectName);
-            return Contains(loweredName, L"\\registry\\machine\\sam") ||
-                Contains(loweredName, L"\\registry\\machine\\security") ||
-                Contains(loweredName, L"\\registry\\machine\\system\\currentcontrolset\\control\\lsa") ||
-                Contains(loweredName, L"\\registry\\machine\\software\\microsoft\\windows\\currentversion\\run") ||
-                (Contains(loweredName, L"\\registry\\user\\") &&
-                    Contains(loweredName, L"\\software\\microsoft\\windows\\currentversion\\run"));
-        }
-
-        bool IsSuspiciousUserWritablePath(const std::wstring& objectName)
-        {
-            const std::wstring loweredName = ToLower(objectName);
-            return Contains(loweredName, L"\\appdata\\") ||
-                Contains(loweredName, L"\\temp\\") ||
-                Contains(loweredName, L"\\downloads\\") ||
-                Contains(loweredName, L"\\desktop\\");
-        }
-
-        void AddIndicator(HandleInfo& handle, const std::wstring& indicator)
-        {
-            handle.indicators.push_back(indicator);
-            handle.isSensitive = true;
-        }
-
-        void AnalyzeHandle(HandleInfo& handle)
-        {
-            const std::wstring loweredType = ToLower(handle.objectType);
-            const std::wstring loweredTargetName = ToLower(handle.targetProcessName);
-
-            if (loweredType == L"process")
+        public:
+            ScopedHandle() = default;
+            explicit ScopedHandle(HANDLE value) noexcept : value_(value) {}
+            ~ScopedHandle()
             {
-                if (loweredTargetName == L"lsass.exe")
+                if (value_ != nullptr)
                 {
-                    AddIndicator(handle, L"Process handle targets lsass.exe.");
-                }
-                else if (loweredTargetName == L"winlogon.exe")
-                {
-                    AddIndicator(handle, L"Process handle targets winlogon.exe.");
-                }
-
-                if (handle.targetPid.has_value() &&
-                    handle.targetPid.value() != handle.owningPid &&
-                    HasSuspiciousProcessAccess(handle.grantedAccessRaw))
-                {
-                    AddIndicator(handle, L"Process handle has VM write, VM operation, create-thread, or duplicate-handle access.");
+                    CloseHandle(value_);
                 }
             }
-            else if (loweredType == L"token")
+
+            ScopedHandle(const ScopedHandle&) = delete;
+            ScopedHandle& operator=(const ScopedHandle&) = delete;
+
+            HANDLE Get() const noexcept
             {
-                AddIndicator(handle, L"Token handle present.");
+                return value_;
             }
-            else if (loweredType == L"key" && !handle.objectName.empty() && IsSensitiveRegistryPath(handle.objectName))
+
+            void Reset(HANDLE value = nullptr) noexcept
             {
-                AddIndicator(handle, L"Registry key handle references a sensitive path.");
+                if (value_ != nullptr)
+                {
+                    CloseHandle(value_);
+                }
+                value_ = value;
             }
-            else if (loweredType == L"file" && !handle.objectName.empty() && IsSuspiciousUserWritablePath(handle.objectName))
-            {
-                AddIndicator(handle, L"File handle references a user-writable path.");
-            }
+
+        private:
+            HANDLE value_ = nullptr;
+        };
+
+        std::uint64_t ElapsedMicroseconds(
+            const std::chrono::steady_clock::time_point& started) noexcept
+        {
+            return static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - started).count());
         }
+
+        template <typename EntryReader>
+        HandleCoreProjectionResult ProjectSelectedHandleCoreRecordsImpl(
+            std::uint32_t selectedPid,
+            std::size_t entriesAvailable,
+            std::size_t systemEntriesReported,
+            std::size_t retentionLimit,
+            EntryReader&& readEntry) noexcept
+        {
+            HandleCoreProjectionResult result;
+            result.systemEntriesReported = systemEntriesReported;
+            const std::size_t scanCount = (std::min)(
+                entriesAvailable,
+                systemEntriesReported);
+            result.queryBufferTruncated =
+                systemEntriesReported > entriesAvailable;
+
+            try
+            {
+                result.records.reserve((std::min)(retentionLimit, std::size_t(256)));
+                for (std::size_t index = 0; index < scanCount; ++index)
+                {
+                    ++result.entriesScanned;
+                    const HandleTableCoreEntry entry = readEntry(index);
+                    if (entry.owningPid != selectedPid)
+                    {
+                        continue;
+                    }
+
+                    ++result.selectedEntriesMatched;
+                    if (result.records.size() < retentionLimit)
+                    {
+                        result.records.push_back(entry);
+                    }
+                }
+            }
+            catch (const std::bad_alloc&)
+            {
+                return {};
+            }
+            catch (const std::length_error&)
+            {
+                return {};
+            }
+
+            result.selectedEntriesOmitted =
+                result.selectedEntriesMatched - result.records.size();
+            result.retentionCapReached = result.selectedEntriesOmitted != 0;
+            result.success = true;
+            return result;
+        }
+
+    }
+
+    std::size_t CalculateAdaptiveHandleQueryBudget(
+        std::uint64_t availablePhysicalBytes,
+        std::uint64_t totalPhysicalBytes) noexcept
+    {
+        std::uint64_t desired = availablePhysicalBytes / 8U;
+        if (totalPhysicalBytes != 0)
+        {
+            // A second total-memory guard keeps a constrained 4 GiB endpoint
+            // below 256 MiB even when most memory happens to be available.
+            desired = (std::min)(desired, totalPhysicalBytes / 16U);
+        }
+        desired = (std::max)(
+            desired,
+            static_cast<std::uint64_t>(HandleQueryMinimumBudgetBytes));
+        desired = (std::min)(
+            desired,
+            static_cast<std::uint64_t>(HandleQueryMaximumBudgetBytes));
+        return static_cast<std::size_t>(desired);
+    }
+
+    HandleQueryGrowthDecision PlanHandleQueryBufferGrowth(
+        std::size_t currentBufferBytes,
+        std::size_t requiredBufferBytes,
+        std::size_t budgetBytes) noexcept
+    {
+        HandleQueryGrowthDecision result;
+        if (currentBufferBytes == 0 ||
+            budgetBytes == 0 ||
+            currentBufferBytes >= budgetBytes ||
+            requiredBufferBytes > budgetBytes)
+        {
+            result.budgetExceeded = true;
+            return result;
+        }
+
+        constexpr std::size_t SlackBytes = 64ULL << 10;
+        const std::size_t doubled = currentBufferBytes >
+                (std::numeric_limits<std::size_t>::max)() / 2
+            ? (std::numeric_limits<std::size_t>::max)()
+            : currentBufferBytes * 2;
+        const std::size_t requestedWithSlack = requiredBufferBytes >
+                (std::numeric_limits<std::size_t>::max)() - SlackBytes
+            ? (std::numeric_limits<std::size_t>::max)()
+            : requiredBufferBytes + SlackBytes;
+        std::size_t next = (std::max)(doubled, requestedWithSlack);
+        next = (std::min)(next, budgetBytes);
+        if (next <= currentBufferBytes)
+        {
+            result.budgetExceeded = true;
+            return result;
+        }
+
+        result.canRetry = true;
+        result.nextBufferBytes = next;
+        return result;
+    }
+
+    HandleCoreProjectionResult ProjectSelectedHandleCoreRecords(
+        std::uint32_t selectedPid,
+        const std::vector<HandleTableCoreEntry>& availableEntries,
+        std::size_t systemEntriesReported,
+        std::size_t retentionLimit) noexcept
+    {
+        return ProjectSelectedHandleCoreRecordsImpl(
+            selectedPid,
+            availableEntries.size(),
+            systemEntriesReported,
+            retentionLimit,
+            [&availableEntries](std::size_t index) {
+                return availableEntries[index];
+            });
     }
 
     HandleCollectionResult CollectProcessHandles(
@@ -402,96 +626,295 @@ namespace GlassPane::Core
     {
         HandleCollectionResult result;
         result.pid = process.pid;
+        const auto totalStarted = std::chrono::steady_clock::now();
+
+        MEMORYSTATUSEX memoryStatus{};
+        memoryStatus.dwLength = sizeof(memoryStatus);
+        if (GlobalMemoryStatusEx(&memoryStatus) != FALSE)
+        {
+            result.queryBufferBudgetBytes = CalculateAdaptiveHandleQueryBudget(
+                memoryStatus.ullAvailPhys,
+                memoryStatus.ullTotalPhys);
+        }
+        else
+        {
+            result.queryBufferBudgetBytes = HandleQueryMinimumBudgetBytes;
+        }
 
         std::wstring ntError;
         const NtApis apis = LoadNtApis(ntError);
-        if (apis.querySystemInformation == nullptr || apis.queryObject == nullptr)
+        if (apis.querySystemInformation == nullptr)
         {
+            result.queryFailureKind = HandleQueryFailureKind::ApiUnavailable;
+            result.state = HandleCollectionStateForQueryFailure(
+                result.queryFailureKind);
             result.statusMessage = ntError.empty() ? L"NT handle query APIs are unavailable." : ntError;
+            result.totalDurationMicroseconds = ElapsedMicroseconds(totalStarted);
             return result;
         }
 
-        std::vector<unsigned char> handleBuffer = QuerySystemHandleBuffer(apis, ntError);
-        if (handleBuffer.empty())
+        HandleCoreProjectionResult projection;
         {
-            result.statusMessage = ntError.empty() ? L"System handle query returned no data." : ntError;
-            return result;
+            const auto queryStarted = std::chrono::steady_clock::now();
+            SystemHandleQueryResult query = QuerySystemHandleBuffer(
+                apis,
+                result.queryBufferBudgetBytes);
+            result.queryDurationMicroseconds = ElapsedMicroseconds(queryStarted);
+            result.queryAttemptCount = query.attemptCount;
+            result.queryBufferBytes = query.bufferBytes;
+
+            if (query.status != SystemHandleQueryStatus::Success)
+            {
+                result.queryFailureKind =
+                    query.status == SystemHandleQueryStatus::BudgetExceeded
+                    ? HandleQueryFailureKind::BudgetExceeded
+                    : query.status == SystemHandleQueryStatus::AllocationFailed
+                        ? HandleQueryFailureKind::AllocationFailed
+                        : HandleQueryFailureKind::ApiFailed;
+                result.state = HandleCollectionStateForQueryFailure(
+                    result.queryFailureKind);
+                result.statusMessage = query.diagnostic.empty()
+                    ? L"System handle query failed."
+                    : query.diagnostic;
+                result.totalDurationMicroseconds = ElapsedMicroseconds(totalStarted);
+                return result;
+            }
+
+            const std::size_t headerBytes =
+                offsetof(SystemHandleInformationEx, Handles);
+            if (query.buffer.size() < headerBytes)
+            {
+                result.queryFailureKind =
+                    HandleQueryFailureKind::InvalidBuffer;
+                result.state = HandleCollectionStateForQueryFailure(
+                    result.queryFailureKind);
+                result.statusMessage =
+                    L"System handle query returned an invalid buffer.";
+                result.totalDurationMicroseconds = ElapsedMicroseconds(totalStarted);
+                return result;
+            }
+
+            const auto* systemHandles =
+                reinterpret_cast<const SystemHandleInformationEx*>(
+                    query.buffer.data());
+            const std::size_t entriesReported = static_cast<std::size_t>(
+                systemHandles->NumberOfHandles);
+            const std::size_t entriesAvailable =
+                (query.buffer.size() - headerBytes) /
+                sizeof(SystemHandleTableEntryInfoEx);
+
+            projection = ProjectSelectedHandleCoreRecordsImpl(
+                process.pid,
+                entriesAvailable,
+                entriesReported,
+                HandleCollectionMaxRetainedHandles,
+                [systemHandles](std::size_t index) {
+                    const SystemHandleTableEntryInfoEx& entry =
+                        systemHandles->Handles[index];
+                    HandleTableCoreEntry core;
+                    core.owningPid = static_cast<std::uint32_t>(
+                        entry.UniqueProcessId);
+                    core.handleValue = static_cast<std::uint64_t>(
+                        entry.HandleValue);
+                    core.objectTypeIndex = entry.ObjectTypeIndex;
+                    core.grantedAccess = entry.GrantedAccess;
+                    return core;
+                });
+
+            if (!projection.success)
+            {
+                result.queryFailureKind =
+                    HandleQueryFailureKind::AllocationFailed;
+                result.state = HandleCollectionStateForQueryFailure(
+                    result.queryFailureKind);
+                result.statusMessage =
+                    L"Could not allocate compact selected-process handle records.";
+                result.totalDurationMicroseconds = ElapsedMicroseconds(totalStarted);
+                return result;
+            }
+            // The large system-wide buffer is destroyed here, before any
+            // DuplicateHandle or NtQueryObject enrichment begins.
         }
 
-        const auto* systemHandles = reinterpret_cast<const SystemHandleInformationEx*>(handleBuffer.data());
-        result.systemHandleCount = static_cast<std::size_t>(systemHandles->NumberOfHandles);
+        result.systemHandleCount = projection.systemEntriesReported;
+        result.systemEntriesScanned = projection.entriesScanned;
+        result.selectedProcessHandlesMatched =
+            projection.selectedEntriesMatched;
+        result.selectedProcessHandlesOmitted =
+            projection.selectedEntriesOmitted;
+        result.queryBufferTruncated = projection.queryBufferTruncated;
+        result.retentionCapReached = projection.retentionCapReached;
+        result.compactCoreRecordBytes =
+            projection.records.size() * sizeof(HandleTableCoreEntry);
 
-        HANDLE sourceProcess = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process.pid);
-        const DWORD openProcessError = sourceProcess == nullptr ? GetLastError() : ERROR_SUCCESS;
+        ScopedHandle sourceProcess(OpenProcess(
+            PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
+            FALSE,
+            process.pid));
+        const DWORD openProcessError = sourceProcess.Get() == nullptr
+            ? GetLastError()
+            : ERROR_SUCCESS;
 
         std::unordered_map<USHORT, std::wstring> typeNameByIndex;
-        result.handles.reserve(256);
-
-        for (ULONG_PTR index = 0; index < systemHandles->NumberOfHandles; ++index)
+        try
         {
-            const SystemHandleTableEntryInfoEx& entry = systemHandles->Handles[index];
-            if (static_cast<std::uint32_t>(entry.UniqueProcessId) != process.pid)
+            result.handles.reserve(projection.records.size());
+            typeNameByIndex.reserve(32);
+        }
+        catch (const std::bad_alloc&)
+        {
+            result.queryFailureKind = HandleQueryFailureKind::AllocationFailed;
+            result.state = HandleCollectionStateForQueryFailure(
+                result.queryFailureKind);
+            result.statusMessage =
+                L"Could not allocate selected-process handle enrichment storage.";
+            result.totalDurationMicroseconds = ElapsedMicroseconds(totalStarted);
+            return result;
+        }
+        catch (const std::length_error&)
+        {
+            result.queryFailureKind = HandleQueryFailureKind::AllocationFailed;
+            result.state = HandleCollectionStateForQueryFailure(
+                result.queryFailureKind);
+            result.statusMessage =
+                L"Selected-process handle enrichment storage exceeded its bounded representation.";
+            result.totalDurationMicroseconds = ElapsedMicroseconds(totalStarted);
+            return result;
+        }
+
+        const auto enrichmentStarted = std::chrono::steady_clock::now();
+        try
+        {
+            for (std::size_t index = 0; index < projection.records.size(); ++index)
             {
-                continue;
-            }
+                const HandleTableCoreEntry& core = projection.records[index];
 
             HandleInfo handle;
             handle.owningPid = process.pid;
-            handle.handleValue = static_cast<std::uint64_t>(entry.HandleValue);
-            handle.grantedAccessRaw = entry.GrantedAccess;
-            handle.grantedAccess = HexAccess(entry.GrantedAccess);
-
-            if (sourceProcess == nullptr)
+            handle.handleValue = core.handleValue;
+            handle.objectTypeIndex = core.objectTypeIndex;
+            handle.grantedAccessRaw = core.grantedAccess;
+            try
             {
-                handle.objectType = L"Type " + std::to_wstring(entry.ObjectTypeIndex);
-                handle.errorMessage = L"Could not open source process for handle metadata: " + WindowsErrorMessage(openProcessError);
+                handle.grantedAccess = HexAccess(core.grantedAccess);
+            }
+            catch (const std::bad_alloc&)
+            {
+                result.selectedProcessHandlesOmitted +=
+                    projection.records.size() - index;
+                result.retentionCapReached = true;
+                break;
+            }
+
+            if (sourceProcess.Get() == nullptr)
+            {
+                handle.objectType =
+                    L"Type " + std::to_wstring(core.objectTypeIndex);
+                handle.errorMessage =
+                    L"Could not open source process for optional handle metadata: " +
+                    WindowsErrorMessage(openProcessError);
+                ++result.typeResolutionsSkipped;
+                result.typeOrTargetResolutionPartial = true;
                 result.handles.push_back(std::move(handle));
                 continue;
             }
 
-            HANDLE localHandle = nullptr;
-            if (DuplicateHandle(
-                sourceProcess,
-                reinterpret_cast<HANDLE>(entry.HandleValue),
-                GetCurrentProcess(),
-                &localHandle,
-                0,
-                FALSE,
-                DUPLICATE_SAME_ACCESS) == FALSE)
-            {
-                handle.objectType = L"Type " + std::to_wstring(entry.ObjectTypeIndex);
-                handle.errorMessage = L"Could not duplicate handle for metadata query: " + WindowsErrorMessage(GetLastError());
-                result.handles.push_back(std::move(handle));
-                continue;
-            }
+            ScopedHandle localHandle;
+            bool duplicateAttempted = false;
+            const auto ensureLocalHandle = [&]() {
+                if (localHandle.Get() != nullptr)
+                {
+                    return true;
+                }
+                if (duplicateAttempted)
+                {
+                    return false;
+                }
+                duplicateAttempted = true;
+                HANDLE duplicated = nullptr;
+                if (DuplicateHandle(
+                        sourceProcess.Get(),
+                        reinterpret_cast<HANDLE>(core.handleValue),
+                        GetCurrentProcess(),
+                        &duplicated,
+                        0,
+                        FALSE,
+                        DUPLICATE_SAME_ACCESS) == FALSE)
+                {
+                    handle.errorMessage =
+                        L"Could not duplicate handle for optional metadata: " +
+                        WindowsErrorMessage(GetLastError());
+                    return false;
+                }
+                localHandle.Reset(duplicated);
+                return true;
+            };
 
-            const auto cachedType = typeNameByIndex.find(entry.ObjectTypeIndex);
+            const auto cachedType = typeNameByIndex.find(core.objectTypeIndex);
             if (cachedType != typeNameByIndex.end())
             {
                 handle.objectType = cachedType->second;
                 handle.typeResolved = !handle.objectType.empty();
             }
+            else if (apis.queryObject == nullptr)
+            {
+                ++result.typeResolutionsSkipped;
+                result.typeOrTargetResolutionPartial = true;
+            }
+            else if (!HandleOptionalEnrichmentBudgetAvailable(
+                result.typeResolutionsAttempted,
+                HandleCollectionMaxTypeResolutions))
+            {
+                ++result.typeResolutionsSkipped;
+                result.typeResolutionCapReached = true;
+                result.typeOrTargetResolutionPartial = true;
+            }
             else
             {
+                ++result.typeResolutionsAttempted;
                 std::wstring typeError;
-                handle.objectType = QueryObjectType(apis, localHandle, &typeError);
+                if (ensureLocalHandle())
+                {
+                    handle.objectType = QueryObjectType(
+                        apis,
+                        localHandle.Get(),
+                        &typeError);
+                }
                 handle.typeResolved = !handle.objectType.empty();
                 if (handle.typeResolved)
                 {
-                    typeNameByIndex.emplace(entry.ObjectTypeIndex, handle.objectType);
+                    ++result.typeResolutionsResolved;
+                    typeNameByIndex.emplace(
+                        core.objectTypeIndex,
+                        handle.objectType);
                 }
                 else
                 {
-                    handle.objectType = L"Type " + std::to_wstring(entry.ObjectTypeIndex);
-                    handle.errorMessage = typeError;
+                    ++result.typeResolutionsFailed;
+                    result.typeOrTargetResolutionPartial = true;
+                    if (handle.errorMessage.empty())
+                    {
+                        handle.errorMessage = typeError.empty()
+                            ? L"Object type metadata was not resolved."
+                            : typeError;
+                    }
                 }
+            }
+
+            if (handle.objectType.empty())
+            {
+                handle.objectType =
+                    L"Type " + std::to_wstring(core.objectTypeIndex);
             }
 
             if (EqualsIgnoreCase(handle.objectType, L"Process"))
             {
-                const DWORD targetPid = GetProcessId(localHandle);
+                const DWORD targetPid = ensureLocalHandle()
+                    ? GetProcessId(localHandle.Get())
+                    : 0;
                 if (targetPid != 0)
                 {
+                    ++result.targetsResolved;
                     handle.targetPid = targetPid;
                     const ProcessInfo* targetProcess = FindProcessInSnapshot(snapshot, targetPid);
                     if (targetProcess != nullptr)
@@ -499,50 +922,126 @@ namespace GlassPane::Core
                         handle.targetProcessName = targetProcess->name;
                     }
                 }
+                else
+                {
+                    ++result.targetsUnresolved;
+                    result.typeOrTargetResolutionPartial = true;
+                }
                 handle.decodedAccess = DecodeProcessAccess(handle.grantedAccessRaw);
+            }
+            else if (EqualsIgnoreCase(handle.objectType, L"Thread"))
+            {
+                const DWORD targetPid = ensureLocalHandle()
+                    ? GetProcessIdOfThread(localHandle.Get())
+                    : 0;
+                const DWORD targetThreadId = localHandle.Get() != nullptr
+                    ? GetThreadId(localHandle.Get())
+                    : 0;
+                if (targetPid != 0)
+                {
+                    ++result.targetsResolved;
+                    handle.targetPid = targetPid;
+                    const ProcessInfo* targetProcess =
+                        FindProcessInSnapshot(snapshot, targetPid);
+                    if (targetProcess != nullptr)
+                    {
+                        handle.targetProcessName = targetProcess->name;
+                    }
+                }
+                else
+                {
+                    ++result.targetsUnresolved;
+                    result.typeOrTargetResolutionPartial = true;
+                }
+                if (targetThreadId != 0)
+                {
+                    handle.targetThreadId = targetThreadId;
+                }
             }
 
             if (ShouldQueryObjectName(handle.objectType))
             {
-                std::wstring nameError;
-                handle.objectName = QueryObjectName(apis, localHandle, &nameError);
-                handle.nameResolved = !handle.objectName.empty();
-                if (!handle.nameResolved && handle.errorMessage.empty())
+                if (!HandleOptionalEnrichmentBudgetAvailable(
+                    result.namesAttempted,
+                    HandleCollectionMaxNameResolutions))
                 {
-                    handle.errorMessage = nameError;
+                    ++result.namesSkipped;
+                    result.nameResolutionCapReached = true;
+                    if (handle.errorMessage.empty())
+                    {
+                        handle.errorMessage =
+                            L"Object name resolution skipped by safety limit.";
+                    }
+                }
+                else
+                {
+                    ++result.namesAttempted;
+                    std::wstring nameError;
+                    if (ensureLocalHandle())
+                    {
+                        handle.objectName = QueryObjectName(
+                            apis,
+                            localHandle.Get(),
+                            &nameError);
+                    }
+                    handle.nameResolved = !handle.objectName.empty();
+                    if (handle.nameResolved)
+                    {
+                        ++result.namesResolved;
+                    }
+                    else if (!nameError.empty() || localHandle.Get() == nullptr)
+                    {
+                        ++result.namesFailed;
+                        if (handle.errorMessage.empty())
+                        {
+                            handle.errorMessage = nameError.empty()
+                                ? L"Object name metadata was not resolved."
+                                : nameError;
+                        }
+                    }
                 }
             }
 
-            CloseHandle(localHandle);
-
-            AnalyzeHandle(handle);
-            if (handle.isSensitive)
-            {
-                ++result.sensitiveCount;
+                result.handles.push_back(std::move(handle));
             }
-            result.handles.push_back(std::move(handle));
         }
-
-        if (sourceProcess != nullptr)
+        catch (const std::bad_alloc&)
         {
-            CloseHandle(sourceProcess);
+            result.selectedProcessHandlesOmitted +=
+                projection.records.size() - result.handles.size();
+            result.retentionCapReached = true;
+            result.typeOrTargetResolutionPartial = true;
+        }
+        catch (const std::length_error&)
+        {
+            result.selectedProcessHandlesOmitted +=
+                projection.records.size() - result.handles.size();
+            result.retentionCapReached = true;
+            result.typeOrTargetResolutionPartial = true;
         }
 
+        result.enrichmentDurationMicroseconds =
+            ElapsedMicroseconds(enrichmentStarted);
         result.success = true;
-        if (sourceProcess == nullptr)
+        const bool partial = result.queryBufferTruncated ||
+            result.retentionCapReached ||
+            result.nameResolutionCapReached ||
+            result.namesFailed != 0 ||
+            result.typeResolutionCapReached ||
+            result.typeResolutionsFailed != 0 ||
+            result.typeOrTargetResolutionPartial;
+        result.state = partial
+            ? HandleCollectionState::Partial
+            : HandleCollectionState::Success;
+        result.statusMessage =
+            std::to_wstring(result.handles.size()) + L" handles collected.";
+        if (partial)
         {
-            result.statusMessage =
-                L"Loaded " + std::to_wstring(result.handles.size()) +
-                L" handle entries; object metadata unavailable because the process could not be opened: " +
-                WindowsErrorMessage(openProcessError) + L".";
-        }
-        else
-        {
-            result.statusMessage =
-                L"Loaded " + std::to_wstring(result.handles.size()) +
-                L" handle entries for PID " + std::to_wstring(process.pid) + L".";
+            result.statusMessage +=
+                L" Additional handles or metadata may not have been evaluated because safety limits or collection constraints were reached.";
         }
 
+        result.totalDurationMicroseconds = ElapsedMicroseconds(totalStarted);
         return result;
     }
 }

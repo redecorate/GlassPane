@@ -9,8 +9,34 @@
 
 namespace GlassPane::Tests
 {
+    int RunAuthoritativeTriageTests();
+    int RunJsonExporterOfflineTests();
+    int RunInspectorPresentationTests();
+    int RunHandleCollectorTests(bool runLiveHandles);
+    int RunBaselineObservationTests();
+    int RunChainAnalysisTests();
+    int RunNativeObservationIntegrationTests();
+    int RunNativeObservationDomainTests();
+    int RunNativeHandleObservationBuilderTests();
+    int RunNativeObservationBuilderTests();
+    int RunNativeRuntimeObservationBuilderTests();
+    int RunNativeSourceEvidenceTests();
+    int RunNativeTokenObservationBuilderTests();
+    int RunObservationCorrelationTests();
+    int RunObservationCoreTests();
+    int RunObservationRefinementTests();
+    int RunObservationShadowTests();
+    int RunPersistedTriageTests();
+    int RunProcessTriageCacheTests();
+    int RunProcessIconPolicyTests();
+    int RunProductVersionTests();
+    int RunSelectedProcessEnrichedLifecycleTests();
+    int RunSnapshotCompareTriageTests();
+    int RunTriageEngineTests();
     int RunServiceCollectorTests(bool runLiveServices);
     int RunSavedSnapshotServiceTests();
+    int RunSavedSnapshotNativeEvidenceTests();
+    int RunSavedSnapshotTriageTests();
     int RunMarkdownServiceReportTests();
 }
 
@@ -400,11 +426,16 @@ namespace
 int wmain(int argumentCount, wchar_t* arguments[])
 {
     bool runLiveServices = false;
+    bool runLiveHandles = false;
     for (int index = 1; index < argumentCount; ++index)
     {
         if (std::wstring_view(arguments[index]) == L"--live-services")
         {
             runLiveServices = true;
+        }
+        else if (std::wstring_view(arguments[index]) == L"--live-handles")
+        {
+            runLiveHandles = true;
         }
         else
         {
@@ -420,8 +451,34 @@ int wmain(int argumentCount, wchar_t* arguments[])
     TestSvchostGroupParsing();
     TestCorrelationReindexing();
     TestDisplayFormatting();
+    failureCount += GlassPane::Tests::RunAuthoritativeTriageTests();
+    failureCount += GlassPane::Tests::RunJsonExporterOfflineTests();
+    failureCount += GlassPane::Tests::RunInspectorPresentationTests();
+    failureCount += GlassPane::Tests::RunHandleCollectorTests(runLiveHandles);
+    failureCount += GlassPane::Tests::RunBaselineObservationTests();
+    failureCount += GlassPane::Tests::RunChainAnalysisTests();
+    failureCount += GlassPane::Tests::RunNativeObservationIntegrationTests();
+    failureCount += GlassPane::Tests::RunNativeObservationDomainTests();
+    failureCount += GlassPane::Tests::RunNativeHandleObservationBuilderTests();
+    failureCount += GlassPane::Tests::RunNativeObservationBuilderTests();
+    failureCount += GlassPane::Tests::RunNativeRuntimeObservationBuilderTests();
+    failureCount += GlassPane::Tests::RunNativeSourceEvidenceTests();
+    failureCount += GlassPane::Tests::RunNativeTokenObservationBuilderTests();
+    failureCount += GlassPane::Tests::RunObservationCorrelationTests();
+    failureCount += GlassPane::Tests::RunObservationCoreTests();
+    failureCount += GlassPane::Tests::RunObservationRefinementTests();
+    failureCount += GlassPane::Tests::RunObservationShadowTests();
+    failureCount += GlassPane::Tests::RunPersistedTriageTests();
+    failureCount += GlassPane::Tests::RunProcessTriageCacheTests();
+    failureCount += GlassPane::Tests::RunProcessIconPolicyTests();
+    failureCount += GlassPane::Tests::RunProductVersionTests();
+    failureCount += GlassPane::Tests::RunSelectedProcessEnrichedLifecycleTests();
+    failureCount += GlassPane::Tests::RunSnapshotCompareTriageTests();
+    failureCount += GlassPane::Tests::RunTriageEngineTests();
     failureCount += GlassPane::Tests::RunServiceCollectorTests(runLiveServices);
     failureCount += GlassPane::Tests::RunSavedSnapshotServiceTests();
+    failureCount += GlassPane::Tests::RunSavedSnapshotNativeEvidenceTests();
+    failureCount += GlassPane::Tests::RunSavedSnapshotTriageTests();
     failureCount += GlassPane::Tests::RunMarkdownServiceReportTests();
 
     if (failureCount != 0)
@@ -430,6 +487,6 @@ int wmain(int argumentCount, wchar_t* arguments[])
         return 1;
     }
 
-    std::wcout << L"All Service Core tests passed.\n";
+    std::wcout << L"All Core tests passed.\n";
     return 0;
 }

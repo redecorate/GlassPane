@@ -95,56 +95,150 @@
 
         ID3D11ShaderResourceView* GetProcessIconTexture(const Core::ProcessInfo& process)
         {
-            const std::wstring cacheKey = process.executablePath.empty()
-                ? L"__glasspane_default_icon__"
-                : ToLower(process.executablePath);
+            Core::ProcessIconRequest request;
+            request.pid = process.pid;
+            request.hasCreationTime = process.hasCreationTime;
+            request.creationTimeFileTime = process.creationTimeFileTime;
+            request.executablePath = process.executablePath;
+            request.scope = loadedSnapshotActive_
+                ? Core::ProcessIconScope::LoadedSnapshot
+                : Core::ProcessIconScope::Live;
+            request.generation = snapshotGeneration_;
+            const Core::ProcessIconCacheKey cacheKey =
+                Core::BuildProcessIconCacheKey(request);
 
             const auto cached = iconCache_.find(cacheKey);
             if (cached != iconCache_.end())
             {
+                ++processIconCacheHits_;
                 return cached->second.texture;
             }
+            ++processIconCacheMisses_;
 
-            ID3D11ShaderResourceView* texture = nullptr;
-            bool ownsTexture = false;
+            ID3D11ShaderResourceView* extractedTexture = nullptr;
+            bool extractionAttempted = false;
+            bool extractionSucceeded = false;
 
             HICON extractedIcon = nullptr;
-            if (!process.executablePath.empty())
+            if (Core::ShouldAttemptProcessIconExtraction(request))
             {
+                extractionAttempted = true;
+                ++processIconExtractionAttempts_;
                 HICON largeIcon = nullptr;
                 if (ExtractIconExW(process.executablePath.c_str(), 0, &largeIcon, nullptr, 1) > 0 && largeIcon != nullptr)
                 {
                     extractedIcon = largeIcon;
+                    extractionSucceeded = true;
                 }
             }
 
             if (extractedIcon != nullptr)
             {
-                texture = CreateTextureFromIcon(extractedIcon);
+                extractedTexture = CreateTextureFromIcon(extractedIcon);
                 DestroyIcon(extractedIcon);
-                ownsTexture = texture != nullptr;
+                if (extractedTexture != nullptr)
+                {
+                    ++processIconExtractionSuccesses_;
+                }
             }
 
-            if (texture == nullptr)
+            ID3D11ShaderResourceView* genericTexture = nullptr;
+            if (extractedTexture == nullptr)
             {
-                texture = GetFallbackIconTexture();
-                ownsTexture = false;
+                genericTexture = GetGenericProcessIconTexture();
             }
 
-            iconCache_[cacheKey] = { texture, ownsTexture };
+            Core::ProcessIconSelectionInput selectionInput;
+            selectionInput.renderingDeviceAvailable = device_ != nullptr;
+            selectionInput.extractionAttempted = extractionAttempted;
+            selectionInput.extractionSucceeded = extractionSucceeded;
+            selectionInput.extractedTextureAvailable = extractedTexture != nullptr;
+            selectionInput.genericFallbackTextureAvailable = genericTexture != nullptr;
+            const Core::ProcessIconSelection selection =
+                Core::SelectProcessIcon(request, selectionInput);
+
+            ID3D11ShaderResourceView* texture = selection.useExtractedTexture
+                ? extractedTexture
+                : (selection.useGenericFallbackTexture ? genericTexture : nullptr);
+            if (!selection.useExtractedTexture && extractedTexture != nullptr)
+            {
+                extractedTexture->Release();
+                extractedTexture = nullptr;
+            }
+            if (selection.useGenericFallbackTexture)
+            {
+                ++processIconGenericFallbackUses_;
+            }
+
+            std::string diagnostic;
+            if (selection.state == Core::ProcessIconState::GenericFallback)
+            {
+                if (loadedSnapshotActive_)
+                {
+                    diagnostic = "Loaded snapshot uses the neutral generic process icon.";
+                }
+                else if (process.executablePath.empty())
+                {
+                    diagnostic = "Executable path unavailable; using the neutral generic process icon.";
+                }
+                else
+                {
+                    diagnostic = "Process icon extraction failed; using the neutral generic process icon.";
+                }
+            }
+            else if (selection.state == Core::ProcessIconState::Failed)
+            {
+                diagnostic = "Process icon extraction and generic fallback texture creation failed.";
+            }
+            else if (selection.state == Core::ProcessIconState::Unavailable)
+            {
+                diagnostic = "Process icon rendering is unavailable.";
+            }
+
+            iconCache_.emplace(
+                cacheKey,
+                CachedIconTexture{
+                    texture,
+                    selection.state,
+                    selection.ownership,
+                    std::move(diagnostic) });
             return texture;
         }
 
-        ID3D11ShaderResourceView* GetFallbackIconTexture()
+        const CachedIconTexture* FindCachedProcessIcon(
+            const Core::ProcessInfo& process) const
         {
-            if (fallbackIconTexture_ != nullptr)
+            Core::ProcessIconRequest request;
+            request.pid = process.pid;
+            request.hasCreationTime = process.hasCreationTime;
+            request.creationTimeFileTime = process.creationTimeFileTime;
+            request.executablePath = process.executablePath;
+            request.scope = loadedSnapshotActive_
+                ? Core::ProcessIconScope::LoadedSnapshot
+                : Core::ProcessIconScope::Live;
+            request.generation = snapshotGeneration_;
+            const auto cached = iconCache_.find(
+                Core::BuildProcessIconCacheKey(request));
+            return cached == iconCache_.end() ? nullptr : &cached->second;
+        }
+
+        ID3D11ShaderResourceView* GetGenericProcessIconTexture()
+        {
+            if (genericProcessIconTexture_ != nullptr)
             {
-                return fallbackIconTexture_;
+                return genericProcessIconTexture_;
             }
 
-            HICON fallbackIcon = LoadGlassPaneIcon(instance_, 32, 32);
-            fallbackIconTexture_ = CreateTextureFromIcon(fallbackIcon);
-            return fallbackIconTexture_;
+            // IDI_APPLICATION is a documented system-owned, neutral
+            // application icon. It is intentionally separate from the
+            // GlassPane branding resources and must not be destroyed.
+            HICON fallbackIcon = LoadIconW(nullptr, IDI_APPLICATION);
+            genericProcessIconTexture_ = CreateTextureFromIcon(fallbackIcon);
+            if (genericProcessIconTexture_ != nullptr)
+            {
+                ++genericProcessIconTextureBuilds_;
+            }
+            return genericProcessIconTexture_;
         }
 
         ID3D11ShaderResourceView* GetAppLogoTexture()
@@ -383,24 +477,38 @@
             return textureView;
         }
 
+        void ClearProcessIconAssignments(Core::ProcessIconRefreshKind kind)
+        {
+            const Core::ProcessIconRefreshPolicy policy =
+                Core::GetProcessIconRefreshPolicy(kind);
+            if (policy.clearProcessEntries)
+            {
+                for (auto& [key, icon] : iconCache_)
+                {
+                    (void)key;
+                    if (policy.releaseOwnedExtractedTextures &&
+                        icon.ownership ==
+                            Core::ProcessIconTextureOwnership::CacheOwnedExtracted &&
+                        icon.texture != nullptr)
+                    {
+                        icon.texture->Release();
+                        icon.texture = nullptr;
+                    }
+                }
+                iconCache_.clear();
+            }
+
+            if (policy.releaseSharedGenericFallbackTexture &&
+                genericProcessIconTexture_ != nullptr)
+            {
+                genericProcessIconTexture_->Release();
+                genericProcessIconTexture_ = nullptr;
+            }
+        }
+
         void ReleaseIconCache()
         {
-            for (auto& [path, icon] : iconCache_)
-            {
-                (void)path;
-                if (icon.ownsTexture && icon.texture != nullptr)
-                {
-                    icon.texture->Release();
-                    icon.texture = nullptr;
-                }
-            }
-            iconCache_.clear();
-
-            if (fallbackIconTexture_ != nullptr)
-            {
-                fallbackIconTexture_->Release();
-                fallbackIconTexture_ = nullptr;
-            }
+            ClearProcessIconAssignments(Core::ProcessIconRefreshKind::Shutdown);
             if (appLogoTexture_ != nullptr)
             {
                 appLogoTexture_->Release();

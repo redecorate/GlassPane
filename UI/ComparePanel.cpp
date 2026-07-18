@@ -80,6 +80,7 @@ namespace GlassPane::UI
         RenderGlassSectionHeader("Snapshot Compare", titleFont, accentColor);
         WrappedTextDisabled("Compare local in-memory snapshots. Changes are evidence worth reviewing, not proof of malicious activity.");
         WrappedTextDisabled("Capture Baseline and Capture Current refresh the process snapshot first. Capture Current replaces the previous current snapshot and compares it to the baseline.");
+        WrappedTextDisabled("Current and schema-5 selected-process source evidence is compared by stable native semantics. Imported historical legacy records remain a separate compatibility comparison and are never title-matched to native records.");
         ImGui::Spacing();
 
         if (ActionButton("Capture Baseline##Compare") && callbacks.captureBaseline)
@@ -189,14 +190,14 @@ namespace GlassPane::UI
             callbacks.renderNetworkChanges();
         }
 
-        ImGui::SeparatorText("Finding Changes");
+        ImGui::SeparatorText("Historical Legacy Source Evidence Changes");
         if (!state.findingsCompared)
         {
-            WrappedTextDisabled("Finding comparison unavailable.");
+            WrappedTextDisabled("Historical legacy source evidence was not compared. Native selected-process changes and evidence-model mismatches are summarized under Notes and in compare exports.");
         }
         else if (state.newFindingsEmpty && state.removedFindingsEmpty && state.changedFindingsEmpty)
         {
-            WrappedTextDisabled("No finding or process indicator changes were observed.");
+            WrappedTextDisabled("No historical legacy source-finding or process-indicator changes were observed.");
         }
         else if (callbacks.renderFindingChanges)
         {

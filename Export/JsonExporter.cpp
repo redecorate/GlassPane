@@ -8,7 +8,6 @@
 #include "JsonExporter.h"
 
 #include "../Core/ChainAnalysis.h"
-#include "../Core/CorrelationEngine.h"
 #include "../Core/FileIdentity.h"
 #include "../Core/HandleInfo.h"
 #include "../Core/RuntimeInfo.h"
@@ -116,6 +115,11 @@ namespace GlassPane::Export
             output << '"' << EscapeJson(WideToUtf8(value)) << '"';
         }
 
+        void WriteJsonString(std::ostream& output, const std::string& value)
+        {
+            output << '"' << EscapeJson(value) << '"';
+        }
+
         void WriteJsonStringArray(std::ostream& output, const std::vector<std::wstring>& values)
         {
             output << '[';
@@ -130,46 +134,111 @@ namespace GlassPane::Export
             output << ']';
         }
 
-        void WriteFileIdentityIndicatorArray(
-            std::ostream& output,
-            const std::vector<Core::FileIdentityIndicator>& indicators,
-            const std::string& indent)
+        void WriteJsonStringArray(std::ostream& output, const std::vector<std::string>& values)
         {
             output << '[';
-            if (!indicators.empty())
+            for (std::size_t index = 0; index < values.size(); ++index)
             {
-                output << '\n';
-            }
-
-            for (std::size_t index = 0; index < indicators.size(); ++index)
-            {
-                const Core::FileIdentityIndicator& indicator = indicators[index];
-                output << indent << "  {\n";
-                output << indent << "    \"severity\": ";
-                WriteJsonString(output, Core::SeverityToString(indicator.severity));
-                output << ",\n";
-                output << indent << "    \"message\": ";
-                WriteJsonString(output, indicator.message);
-                output << "\n";
-                output << indent << "  }";
-                if (index + 1 < indicators.size())
+                if (index > 0)
                 {
-                    output << ',';
+                    output << ", ";
                 }
-                output << '\n';
-            }
-
-            if (!indicators.empty())
-            {
-                output << indent;
+                WriteJsonString(output, values[index]);
             }
             output << ']';
+        }
+
+        void WritePersistedTriageSummary(
+            std::ostream& output,
+            const Core::PersistedTriageSummary& summary,
+            const std::string& indent)
+        {
+            output << "{\n";
+            output << indent << "  \"captured\": "
+                   << (summary.captured ? "true" : "false") << ",\n";
+            output << indent << "  \"evaluation_succeeded\": "
+                   << (summary.evaluationSucceeded ? "true" : "false") << ",\n";
+            if (summary.analysisLevel ==
+                Core::PersistedTriageAnalysisLevel::LegacyFallback)
+            {
+                output << indent << "  \"historical_legacy_fallback\": true,\n";
+            }
+            output << indent << "  \"analysis_level\": ";
+            WriteJsonString(
+                output,
+                Core::PersistedTriageAnalysisLevelDisplayText(summary.analysisLevel));
+            output << ",\n";
+            output << indent << "  \"authoritative_verdict\": ";
+            WriteJsonString(
+                output,
+                summary.captured
+                    ? Core::TriageVerdictDisplayText(summary.authoritativeVerdict)
+                    : std::string("Not captured"));
+            output << ",\n";
+            output << indent << "  \"baseline_verdict\": ";
+            if (summary.baselineVerdictAvailable)
+            {
+                WriteJsonString(
+                    output,
+                    Core::TriageVerdictDisplayText(summary.baselineVerdict));
+            }
+            else
+            {
+                output << "null";
+            }
+            output << ",\n";
+            output << indent << "  \"enriched_changed_verdict\": "
+                   << (summary.enrichedChangedVerdict ? "true" : "false") << ",\n";
+            output << indent << "  \"triage_model_version\": "
+                   << summary.triageModelVersion << ",\n";
+            output << indent << "  \"source_evidence_count\": "
+                   << summary.sourceEvidenceCount << ",\n";
+            output << indent << "  \"contributing_domains\": [";
+            for (std::size_t index = 0; index < summary.contributingDomains.size(); ++index)
+            {
+                if (index > 0)
+                {
+                    output << ", ";
+                }
+                WriteJsonString(
+                    output,
+                    Core::EvidenceDomainDisplayText(summary.contributingDomains[index]));
+            }
+            output << "],\n";
+            output << indent << "  \"verdict_basis\": ";
+            WriteJsonStringArray(output, summary.verdictBasis);
+            output << ",\n";
+            output << indent << "  \"completed_correlations\": ";
+            WriteJsonStringArray(output, summary.completedCorrelations);
+            output << ",\n";
+            output << indent << "  \"supporting_context\": ";
+            WriteJsonStringArray(output, summary.supportingContext);
+            output << ",\n";
+            output << indent << "  \"collection_limitations\": ";
+            WriteJsonStringArray(output, summary.collectionLimitations);
+            output << ",\n";
+            output << indent << "  \"evidence_integrity_context\": ";
+            WriteJsonStringArray(output, summary.evidenceIntegrityContext);
+            output << ",\n";
+            output << indent << "  \"unresolved_correlations\": ";
+            WriteJsonStringArray(output, summary.unresolvedCorrelations);
+            output << ",\n";
+            if (summary.analysisLevel ==
+                Core::PersistedTriageAnalysisLevel::LegacyFallback)
+            {
+                output << indent <<
+                    "  \"historical_legacy_fallback_reason\": ";
+                WriteJsonString(output, summary.fallbackReason);
+                output << ",\n";
+            }
+            output << indent << "  \"status\": ";
+            WriteJsonString(output, summary.status);
+            output << "\n" << indent << "}";
         }
 
         void WriteFileIdentityObject(
             std::ostream& output,
             const Core::FileIdentity& identity,
-            const std::vector<Core::FileIdentityIndicator>& indicators,
             const std::string& indent)
         {
             output << "{\n";
@@ -203,9 +272,6 @@ namespace GlassPane::Export
             output << ",\n";
             output << indent << "  \"errorMessage\": ";
             WriteJsonString(output, identity.errorMessage);
-            output << ",\n";
-            output << indent << "  \"indicators\": ";
-            WriteFileIdentityIndicatorArray(output, indicators, indent + "  ");
             output << "\n";
             output << indent << "}";
         }
@@ -217,8 +283,17 @@ namespace GlassPane::Export
             {
                 const Core::Finding& finding = findings[index];
                 output << "    {\n";
-                output << "      \"severity\": ";
-                WriteJsonString(output, Core::FindingSeverityToString(finding.severity));
+                output << "      \"legacy_source_severity_captured\": " <<
+                    (finding.severityCaptured ? "true" : "false") << ",\n";
+                output << "      \"legacy_source_severity\": ";
+                if (finding.severityCaptured)
+                {
+                    WriteJsonString(output, Core::FindingSeverityToString(finding.severity));
+                }
+                else
+                {
+                    output << "null";
+                }
                 output << ",\n";
                 output << "      \"title\": ";
                 WriteJsonString(output, finding.title);
@@ -242,15 +317,66 @@ namespace GlassPane::Export
             output << "  ]";
         }
 
-        void WriteModuleArray(std::ostream& output, const std::vector<Core::ModuleInfo>& modules)
+        void WriteNativeSourceEvidenceArray(
+            std::ostream& output,
+            const std::vector<Core::NativeSourceEvidenceRecord>& records)
+        {
+            output << "[\n";
+            for (std::size_t index = 0; index < records.size(); ++index)
+            {
+                const Core::NativeSourceEvidenceRecord& record = records[index];
+                output << "    {\n";
+                output << "      \"stable_rule_id\": ";
+                WriteJsonString(output, record.stableRuleId);
+                output << ",\n      \"title\": ";
+                WriteJsonString(output, record.title);
+                output << ",\n      \"summary\": ";
+                WriteJsonString(output, record.summary);
+                output << ",\n      \"details\": ";
+                WriteJsonStringArray(output, record.details);
+                output << ",\n      \"limitations\": ";
+                WriteJsonStringArray(output, record.limitations);
+                output << ",\n      \"domain\": ";
+                WriteJsonString(output, Core::EvidenceDomainDisplayText(record.domain));
+                output << ",\n      \"disposition\": ";
+                WriteJsonString(output, Core::ObservationDispositionDisplayText(record.disposition));
+                output << ",\n      \"strength\": ";
+                WriteJsonString(output, Core::ObservationStrengthDisplayText(record.strength));
+                output << ",\n      \"confidence\": ";
+                WriteJsonString(output, Core::ObservationConfidenceDisplayText(record.confidence));
+                output << ",\n      \"artifact_family\": ";
+                WriteJsonString(output, record.artifactFamily);
+                output << ",\n      \"provenance_summary\": ";
+                WriteJsonString(output, record.provenanceSummary);
+                output << ",\n      \"contributed_to_verdict\": "
+                       << (record.contributedToVerdict ? "true" : "false");
+                output << ",\n      \"suppressed_duplicate\": "
+                       << (record.suppressedDuplicate ? "true" : "false");
+                output << ",\n      \"collection_limitation\": "
+                       << (record.collectionLimitation ? "true" : "false")
+                       << "\n    }";
+                if (index + 1 < records.size())
+                {
+                    output << ',';
+                }
+                output << '\n';
+            }
+            output << "  ]";
+        }
+
+        void WriteModuleArray(
+            std::ostream& output,
+            const std::vector<Core::ModuleInfo>& modules,
+            const std::vector<Core::FileIdentity>* fileIdentities)
         {
             output << "[\n";
             for (std::size_t index = 0; index < modules.size(); ++index)
             {
                 const Core::ModuleInfo& module = modules[index];
-                const Core::FileIdentity fileIdentity = Core::CollectFileIdentity(module.modulePath);
-                const std::vector<Core::FileIdentityIndicator> fileIdentityIndicators =
-                    Core::BuildFileIdentityIndicators(fileIdentity, module.moduleName, false);
+                const Core::FileIdentity* fileIdentity =
+                    fileIdentities != nullptr && index < fileIdentities->size()
+                        ? &(*fileIdentities)[index]
+                        : nullptr;
                 output << "      {\n";
                 output << "        \"moduleName\": ";
                 WriteJsonString(output, module.moduleName);
@@ -263,11 +389,17 @@ namespace GlassPane::Export
                 output << ",\n";
                 output << "        \"sizeBytes\": " << module.sizeBytes << ",\n";
                 output << "        \"readable\": " << (module.readable ? "true" : "false") << ",\n";
+                output << "        \"fileIdentityCaptured\": "
+                       << (fileIdentity != nullptr ? "true" : "false") << ",\n";
                 output << "        \"fileIdentity\": ";
-                WriteFileIdentityObject(output, fileIdentity, fileIdentityIndicators, "        ");
-                output << ",\n";
-                output << "        \"indicators\": ";
-                WriteJsonStringArray(output, module.indicators);
+                if (fileIdentity != nullptr)
+                {
+                    WriteFileIdentityObject(output, *fileIdentity, "        ");
+                }
+                else
+                {
+                    output << "null";
+                }
                 output << "\n";
                 output << "      }";
                 if (index + 1 < modules.size())
@@ -403,6 +535,48 @@ namespace GlassPane::Export
             return stream.str();
         }
 
+        const char* HandleCollectionStateText(
+            Core::HandleCollectionState state)
+        {
+            switch (state)
+            {
+            case Core::HandleCollectionState::NotAttempted:
+                return "not_attempted";
+            case Core::HandleCollectionState::Success:
+                return "success";
+            case Core::HandleCollectionState::Partial:
+                return "partial";
+            case Core::HandleCollectionState::Unavailable:
+                return "unavailable";
+            case Core::HandleCollectionState::Failed:
+                return "failed";
+            default:
+                return "failed";
+            }
+        }
+
+        const char* HandleQueryFailureKindText(
+            Core::HandleQueryFailureKind kind)
+        {
+            switch (kind)
+            {
+            case Core::HandleQueryFailureKind::None:
+                return "none";
+            case Core::HandleQueryFailureKind::BudgetExceeded:
+                return "budget_exceeded";
+            case Core::HandleQueryFailureKind::AllocationFailed:
+                return "allocation_failed";
+            case Core::HandleQueryFailureKind::ApiUnavailable:
+                return "api_unavailable";
+            case Core::HandleQueryFailureKind::ApiFailed:
+                return "api_failed";
+            case Core::HandleQueryFailureKind::InvalidBuffer:
+                return "invalid_buffer";
+            default:
+                return "none";
+            }
+        }
+
         void WriteHandleArray(std::ostream& output, const std::vector<Core::HandleInfo>& handles, const std::string& indent)
         {
             output << "[\n";
@@ -415,6 +589,7 @@ namespace GlassPane::Export
                 WriteJsonString(output, HandleValueText(handle.handleValue));
                 output << ",\n";
                 output << indent << "    \"handleValueRaw\": " << handle.handleValue << ",\n";
+                output << indent << "    \"objectTypeIndex\": " << handle.objectTypeIndex << ",\n";
                 output << indent << "    \"objectType\": ";
                 WriteJsonString(output, handle.objectType);
                 output << ",\n";
@@ -435,17 +610,23 @@ namespace GlassPane::Export
                     output << "null";
                 }
                 output << ",\n";
+                output << indent << "    \"targetThreadId\": ";
+                if (handle.targetThreadId.has_value())
+                {
+                    output << handle.targetThreadId.value();
+                }
+                else
+                {
+                    output << "null";
+                }
+                output << ",\n";
                 output << indent << "    \"targetProcessName\": ";
                 WriteJsonString(output, handle.targetProcessName);
                 output << ",\n";
-                output << indent << "    \"isSensitive\": " << (handle.isSensitive ? "true" : "false") << ",\n";
                 output << indent << "    \"typeResolved\": " << (handle.typeResolved ? "true" : "false") << ",\n";
                 output << indent << "    \"nameResolved\": " << (handle.nameResolved ? "true" : "false") << ",\n";
                 output << indent << "    \"decodedAccess\": ";
                 WriteJsonStringArray(output, handle.decodedAccess);
-                output << ",\n";
-                output << indent << "    \"indicators\": ";
-                WriteJsonStringArray(output, handle.indicators);
                 output << ",\n";
                 output << indent << "    \"errorMessage\": ";
                 WriteJsonString(output, handle.errorMessage);
@@ -468,13 +649,42 @@ namespace GlassPane::Export
             output << "{\n";
             output << indent << "  \"loaded\": " << (handles != nullptr ? "true" : "false") << ",\n";
             output << indent << "  \"pid\": " << (handles != nullptr ? handles->pid : 0) << ",\n";
+            output << indent << "  \"collectionState\": \""
+                   << HandleCollectionStateText(
+                        handles != nullptr
+                            ? handles->state
+                            : Core::HandleCollectionState::NotAttempted)
+                   << "\",\n";
+            output << indent << "  \"queryFailureKind\": \""
+                   << HandleQueryFailureKindText(
+                        handles != nullptr
+                            ? handles->queryFailureKind
+                            : Core::HandleQueryFailureKind::None)
+                   << "\",\n";
             output << indent << "  \"success\": " << (handles != nullptr && handles->success ? "true" : "false") << ",\n";
             output << indent << "  \"statusMessage\": ";
             WriteJsonString(output, handles != nullptr ? handles->statusMessage : L"Handle inspection was not loaded before export.");
             output << ",\n";
             output << indent << "  \"systemHandleCount\": " << (handles != nullptr ? handles->systemHandleCount : 0) << ",\n";
+            output << indent << "  \"systemEntriesScanned\": " << (handles != nullptr ? handles->systemEntriesScanned : 0) << ",\n";
+            output << indent << "  \"selectedProcessHandlesMatched\": " << (handles != nullptr ? handles->selectedProcessHandlesMatched : 0) << ",\n";
+            output << indent << "  \"selectedProcessHandlesOmitted\": " << (handles != nullptr ? handles->selectedProcessHandlesOmitted : 0) << ",\n";
+            output << indent << "  \"namesAttempted\": " << (handles != nullptr ? handles->namesAttempted : 0) << ",\n";
+            output << indent << "  \"namesResolved\": " << (handles != nullptr ? handles->namesResolved : 0) << ",\n";
+            output << indent << "  \"namesSkipped\": " << (handles != nullptr ? handles->namesSkipped : 0) << ",\n";
+            output << indent << "  \"namesFailed\": " << (handles != nullptr ? handles->namesFailed : 0) << ",\n";
+            output << indent << "  \"typeResolutionsAttempted\": " << (handles != nullptr ? handles->typeResolutionsAttempted : 0) << ",\n";
+            output << indent << "  \"typeResolutionsResolved\": " << (handles != nullptr ? handles->typeResolutionsResolved : 0) << ",\n";
+            output << indent << "  \"typeResolutionsSkipped\": " << (handles != nullptr ? handles->typeResolutionsSkipped : 0) << ",\n";
+            output << indent << "  \"typeResolutionsFailed\": " << (handles != nullptr ? handles->typeResolutionsFailed : 0) << ",\n";
+            output << indent << "  \"targetsResolved\": " << (handles != nullptr ? handles->targetsResolved : 0) << ",\n";
+            output << indent << "  \"targetsUnresolved\": " << (handles != nullptr ? handles->targetsUnresolved : 0) << ",\n";
+            output << indent << "  \"queryBufferTruncated\": " << (handles != nullptr && handles->queryBufferTruncated ? "true" : "false") << ",\n";
+            output << indent << "  \"retentionCapReached\": " << (handles != nullptr && handles->retentionCapReached ? "true" : "false") << ",\n";
+            output << indent << "  \"nameResolutionCapReached\": " << (handles != nullptr && handles->nameResolutionCapReached ? "true" : "false") << ",\n";
+            output << indent << "  \"typeResolutionCapReached\": " << (handles != nullptr && handles->typeResolutionCapReached ? "true" : "false") << ",\n";
+            output << indent << "  \"typeOrTargetResolutionPartial\": " << (handles != nullptr && handles->typeOrTargetResolutionPartial ? "true" : "false") << ",\n";
             output << indent << "  \"handleCount\": " << (handles != nullptr ? handles->handles.size() : 0) << ",\n";
-            output << indent << "  \"sensitiveCount\": " << (handles != nullptr ? handles->sensitiveCount : 0) << ",\n";
             output << indent << "  \"handles\": ";
             if (handles != nullptr)
             {
@@ -608,7 +818,6 @@ namespace GlassPane::Export
             output << indent << "  \"executableRegions\": " << (memory != nullptr ? memory->executableRegions : 0) << ",\n";
             output << indent << "  \"privateExecutableRegions\": " << (memory != nullptr ? memory->privateExecutableRegions : 0) << ",\n";
             output << indent << "  \"rwxRegions\": " << (memory != nullptr ? memory->rwxRegions : 0) << ",\n";
-            output << indent << "  \"suspiciousRegions\": " << (memory != nullptr ? memory->suspiciousRegions : 0) << ",\n";
             output << indent << "  \"guardRegions\": " << (memory != nullptr ? memory->guardRegions : 0) << ",\n";
             output << indent << "  \"memoryRegions\": [";
             if (memory != nullptr && !memory->regions.empty())
@@ -656,10 +865,7 @@ namespace GlassPane::Export
                     output << indent << "      \"isGuard\": " << (region.isGuard ? "true" : "false") << ",\n";
                     output << indent << "      \"isPrivate\": " << (region.isPrivate ? "true" : "false") << ",\n";
                     output << indent << "      \"isImage\": " << (region.isImage ? "true" : "false") << ",\n";
-                    output << indent << "      \"isMapped\": " << (region.isMapped ? "true" : "false") << ",\n";
-                    output << indent << "      \"isSuspicious\": " << (region.isSuspicious ? "true" : "false") << ",\n";
-                    output << indent << "      \"indicators\": ";
-                    WriteJsonStringArray(output, region.indicators);
+                    output << indent << "      \"isMapped\": " << (region.isMapped ? "true" : "false");
                     output << "\n";
                     output << indent << "    }";
                     if (index + 1 < memory->regions.size())
@@ -711,132 +917,6 @@ namespace GlassPane::Export
                 utc.wSecond);
             return buffer;
         }
-    }
-
-    bool ExportSnapshotToJson(
-        const Core::ProcessSnapshot& snapshot,
-        const std::wstring& filePath,
-        std::wstring* errorMessage)
-    {
-        std::ofstream output(filePath, std::ios::binary | std::ios::trunc);
-        if (!output)
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = L"Could not open the export file for writing.";
-            }
-            return false;
-        }
-
-        output << "{\n";
-        output << "  \"schemaVersion\": \"0.4\",\n";
-        output << "  \"generatedUtc\": \"" << UtcTimestamp() << "\",\n";
-        output << "  \"processCount\": " << snapshot.processes.size() << ",\n";
-        output << "  \"processes\": [\n";
-
-        for (std::size_t index = 0; index < snapshot.processes.size(); ++index)
-        {
-            const Core::ProcessInfo& process = snapshot.processes[index];
-            const Core::ChainAnalysisResult chainAnalysis = Core::AnalyzeChain(snapshot, process.pid);
-            output << "    {\n";
-            output << "      \"pid\": " << process.pid << ",\n";
-            output << "      \"parentPid\": " << process.parentPid << ",\n";
-            output << "      \"name\": ";
-            WriteJsonString(output, process.name);
-            output << ",\n";
-            output << "      \"executablePath\": ";
-            WriteJsonString(output, process.executablePath);
-            output << ",\n";
-            output << "      \"commandLine\": ";
-            WriteJsonString(output, process.commandLine);
-            output << ",\n";
-            output << "      \"commandLineAccessible\": " << (process.commandLineAccessible ? "true" : "false") << ",\n";
-            output << "      \"sessionId\": ";
-            if (process.sessionId.has_value())
-            {
-                output << process.sessionId.value();
-            }
-            else
-            {
-                output << "null";
-            }
-            output << ",\n";
-            output << "      \"architecture\": ";
-            WriteJsonString(output, process.architecture);
-            output << ",\n";
-            output << "      \"hasCreationTime\": " << (process.hasCreationTime ? "true" : "false") << ",\n";
-            output << "      \"creationTimeFileTime\": " << process.creationTimeFileTime << ",\n";
-            output << "      \"creationTimeLocal\": ";
-            WriteJsonString(output, process.creationTimeLocal);
-            output << ",\n";
-            output << "      \"parentRelationshipVerified\": " << (process.parentRelationshipVerified ? "true" : "false") << ",\n";
-            output << "      \"parentRelationshipUnverified\": " << (process.parentRelationshipUnverified ? "true" : "false") << ",\n";
-            output << "      \"parentPidReuseSuspected\": " << (process.parentPidReuseSuspected ? "true" : "false") << ",\n";
-            output << "      \"suspicious\": " << (process.IsSuspicious() ? "true" : "false") << ",\n";
-            output << "      \"severity\": ";
-            WriteJsonString(output, Core::SeverityToString(process.severity));
-            output << ",\n";
-            output << "      \"indicators\": ";
-            WriteJsonStringArray(output, process.indicators);
-            output << ",\n";
-            output << "      \"contextNotes\": ";
-            WriteJsonStringArray(output, process.contextNotes);
-            output << ",\n";
-            output << "      \"parentChain\": [";
-            for (std::size_t chainIndex = 0; chainIndex < chainAnalysis.parentChain.size(); ++chainIndex)
-            {
-                if (chainIndex > 0)
-                {
-                    output << ", ";
-                }
-
-                const Core::ChainProcessSummary& chainProcess = chainAnalysis.parentChain[chainIndex];
-                output << "{";
-                output << "\"pid\": " << chainProcess.pid << ", ";
-                output << "\"name\": ";
-                WriteJsonString(output, chainProcess.name);
-                output << ", \"severity\": ";
-                WriteJsonString(output, Core::SeverityToString(chainProcess.severity));
-                output << "}";
-            }
-            output << "],\n";
-            output << "      \"chainSeverity\": ";
-            WriteJsonString(output, Core::SeverityToString(chainAnalysis.chainSeverity));
-            output << ",\n";
-            output << "      \"chainIndicators\": ";
-            WriteJsonStringArray(output, chainAnalysis.chainIndicators);
-            output << ",\n";
-            output << "      \"children\": [";
-            for (std::size_t childIndex = 0; childIndex < process.children.size(); ++childIndex)
-            {
-                if (childIndex > 0)
-                {
-                    output << ", ";
-                }
-                output << process.children[childIndex];
-            }
-            output << "]\n";
-            output << "    }";
-            if (index + 1 < snapshot.processes.size())
-            {
-                output << ',';
-            }
-            output << '\n';
-        }
-
-        output << "  ]\n";
-        output << "}\n";
-
-        if (!output)
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = L"An error occurred while writing the export file.";
-            }
-            return false;
-        }
-
-        return true;
     }
 
     bool ExportSelectedProcessDetailsToJson(
@@ -911,12 +991,96 @@ namespace GlassPane::Export
         const std::wstring& filePath,
         std::wstring* errorMessage)
     {
+        const Core::PersistedTriageSummary notCapturedTriage;
+        return ExportSelectedProcessDetailsToJson(
+            snapshot,
+            pid,
+            modules,
+            networkConnections,
+            handles,
+            runtime,
+            memory,
+            SelectedProcessJsonEvidenceContext{},
+            notCapturedTriage,
+            nullptr,
+            nullptr,
+            filePath,
+            errorMessage);
+    }
+
+    bool ExportSelectedProcessDetailsToJson(
+        const Core::ProcessSnapshot& snapshot,
+        std::uint32_t pid,
+        const Core::ModuleCollectionResult& modules,
+        const std::vector<Core::NetworkConnection>& networkConnections,
+        const Core::HandleCollectionResult* handles,
+        const Core::RuntimeInfo* runtime,
+        const Core::MemoryCollectionResult* memory,
+        const SelectedProcessJsonEvidenceContext& capturedEvidence,
+        const Core::PersistedTriageSummary& authoritativeTriage,
+        const std::vector<Core::NativeSourceEvidenceRecord>* nativeSourceEvidence,
+        const std::vector<Core::Finding>* historicalLegacyEvidence,
+        const std::wstring& filePath,
+        std::wstring* errorMessage)
+    {
         const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot, pid);
         if (process == nullptr)
         {
             if (errorMessage != nullptr)
             {
                 *errorMessage = L"Selected process is no longer present in the snapshot.";
+            }
+            return false;
+        }
+
+        const bool hasCapturedEvidence =
+            capturedEvidence.processFileIdentityCaptured ||
+            capturedEvidence.tokenCaptured ||
+            capturedEvidence.moduleFileIdentitiesCaptured ||
+            authoritativeTriage.captured ||
+            nativeSourceEvidence != nullptr ||
+            historicalLegacyEvidence != nullptr;
+        if ((hasCapturedEvidence && !capturedEvidence.identityCaptured) ||
+            (capturedEvidence.identityCaptured &&
+                capturedEvidence.identity != Core::MakeProcessIdentityKey(*process)) ||
+            (!capturedEvidence.moduleFileIdentitiesCaptured &&
+                !capturedEvidence.moduleFileIdentities.empty()) ||
+            (capturedEvidence.moduleFileIdentitiesCaptured &&
+                capturedEvidence.moduleFileIdentities.size() != modules.modules.size()))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage =
+                    L"Selected-process export contains stale or contradictory captured evidence.";
+            }
+            return false;
+        }
+
+        const Core::PersistedTriageValidationResult triageValidation =
+            Core::ValidatePersistedTriageSummary(authoritativeTriage);
+        if (!triageValidation)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Selected-process export contains invalid authoritative triage data.";
+            }
+            return false;
+        }
+        const std::vector<Core::NativeSourceEvidenceRecord> emptyNativeEvidence;
+        const std::vector<Core::Finding> emptyHistoricalEvidence;
+        const std::vector<Core::NativeSourceEvidenceRecord>& nativeEvidence =
+            nativeSourceEvidence == nullptr
+                ? emptyNativeEvidence
+                : *nativeSourceEvidence;
+        const std::vector<Core::Finding>& historicalEvidence =
+            historicalLegacyEvidence == nullptr
+                ? emptyHistoricalEvidence
+                : *historicalLegacyEvidence;
+        if (!Core::ValidateNativeSourceEvidenceRecords(nativeEvidence))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Selected-process export contains invalid native source evidence.";
             }
             return false;
         }
@@ -932,10 +1096,18 @@ namespace GlassPane::Export
         }
 
         const Core::ChainAnalysisResult chainAnalysis = Core::AnalyzeChain(snapshot, process->pid);
-        const Core::FileIdentity processFileIdentity = Core::CollectFileIdentity(process->executablePath);
-        const std::vector<Core::FileIdentityIndicator> processFileIdentityIndicators =
-            Core::BuildFileIdentityIndicators(processFileIdentity, process->name, true);
-        const Core::TokenInfo tokenInfo = Core::CollectProcessTokenInfo(*process);
+        const Core::FileIdentity* processFileIdentity =
+            capturedEvidence.processFileIdentityCaptured
+                ? &capturedEvidence.processFileIdentity
+                : nullptr;
+        const Core::TokenInfo* tokenInfo =
+            capturedEvidence.tokenCaptured
+                ? &capturedEvidence.token
+                : nullptr;
+        const std::vector<Core::FileIdentity>* moduleFileIdentities =
+            capturedEvidence.moduleFileIdentitiesCaptured
+                    ? &capturedEvidence.moduleFileIdentities
+                    : nullptr;
         const Core::HandleCollectionResult* selectedHandles =
             handles != nullptr && handles->pid == process->pid
                 ? handles
@@ -950,61 +1122,32 @@ namespace GlassPane::Export
                 : nullptr;
         const std::size_t listeningNetworkCount = CountListeningConnections(networkConnections);
         const std::size_t publicRemoteNetworkCount = CountPublicRemoteConnections(networkConnections);
-        std::vector<std::wstring> networkIndicators;
+        std::vector<std::wstring> networkContext;
         if (listeningNetworkCount > 0)
         {
-            networkIndicators.push_back(L"Network: process has listening socket.");
+            networkContext.push_back(L"Process has a listening socket.");
         }
         if (publicRemoteNetworkCount > 0)
         {
-            networkIndicators.push_back(L"Network: process has public remote connection.");
+            networkContext.push_back(L"Process has a public remote connection.");
         }
-        if (process->IsSuspicious() && publicRemoteNetworkCount > 0)
-        {
-            networkIndicators.push_back(L"Network: suspicious process has outbound public connection.");
-        }
-
         std::vector<std::wstring> networkContextNotes;
-        const Core::Severity effectiveSeverity =
-            Core::SeverityRank(chainAnalysis.chainSeverity) > Core::SeverityRank(process->severity)
-                ? chainAnalysis.chainSeverity
-                : process->severity;
-        if (publicRemoteNetworkCount > 0 &&
-            Core::SeverityRank(effectiveSeverity) >= Core::SeverityRank(Core::Severity::Medium))
-        {
-            networkContextNotes.push_back(L"Network context: elevated process or chain severity with public outbound connection. No severity escalation applied.");
-        }
-
-        Core::CorrelationContext correlationContext;
-        correlationContext.process = process;
-        correlationContext.chain = &chainAnalysis;
-        correlationContext.modules = &modules;
-        correlationContext.networkConnections = &networkConnections;
-        correlationContext.fileIdentity = &processFileIdentity;
-        correlationContext.token = &tokenInfo;
-        correlationContext.handles = selectedHandles;
-        correlationContext.runtime = selectedRuntime;
-        correlationContext.memory = selectedMemory;
-        const std::vector<Core::Finding> findings = Core::CorrelateFindings(correlationContext);
-        const std::wstring highestFindingSeverity = findings.empty()
-            ? L"None"
-            : std::wstring(Core::FindingSeverityToString(Core::HighestFindingSeverity(findings)));
 
         output << "{\n";
-        output << "  \"schemaVersion\": \"0.8-selected-details\",\n";
+        output << "  \"schemaVersion\": \"0.8-selected-details-v3-native\",\n";
         output << "  \"generatedUtc\": \"" << UtcTimestamp() << "\",\n";
-        output << "  \"triage\": {\n";
-        output << "    \"summary\": ";
-        WriteJsonString(output, Core::TriageSummary(findings));
+        output << "  \"authoritative_triage\": ";
+        WritePersistedTriageSummary(output, authoritativeTriage, "  ");
         output << ",\n";
-        output << "    \"highestSeverity\": ";
-        WriteJsonString(output, highestFindingSeverity);
+        output << "  \"native_source_evidence\": ";
+        WriteNativeSourceEvidenceArray(output, nativeEvidence);
         output << ",\n";
-        output << "    \"findingCount\": " << findings.size() << ",\n";
-        output << "    \"findings\": ";
-        WriteFindingArray(output, findings);
-        output << "\n";
-        output << "  },\n";
+        if (!historicalEvidence.empty())
+        {
+            output << "  \"historical_legacy_evidence\": ";
+            WriteFindingArray(output, historicalEvidence);
+            output << ",\n";
+        }
         output << "  \"process\": {\n";
         output << "    \"pid\": " << process->pid << ",\n";
         output << "    \"parentPid\": " << process->parentPid << ",\n";
@@ -1014,8 +1157,17 @@ namespace GlassPane::Export
         output << "    \"executablePath\": ";
         WriteJsonString(output, process->executablePath);
         output << ",\n";
+        output << "    \"fileIdentityCaptured\": "
+               << (processFileIdentity != nullptr ? "true" : "false") << ",\n";
         output << "    \"fileIdentity\": ";
-        WriteFileIdentityObject(output, processFileIdentity, processFileIdentityIndicators, "    ");
+        if (processFileIdentity != nullptr)
+        {
+            WriteFileIdentityObject(output, *processFileIdentity, "    ");
+        }
+        else
+        {
+            output << "null";
+        }
         output << ",\n";
         output << "    \"commandLine\": ";
         WriteJsonString(output, process->commandLine);
@@ -1032,16 +1184,6 @@ namespace GlassPane::Export
         output << "    \"parentRelationshipVerified\": " << (process->parentRelationshipVerified ? "true" : "false") << ",\n";
         output << "    \"parentRelationshipUnverified\": " << (process->parentRelationshipUnverified ? "true" : "false") << ",\n";
         output << "    \"parentPidReuseSuspected\": " << (process->parentPidReuseSuspected ? "true" : "false") << ",\n";
-        output << "    \"suspicious\": " << (process->IsSuspicious() ? "true" : "false") << ",\n";
-        output << "    \"severity\": ";
-        WriteJsonString(output, Core::SeverityToString(process->severity));
-        output << ",\n";
-        output << "    \"indicators\": ";
-        WriteJsonStringArray(output, process->indicators);
-        output << ",\n";
-        output << "    \"contextNotes\": ";
-        WriteJsonStringArray(output, process->contextNotes);
-        output << ",\n";
         output << "    \"parentChain\": [";
         for (std::size_t chainIndex = 0; chainIndex < chainAnalysis.parentChain.size(); ++chainIndex)
         {
@@ -1055,20 +1197,21 @@ namespace GlassPane::Export
             output << "\"pid\": " << chainProcess.pid << ", ";
             output << "\"name\": ";
             WriteJsonString(output, chainProcess.name);
-            output << ", \"severity\": ";
-            WriteJsonString(output, Core::SeverityToString(chainProcess.severity));
             output << "}";
         }
-        output << "],\n";
-        output << "    \"chainSeverity\": ";
-        WriteJsonString(output, Core::SeverityToString(chainAnalysis.chainSeverity));
-        output << ",\n";
-        output << "    \"chainIndicators\": ";
-        WriteJsonStringArray(output, chainAnalysis.chainIndicators);
-        output << "\n";
+        output << "]\n";
         output << "  },\n";
+        output << "  \"tokenInspectionCaptured\": "
+               << (tokenInfo != nullptr ? "true" : "false") << ",\n";
         output << "  \"tokenInspection\": ";
-        WriteTokenObject(output, tokenInfo, "  ");
+        if (tokenInfo != nullptr)
+        {
+            WriteTokenObject(output, *tokenInfo, "  ");
+        }
+        else
+        {
+            output << "null";
+        }
         output << ",\n";
         output << "  \"handleInspection\": ";
         WriteHandleInspectionObject(output, selectedHandles, "  ");
@@ -1085,19 +1228,16 @@ namespace GlassPane::Export
         output << "    \"statusMessage\": ";
         WriteJsonString(output, modules.statusMessage);
         output << ",\n";
-        output << "    \"moduleIndicators\": ";
-        WriteJsonStringArray(output, modules.indicators);
-        output << ",\n";
         output << "    \"modules\": ";
-        WriteModuleArray(output, modules.modules);
+        WriteModuleArray(output, modules.modules, moduleFileIdentities);
         output << "\n";
         output << "  },\n";
         output << "  \"networkInspection\": {\n";
         output << "    \"connectionCount\": " << networkConnections.size() << ",\n";
         output << "    \"listeningCount\": " << listeningNetworkCount << ",\n";
         output << "    \"publicRemoteCount\": " << publicRemoteNetworkCount << ",\n";
-        output << "    \"indicators\": ";
-        WriteJsonStringArray(output, networkIndicators);
+        output << "    \"context\": ";
+        WriteJsonStringArray(output, networkContext);
         output << ",\n";
         output << "    \"contextNotes\": ";
         WriteJsonStringArray(output, networkContextNotes);

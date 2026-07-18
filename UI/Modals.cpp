@@ -154,7 +154,7 @@ namespace GlassPane::UI
             ImGui::TextColored(context.accentColor, "%s", context.githubUrl != nullptr ? context.githubUrl : "");
 
             ImGui::SeparatorText("Disclaimer");
-            WrappedText("GlassPane is a read-only local analysis tool. Findings are evidence worth investigating, not proof of malicious activity.");
+            WrappedText("GlassPane is a read-only local analysis tool. Source evidence supports review and is not proof of malicious activity.");
 
             ImGui::Spacing();
             if (ImGui::Button("Copy GitHub URL"))

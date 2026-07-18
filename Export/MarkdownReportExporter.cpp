@@ -8,7 +8,6 @@
 #include "MarkdownReportExporter.h"
 
 #include "../Core/ChainAnalysis.h"
-#include "../Core/CorrelationEngine.h"
 #include "../Core/ProcessTree.h"
 
 #include <Windows.h>
@@ -56,6 +55,36 @@ namespace GlassPane::Export
                 required,
                 nullptr,
                 nullptr);
+            return result;
+        }
+
+        std::wstring Utf8ToWide(const std::string& value)
+        {
+            if (value.empty())
+            {
+                return {};
+            }
+
+            const int required = MultiByteToWideChar(
+                CP_UTF8,
+                MB_ERR_INVALID_CHARS,
+                value.data(),
+                static_cast<int>(value.size()),
+                nullptr,
+                0);
+            if (required <= 0)
+            {
+                return {};
+            }
+
+            std::wstring result(static_cast<std::size_t>(required), L'\0');
+            MultiByteToWideChar(
+                CP_UTF8,
+                MB_ERR_INVALID_CHARS,
+                value.data(),
+                static_cast<int>(value.size()),
+                result.data(),
+                required);
             return result;
         }
 
@@ -184,25 +213,6 @@ namespace GlassPane::Export
             std::wstringstream stream;
             stream << L"0x" << std::uppercase << std::hex << handleValue;
             return stream.str();
-        }
-
-        std::wstring JoinMemoryIndicators(const Core::MemoryRegionInfo& region)
-        {
-            if (region.indicators.empty())
-            {
-                return L"(none)";
-            }
-
-            std::wstring joined;
-            for (std::size_t index = 0; index < region.indicators.size(); ++index)
-            {
-                if (index > 0)
-                {
-                    joined += L"; ";
-                }
-                joined += region.indicators[index];
-            }
-            return joined;
         }
 
         std::wstring NetworkEndpoint(const Core::NetworkConnection& connection, bool remote)
@@ -405,6 +415,102 @@ namespace GlassPane::Export
         void WriteBullet(std::ostream& output, const std::wstring& value)
         {
             output << "- " << EscapeMarkdownInline(value) << "\n";
+        }
+
+        std::string PersistedTriageVerdictText(
+            const Core::PersistedTriageSummary& summary)
+        {
+            return summary.captured
+                ? Core::TriageVerdictDisplayText(summary.authoritativeVerdict)
+                : std::string("Not captured");
+        }
+
+        std::string PersistedTriageDomainText(
+            const Core::PersistedTriageSummary& summary)
+        {
+            if (summary.contributingDomains.empty())
+            {
+                return "None";
+            }
+
+            std::string text;
+            for (const Core::EvidenceDomain domain : summary.contributingDomains)
+            {
+                if (!text.empty())
+                {
+                    text += ", ";
+                }
+                text += Core::EvidenceDomainDisplayText(domain);
+            }
+            return text;
+        }
+
+        void WritePersistedTriageRationaleSection(
+            std::ostream& output,
+            const char* heading,
+            const std::vector<std::string>& entries,
+            const char* emptyText)
+        {
+            output << "### " << heading << "\n\n";
+            if (entries.empty())
+            {
+                output << emptyText << "\n\n";
+                return;
+            }
+
+            for (const std::string& entry : entries)
+            {
+                output << "- " << EscapeMarkdownInline(entry) << "\n";
+            }
+            output << "\n";
+        }
+
+        void WritePersistedTriageRationale(
+            std::ostream& output,
+            const Core::PersistedTriageSummary& summary)
+        {
+            if (!summary.captured)
+            {
+                output << "Authoritative TriageEngine results were not captured for this process.\n\n";
+                return;
+            }
+
+            if (summary.usingFallback)
+            {
+                output << "This schema-4 capture retained a historical legacy-fallback state. It is preserved as captured metadata and was not recomputed.\n\n";
+                return;
+            }
+
+            WritePersistedTriageRationaleSection(
+                output,
+                "Verdict basis",
+                summary.verdictBasis,
+                "No review-relevant observation or completed correlation contributed.");
+            WritePersistedTriageRationaleSection(
+                output,
+                "Completed correlations",
+                summary.completedCorrelations,
+                "None observed.");
+            WritePersistedTriageRationaleSection(
+                output,
+                "Supporting context",
+                summary.supportingContext,
+                "None observed.");
+            WritePersistedTriageRationaleSection(
+                output,
+                "Collection limitations",
+                summary.collectionLimitations,
+                "None observed.");
+            WritePersistedTriageRationaleSection(
+                output,
+                "Evidence-integrity context",
+                summary.evidenceIntegrityContext,
+                "None observed.");
+            WritePersistedTriageRationaleSection(
+                output,
+                "Unresolved correlations",
+                summary.unresolvedCorrelations,
+                "None observed.");
         }
 
         void WriteTableHeader(std::ostream& output, const std::vector<std::string>& columns)
@@ -761,6 +867,28 @@ namespace GlassPane::Export
             return false;
         }
 
+        const Core::PersistedTriageValidationResult triageValidation =
+            Core::ValidatePersistedTriageSummary(context.authoritativeTriage);
+        if (!triageValidation)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Report context contains invalid authoritative triage data.";
+            }
+            return false;
+        }
+        const Core::NativeSourceEvidenceValidationResult evidenceValidation =
+            Core::ValidateNativeSourceEvidenceRecords(
+                context.nativeSourceEvidence);
+        if (!evidenceValidation)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Report context contains invalid native source evidence.";
+            }
+            return false;
+        }
+
         std::ofstream output(filePath, std::ios::binary | std::ios::trunc);
         if (!output)
         {
@@ -772,34 +900,182 @@ namespace GlassPane::Export
         }
 
         const Core::ChainAnalysisResult chain = Core::AnalyzeChain(*context.snapshot, process->pid);
-        const std::wstring triageVerdict = Core::TriageSummary(context.findings);
-        const std::wstring highestSeverity = context.findings.empty()
-            ? L"None"
-            : std::wstring(Core::FindingSeverityToString(Core::HighestFindingSeverity(context.findings)));
+        const Core::PersistedTriageSummary& triage = context.authoritativeTriage;
 
         output << "# GlassPane Selected Process Report\n\n";
         output << "- Generated: " << EscapeMarkdownInline(LocalTimestamp()) << "\n";
         output << "- GlassPane version: " << WideToUtf8(ValueOr(context.appVersion, L"(unknown)")) << "\n";
         output << "- Build configuration: " << EscapeMarkdownInline(ValueOr(context.buildConfiguration, L"(unknown)")) << "\n\n";
 
-        output << "## Summary\n\n";
+        output << "## Process Identity\n\n";
+        WriteTableHeader(output, { "Field", "Value" });
+        WriteTableRow(output, { L"Name", ValueOr(process->name, L"(unknown)") });
+        WriteTableRow(output, { L"PID", std::to_wstring(process->pid) });
+        WriteTableRow(output, { L"Parent PID", std::to_wstring(process->parentPid) });
+        WriteTableRow(output, { L"Parent Link", ParentRelationshipStatusText(Core::GetParentRelationshipStatus(*context.snapshot, *process)) });
+        WriteTableRow(output, { L"Architecture", ValueOr(process->architecture, L"(unknown)") });
+        WriteTableRow(output, { L"Session", process->sessionId.has_value() ? std::to_wstring(process->sessionId.value()) : L"(unknown)" });
+        WriteTableRow(output, { L"Start Time", process->hasCreationTime ? process->creationTimeLocal : L"(unavailable)" });
+        WriteTableRow(output, {
+            L"Authoritative triage",
+            triage.captured
+                ? Utf8ToWide(
+                    Core::TriageVerdictDisplayText(triage.authoritativeVerdict))
+                : L"Not captured"
+        });
+        output << "\nExecutable path:\n\n";
+        WriteCodeBlock(output, process->executablePath.empty() ? L"(not accessible)" : process->executablePath);
+        output << "\nCommand line:\n\n";
+        WriteCodeBlock(output, process->commandLine.empty() ? L"(empty or not accessible)" : process->commandLine);
+        output << "\n";
+
+        output << "## Triage Summary\n\n";
         output << "- Process: " << EscapeMarkdownInline(ValueOr(process->name, L"(unknown)")) << "\n";
         output << "- PID: `" << process->pid << "`\n";
-        output << "- Triage verdict: " << EscapeMarkdownInline(triageVerdict) << "\n";
-        output << "- Highest finding severity: " << EscapeMarkdownInline(highestSeverity) << "\n";
-        output << "- Finding count: " << context.findings.size() << "\n\n";
-
-        output << "## Findings\n\n";
-        if (context.findings.empty())
+        output << "- Triage verdict: "
+               << EscapeMarkdownInline(PersistedTriageVerdictText(triage))
+               << "\n";
+        output << "- Analysis level: "
+               << EscapeMarkdownInline(
+                    Core::PersistedTriageAnalysisLevelDisplayText(triage.analysisLevel))
+               << "\n";
+        output << "- TriageEngine result available: "
+               << (triage.captured && triage.evaluationSucceeded &&
+                       !triage.usingFallback
+                    ? "Yes" : "No")
+               << "\n";
+        if (triage.captured && triage.usingFallback)
         {
-            output << "No triage findings were generated for this process.\n\n";
+            output << "- Fallback reason: "
+                   << EscapeMarkdownInline(triage.fallbackReason)
+                   << "\n";
+        }
+        output << "- Triage model: ";
+        if (triage.captured)
+        {
+            output << triage.triageModelVersion;
         }
         else
         {
-            for (const Core::Finding& finding : context.findings)
+            output << "Not captured";
+        }
+        output << "\n";
+        if (triage.captured &&
+            triage.analysisLevel == Core::PersistedTriageAnalysisLevel::Enriched &&
+            triage.baselineVerdictAvailable)
+        {
+            output << "- Baseline verdict: "
+                   << EscapeMarkdownInline(
+                        Core::TriageVerdictDisplayText(triage.baselineVerdict))
+                   << "\n";
+            output << "- Enriched evidence changed verdict: "
+                   << (triage.enrichedChangedVerdict ? "Yes" : "No")
+                   << "\n";
+        }
+        output << "- Contributing domains: "
+               << EscapeMarkdownInline(PersistedTriageDomainText(triage))
+               << "\n";
+        const std::size_t availableSourceEvidenceCount =
+            context.nativeSourceEvidence.size() +
+            context.historicalLegacyEvidence.size();
+        output << "- Source evidence count: "
+               << (triage.captured
+                    ? triage.sourceEvidenceCount
+                    : availableSourceEvidenceCount)
+               << "\n";
+        if (triage.captured &&
+            triage.sourceEvidenceCount != availableSourceEvidenceCount)
+        {
+            output << "- Source evidence rows available in this report: "
+                   << availableSourceEvidenceCount << "\n";
+        }
+        output << "\n";
+
+        WritePersistedTriageRationale(output, triage);
+
+        output << "## Source Evidence\n\n";
+        if (!context.nativeSourceEvidence.empty())
+        {
+            output << "These bounded native records were projected from refined typed observations. They distinguish verdict contribution, supporting context, and collection limitations.\n\n";
+            for (const Core::NativeSourceEvidenceRecord& evidence :
+                 context.nativeSourceEvidence)
             {
-                output << "### " << EscapeMarkdownInline(Core::FindingSeverityToString(finding.severity))
+                output << "### "
+                       << EscapeMarkdownInline(evidence.title.empty()
+                            ? evidence.stableRuleId
+                            : evidence.title)
+                       << "\n\n";
+                output << "- Rule: `"
+                       << EscapeMarkdownInline(evidence.stableRuleId)
+                       << "`\n";
+                output << "- Domain: "
+                       << EscapeMarkdownInline(
+                            Core::EvidenceDomainDisplayText(evidence.domain))
+                       << "\n";
+                output << "- Disposition: "
+                       << EscapeMarkdownInline(
+                            Core::ObservationDispositionDisplayText(
+                                evidence.disposition))
+                       << "\n";
+                output << "- Strength / confidence: "
+                       << EscapeMarkdownInline(
+                            Core::ObservationStrengthDisplayText(
+                                evidence.strength))
+                       << " / "
+                       << EscapeMarkdownInline(
+                            Core::ObservationConfidenceDisplayText(
+                                evidence.confidence))
+                       << "\n";
+                output << "- Verdict role: "
+                       << (evidence.collectionLimitation
+                            ? "Collection limitation"
+                            : evidence.contributedToVerdict
+                                ? "Contributing evidence"
+                                : "Supporting context")
+                       << "\n";
+                if (!evidence.summary.empty())
+                {
+                    output << "- Summary: "
+                           << EscapeMarkdownInline(evidence.summary)
+                           << "\n";
+                }
+                if (!evidence.details.empty())
+                {
+                    output << "- Details:\n";
+                    for (const std::string& detail : evidence.details)
+                    {
+                        output << "  - "
+                               << EscapeMarkdownInline(detail) << "\n";
+                    }
+                }
+                if (!evidence.limitations.empty())
+                {
+                    output << "- Limitations:\n";
+                    for (const std::string& limitation : evidence.limitations)
+                    {
+                        output << "  - "
+                               << EscapeMarkdownInline(limitation) << "\n";
+                    }
+                }
+                output << "\n";
+            }
+        }
+        else if (context.historicalLegacyEvidence.empty())
+        {
+            output << "No native source-evidence records were retained for this process.\n\n";
+        }
+
+        if (!context.historicalLegacyEvidence.empty())
+        {
+            output << "## Historical Source Evidence\n\n";
+            output << "These imported records preserve pre-native snapshot wording and severity as historical metadata only. They were not reinterpreted as current observations.\n\n";
+            for (const Core::Finding& finding :
+                 context.historicalLegacyEvidence)
+            {
+                output << "### " << EscapeMarkdownInline(Core::HistoricalFindingSeverityText(finding))
                        << ": " << EscapeMarkdownInline(ValueOr(finding.title, L"(untitled finding)")) << "\n\n";
+                output << "- Historical source severity: " <<
+                    EscapeMarkdownInline(Core::HistoricalFindingSeverityText(finding)) << "\n";
                 output << "- Category: " << EscapeMarkdownInline(ValueOr(finding.category, L"(none)")) << "\n";
                 output << "- Description: " << EscapeMarkdownInline(ValueOr(finding.description, L"(none)")) << "\n";
                 if (!finding.evidence.empty())
@@ -814,23 +1090,6 @@ namespace GlassPane::Export
             }
         }
 
-        output << "## Process Identity\n\n";
-        WriteTableHeader(output, { "Field", "Value" });
-        WriteTableRow(output, { L"Name", ValueOr(process->name, L"(unknown)") });
-        WriteTableRow(output, { L"PID", std::to_wstring(process->pid) });
-        WriteTableRow(output, { L"Parent PID", std::to_wstring(process->parentPid) });
-        WriteTableRow(output, { L"Parent Link", ParentRelationshipStatusText(Core::GetParentRelationshipStatus(*context.snapshot, *process)) });
-        WriteTableRow(output, { L"Architecture", ValueOr(process->architecture, L"(unknown)") });
-        WriteTableRow(output, { L"Session", process->sessionId.has_value() ? std::to_wstring(process->sessionId.value()) : L"(unknown)" });
-        WriteTableRow(output, { L"Start Time", process->hasCreationTime ? process->creationTimeLocal : L"(unavailable)" });
-        WriteTableRow(output, { L"Suspicious", YesNo(process->IsSuspicious()) });
-        WriteTableRow(output, { L"Severity", Core::SeverityToString(process->severity) });
-        output << "\nExecutable path:\n\n";
-        WriteCodeBlock(output, process->executablePath.empty() ? L"(not accessible)" : process->executablePath);
-        output << "\nCommand line:\n\n";
-        WriteCodeBlock(output, process->commandLine.empty() ? L"(empty or not accessible)" : process->commandLine);
-        output << "\n";
-
         WriteServiceContextSection(output, context.serviceContext, process->pid);
 
         output << "## Parent Chain\n\n";
@@ -841,25 +1100,15 @@ namespace GlassPane::Export
         else
         {
             output << EscapeMarkdownInline(chain.formattedParentChain.empty() ? Core::FormatParentChain(*context.snapshot, process->pid) : chain.formattedParentChain) << "\n\n";
-            WriteTableHeader(output, { "PID", "Process", "Severity" });
+            WriteTableHeader(output, { "PID", "Process" });
             for (const Core::ChainProcessSummary& chainProcess : chain.parentChain)
             {
                 WriteTableRow(output, {
                     std::to_wstring(chainProcess.pid),
-                    ValueOr(chainProcess.name, L"(unknown)"),
-                    Core::SeverityToString(chainProcess.severity)
+                    ValueOr(chainProcess.name, L"(unknown)")
                 });
             }
             output << "\n";
-        }
-        output << "- Chain severity: " << EscapeMarkdownInline(Core::SeverityToString(chain.chainSeverity)) << "\n";
-        if (!chain.chainIndicators.empty())
-        {
-            output << "- Chain indicators:\n";
-            for (const std::wstring& indicator : chain.chainIndicators)
-            {
-                output << "  - " << EscapeMarkdownInline(indicator) << "\n";
-            }
         }
         output << "\n";
 
@@ -887,15 +1136,6 @@ namespace GlassPane::Export
             if (!identity.errorMessage.empty())
             {
                 output << "\nIdentity note: " << EscapeMarkdownInline(identity.errorMessage) << "\n";
-            }
-            if (!context.fileIdentityIndicators.empty())
-            {
-                output << "\nFile identity indicators:\n";
-                for (const Core::FileIdentityIndicator& indicator : context.fileIdentityIndicators)
-                {
-                    output << "- " << EscapeMarkdownInline(Core::SeverityToString(indicator.severity))
-                           << ": " << EscapeMarkdownInline(indicator.message) << "\n";
-                }
             }
             output << "\n";
         }
@@ -1046,44 +1286,46 @@ namespace GlassPane::Export
             WriteTableRow(output, { L"Executable regions", std::to_wstring(memory.executableRegions) });
             WriteTableRow(output, { L"Private executable regions", std::to_wstring(memory.privateExecutableRegions) });
             WriteTableRow(output, { L"RWX regions", std::to_wstring(memory.rwxRegions) });
-            WriteTableRow(output, { L"Suspicious regions", std::to_wstring(memory.suspiciousRegions) });
             WriteTableRow(output, { L"Guard regions", std::to_wstring(memory.guardRegions) });
             output << "\n";
 
-            std::vector<const Core::MemoryRegionInfo*> interestingRegions;
+            std::vector<const Core::MemoryRegionInfo*> executableContextRegions;
             for (const Core::MemoryRegionInfo& region : memory.regions)
             {
-                if (region.isSuspicious || !region.indicators.empty())
+                if (region.isExecutable || region.isGuard)
                 {
-                    interestingRegions.push_back(&region);
+                    executableContextRegions.push_back(&region);
                 }
             }
 
-            if (interestingRegions.empty())
+            if (executableContextRegions.empty())
             {
-                output << "No suspicious or indicator-bearing memory regions were observed in the loaded metadata.\n\n";
+                output << "No executable or guarded memory-region metadata was retained.\n\n";
             }
             else
             {
-                output << "Suspicious/indicator-bearing memory regions:\n\n";
-                WriteTableHeader(output, { "Base", "Size", "Type", "Protection", "Mapped File", "Indicators" });
+                output << "Executable and guarded memory-region context:\n\n";
+                WriteTableHeader(output, { "Base", "Size", "Type", "Protection", "Writable", "Executable", "Private", "Guarded", "Mapped File" });
                 constexpr std::size_t MaxMemoryRows = 40;
-                const std::size_t rowsToWrite = std::min(interestingRegions.size(), MaxMemoryRows);
+                const std::size_t rowsToWrite = std::min(executableContextRegions.size(), MaxMemoryRows);
                 for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
-                    const Core::MemoryRegionInfo& region = *interestingRegions[index];
+                    const Core::MemoryRegionInfo& region = *executableContextRegions[index];
                     WriteTableRow(output, {
                         ValueOr(region.baseAddressString, L"(unknown)"),
                         ValueOr(region.regionSizeString, L"(unknown)"),
                         ValueOr(region.typeName, L"(unknown)"),
                         ValueOr(region.protectName, L"(unknown)"),
-                        ValueOr(region.mappedFilePath, L"(none)"),
-                        JoinMemoryIndicators(region)
+                        YesNo(region.isWritable),
+                        YesNo(region.isExecutable),
+                        YesNo(region.isPrivate),
+                        YesNo(region.isGuard),
+                        ValueOr(region.mappedFilePath, L"(none)")
                     });
                 }
-                if (interestingRegions.size() > MaxMemoryRows)
+                if (executableContextRegions.size() > MaxMemoryRows)
                 {
-                    output << "\nAdditional memory rows omitted: " << (interestingRegions.size() - MaxMemoryRows) << ".\n";
+                    output << "\nAdditional memory rows omitted: " << (executableContextRegions.size() - MaxMemoryRows) << ".\n";
                 }
                 output << "\n";
             }
@@ -1204,16 +1446,6 @@ namespace GlassPane::Export
                 output << "Module status: " << EscapeMarkdownInline(modules.statusMessage) << "\n\n";
             }
 
-            if (!modules.indicators.empty())
-            {
-                output << "Module indicators:\n";
-                for (const std::wstring& indicator : modules.indicators)
-                {
-                    WriteBullet(output, indicator);
-                }
-                output << "\n";
-            }
-
             if (modules.modules.empty())
             {
                 output << "No modules returned for the selected process.\n\n";
@@ -1246,62 +1478,88 @@ namespace GlassPane::Export
                    << EscapeMarkdownInline(ValueOr(context.handles->statusMessage, L"collection did not complete"))
                    << "\n\n";
         }
-        else if (context.handles->handles.empty())
-        {
-            output << "No handles returned for this process.\n\n";
-        }
         else
         {
-            output << "- Total handles loaded: " << context.handles->handles.size() << "\n";
-            output << "- Sensitive handles: " << context.handles->sensitiveCount << "\n\n";
-            WriteTableHeader(output, { "Handle", "Type", "Target", "Access", "Sensitive", "Indicators" });
-            for (const Core::HandleInfo& handle : context.handles->handles)
+            if (context.handles->IsPartial())
             {
-                std::wstring target = handle.objectName;
-                if (target.empty() && handle.targetPid.has_value())
+                output << "- Collection status: Partial\n";
+                output << "- Retained handles: "
+                       << context.handles->handles.size() << "\n";
+                output << "- Selected-process handles reported: "
+                       << context.handles->selectedProcessHandlesMatched << "\n";
+                if (context.handles->selectedProcessHandlesOmitted != 0)
                 {
-                    target = L"PID " + std::to_wstring(handle.targetPid.value());
-                    if (!handle.targetProcessName.empty())
-                    {
-                        target += L" (" + handle.targetProcessName + L")";
-                    }
+                    output << "- Selected-process handles omitted: "
+                           << context.handles->selectedProcessHandlesOmitted
+                           << "\n";
                 }
-                std::wstring indicators;
-                for (std::size_t index = 0; index < handle.indicators.size(); ++index)
+                const std::size_t incompleteNames =
+                    context.handles->namesSkipped +
+                    context.handles->namesFailed;
+                if (incompleteNames != 0)
                 {
-                    if (index > 0)
-                    {
-                        indicators += L"; ";
-                    }
-                    indicators += handle.indicators[index];
+                    output << "- Object names skipped or unresolved: "
+                           << incompleteNames << "\n";
                 }
-
-                WriteTableRow(output, {
-                    HandleValueText(handle.handleValue),
-                    ValueOr(handle.objectType, L"(unknown)"),
-                    ValueOr(target, L"(name unavailable)"),
-                    ValueOr(handle.grantedAccess, L"(unknown)"),
-                    YesNo(handle.isSensitive),
-                    ValueOr(indicators, L"(none)")
-                });
+                output << "\nCollection limitation: "
+                       << EscapeMarkdownInline(ValueOr(
+                            context.handles->statusMessage,
+                            L"Additional handles or optional metadata may not have been evaluated because safety limits were reached."))
+                       << "\n\n";
             }
-            output << "\n";
-        }
 
-        output << "## Context Notes and Indicators\n\n";
-        output << "Process indicators:\n";
-        if (process->indicators.empty())
-        {
-            output << "- None\n";
-        }
-        else
-        {
-            for (const std::wstring& indicator : process->indicators)
+            if (context.handles->handles.empty())
             {
-                WriteBullet(output, indicator);
+                output << "No handles returned for this process.\n\n";
+            }
+            else
+            {
+                if (!context.handles->IsPartial())
+                {
+                    output << "- Total handles loaded: "
+                           << context.handles->handles.size() << "\n\n";
+                }
+                WriteTableHeader(output, { "Handle", "Type", "Target", "Access", "Decoded Access" });
+                for (const Core::HandleInfo& handle : context.handles->handles)
+                {
+                    std::wstring target = handle.objectName;
+                    if (target.empty() && handle.targetPid.has_value())
+                    {
+                        target = L"PID " + std::to_wstring(handle.targetPid.value());
+                        if (!handle.targetProcessName.empty())
+                        {
+                            target += L" (" + handle.targetProcessName + L")";
+                        }
+                    }
+                    else if (target.empty() && handle.targetThreadId.has_value())
+                    {
+                        target = L"TID " +
+                            std::to_wstring(handle.targetThreadId.value());
+                    }
+                    std::wstring decodedAccess;
+                    for (std::size_t index = 0; index < handle.decodedAccess.size(); ++index)
+                    {
+                        if (index > 0)
+                        {
+                            decodedAccess += L"; ";
+                        }
+                        decodedAccess += handle.decodedAccess[index];
+                    }
+
+                    WriteTableRow(output, {
+                        HandleValueText(handle.handleValue),
+                        ValueOr(handle.objectType, L"(unknown)"),
+                        ValueOr(target, L"(name unavailable)"),
+                        ValueOr(handle.grantedAccess, L"(unknown)"),
+                        ValueOr(decodedAccess, L"(none)")
+                    });
+                }
+                output << "\n";
             }
         }
-        output << "\nContext notes:\n";
+
+        output << "## Additional Collection Context\n\n";
+        output << "Context notes:\n";
         if (process->contextNotes.empty())
         {
             output << "- None\n";
@@ -1319,7 +1577,7 @@ namespace GlassPane::Export
         output << "- This report reflects the current GlassPane snapshot and selected-process details loaded before export.\n";
         output << "- Protected, exited, higher-integrity, or cross-architecture processes may hide paths, command lines, modules, token metadata, or handles.\n";
         output << "- Unloaded sections are explicitly marked as not loaded instead of being collected during report generation.\n";
-        output << "- Findings are evidence worth investigating, not proof of malicious activity.\n";
+        output << "- Source evidence is worth reviewing and is not proof of malicious activity.\n";
         output << "- GlassPane performs read-only inspection and does not kill, inject into, tamper with, remediate, or modify processes.\n";
 
         if (!output)
@@ -1398,10 +1656,84 @@ namespace GlassPane::Export
             return std::min<std::size_t>(MaxCompareReportRows, total);
         };
 
+        const auto nativeLimitationsText = [](
+            const std::vector<std::string>& limitations) {
+            std::vector<std::string> canonical = limitations;
+            std::sort(canonical.begin(), canonical.end());
+            canonical.erase(
+                std::unique(canonical.begin(), canonical.end()),
+                canonical.end());
+            if (canonical.empty())
+            {
+                return std::wstring(L"None");
+            }
+            std::wstringstream text;
+            for (std::size_t index = 0; index < canonical.size(); ++index)
+            {
+                if (index != 0)
+                {
+                    text << L"; ";
+                }
+                text << Utf8ToWide(canonical[index]);
+            }
+            return text.str();
+        };
+
+        const auto writeNativeEvidenceRows =
+            [&output,
+             &writeTruncationNote,
+             &cappedCount,
+             &nativeLimitationsText](
+                const std::vector<Core::NativeSourceEvidenceRecord>& records,
+                const wchar_t* observation) {
+                WriteTableHeader(output, {
+                    "Observation",
+                    "Stable Rule",
+                    "Domain",
+                    "Disposition",
+                    "Artifact Family",
+                    "Contributed",
+                    "Collection Limitation",
+                    "Limitations"
+                });
+                const std::size_t rowsToWrite = cappedCount(records.size());
+                for (std::size_t index = 0; index < rowsToWrite; ++index)
+                {
+                    const Core::NativeSourceEvidenceRecord& record =
+                        records[index];
+                    WriteTableRow(output, {
+                        observation,
+                        ValueOr(
+                            Utf8ToWide(record.stableRuleId),
+                            L"(missing)"),
+                        Utf8ToWide(
+                            Core::EvidenceDomainDisplayText(record.domain)),
+                        Utf8ToWide(
+                            Core::ObservationDispositionDisplayText(
+                                record.disposition)),
+                        ValueOr(
+                            Utf8ToWide(record.artifactFamily),
+                            L"(none)"),
+                        YesNo(record.contributedToVerdict),
+                        YesNo(record.collectionLimitation),
+                        nativeLimitationsText(record.limitations)
+                    });
+                }
+                writeTruncationNote(rowsToWrite, records.size());
+                output << "\n";
+            };
+
         const auto writeProcessRows = [&output, &writeTruncationNote, &cappedCount](
             const std::vector<Core::SnapshotProcessRecord>& records,
             const wchar_t* observation) {
-            WriteTableHeader(output, { "Observation", "Process", "PID", "PPID", "Severity", "Path" });
+            WriteTableHeader(output, {
+                "Observation",
+                "Process",
+                "PID",
+                "PPID",
+                "Authoritative Triage",
+                "Path"
+            });
             const std::size_t rowsToWrite = cappedCount(records.size());
             for (std::size_t index = 0; index < rowsToWrite; ++index)
             {
@@ -1411,7 +1743,14 @@ namespace GlassPane::Export
                     ValueOr(process.processName, L"(unknown)"),
                     std::to_wstring(process.pid),
                     std::to_wstring(process.parentPid),
-                    Core::SeverityToString(process.severity),
+                    process.authoritativeTriage.captured
+                        ? Utf8ToWide(
+                            Core::TriageVerdictDisplayText(
+                                process.authoritativeTriage.authoritativeVerdict) +
+                            " - " +
+                            Core::PersistedTriageAnalysisLevelDisplayText(
+                                process.authoritativeTriage.analysisLevel))
+                        : std::wstring(L"Not captured"),
                     ValueOr(process.executablePath, L"(unavailable)")
                 });
             }
@@ -1436,12 +1775,85 @@ namespace GlassPane::Export
         WriteTableRow(output, { L"New network connections", result.networkCompared ? std::to_wstring(result.newNetworkConnections.size()) : L"Unavailable" });
         WriteTableRow(output, { L"Closed network connections", result.networkCompared ? std::to_wstring(result.closedNetworkConnections.size()) : L"Unavailable" });
         WriteTableRow(output, {
-            L"Finding changes",
+            L"Baseline source-evidence model",
+            Core::SnapshotSourceEvidenceModelKindDisplayText(
+                result.baselineSourceEvidenceModelKind)
+        });
+        WriteTableRow(output, {
+            L"Current source-evidence model",
+            Core::SnapshotSourceEvidenceModelKindDisplayText(
+                result.currentSourceEvidenceModelKind)
+        });
+        WriteTableRow(output, {
+            L"Selected native source evidence changes",
+            result.sourceEvidenceModelMismatch
+                ? L"Model mismatch"
+                : result.nativeSourceEvidenceCompared
+                    ? std::to_wstring(
+                        result.selectedNativeEvidence.newRecords.size() +
+                        result.selectedNativeEvidence.removedRecords.size() +
+                        result.selectedNativeEvidence.changedRecords.size())
+                    : L"Unavailable"
+        });
+        WriteTableRow(output, {
+            L"Historical legacy source evidence changes",
             result.findingsCompared
                 ? std::to_wstring(result.newFindings.size() + result.removedFindings.size() + result.changedFindings.size())
-                : L"Unavailable"
+                : L"Not compared"
+        });
+        WriteTableRow(output, {
+            L"Baseline processes with captured authoritative triage",
+            std::to_wstring(result.baselineTriageCapturedProcessCount)
+        });
+        WriteTableRow(output, {
+            L"Current processes with captured authoritative triage",
+            std::to_wstring(result.currentTriageCapturedProcessCount)
+        });
+        WriteTableRow(output, {
+            L"Comparable authoritative triage records",
+            std::to_wstring(result.comparableTriageProcessCount)
+        });
+        WriteTableRow(output, {
+            L"Authoritative triage identities unavailable",
+            std::to_wstring(result.triageIdentityUnavailableCount)
+        });
+        WriteTableRow(output, {
+            L"Authoritative triage availability changes",
+            std::to_wstring(result.triageAvailabilityMismatchCount)
+        });
+        WriteTableRow(output, {
+            L"Selected-process authoritative triage changes",
+            std::to_wstring(result.selectedTriage.fields.size())
         });
         output << "\n";
+
+        output << "## Selected Process Authoritative Triage Changes\n\n";
+        if (result.selectedTriage.fields.empty())
+        {
+            if (result.selectedTriage.baseline.has_value() !=
+                result.selectedTriage.current.has_value())
+            {
+                output << "Selected-process authoritative triage was captured on only one side.\n\n";
+            }
+            else
+            {
+                output << "No safely comparable selected-process authoritative triage changes were observed.\n\n";
+            }
+        }
+        else
+        {
+            WriteTableHeader(output, { "Field", "Baseline", "Current" });
+            for (const Core::SnapshotChangedField& field :
+                result.selectedTriage.fields)
+            {
+                WriteTableRow(output, {
+                    field.field,
+                    field.baselineValue,
+                    field.currentValue
+                });
+            }
+            output << "\n";
+        }
 
         output << "## New Processes\n\n";
         if (result.newProcesses.empty())
@@ -1560,28 +1972,132 @@ namespace GlassPane::Export
             }
         }
 
-        output << "## Finding Changes\n\n";
+        output << "## Selected Native Source Evidence Changes\n\n";
+        if (result.sourceEvidenceModelMismatch)
+        {
+            output << "The captures use different source-evidence models. Native and historical records were kept separate and were not title-matched.\n\n";
+        }
+        else if (result.nativeSourceEvidenceModelVersionMismatch)
+        {
+            output << "Native source-evidence model versions differ, so selected records were not semantically compared.\n\n";
+        }
+        else if (result.baselineSourceEvidenceModelKind !=
+            Core::SnapshotSourceEvidenceModelKind::Native)
+        {
+            output << "Not applicable because these captures do not both use the native source-evidence model.\n\n";
+        }
+        else if (result.selectedNativeEvidence.availabilityMismatch)
+        {
+            output << "Selected native source evidence was captured on only one side and was not semantically compared.\n\n";
+        }
+        else if (!result.selectedNativeEvidence.semanticCompared)
+        {
+            output << "No safely identified selected-process native source-evidence pair was available for semantic comparison.\n\n";
+        }
+        else if (result.selectedNativeEvidence.newRecords.empty() &&
+            result.selectedNativeEvidence.removedRecords.empty() &&
+            result.selectedNativeEvidence.changedRecords.empty())
+        {
+            output << "No semantic selected-process native source-evidence changes were observed. Presentation-only title, summary, detail, provenance, strength, and confidence changes do not affect this comparison.\n\n";
+        }
+        else
+        {
+            if (!result.selectedNativeEvidence.newRecords.empty())
+            {
+                output << "### Native Evidence Appeared\n\n";
+                writeNativeEvidenceRows(
+                    result.selectedNativeEvidence.newRecords,
+                    L"Appeared");
+            }
+
+            if (!result.selectedNativeEvidence.changedRecords.empty())
+            {
+                output << "### Native Evidence Changed\n\n";
+                WriteTableHeader(output, {
+                    "Stable Rule",
+                    "Domain",
+                    "Disposition",
+                    "Artifact Family",
+                    "Field",
+                    "Baseline",
+                    "Current"
+                });
+                std::size_t writtenRows = 0;
+                for (const Core::SnapshotNativeSourceEvidenceChange& change :
+                     result.selectedNativeEvidence.changedRecords)
+                {
+                    for (const Core::SnapshotChangedField& field :
+                         change.fields)
+                    {
+                        if (writtenRows >= MaxCompareReportRows)
+                        {
+                            break;
+                        }
+                        WriteTableRow(output, {
+                            ValueOr(
+                                Utf8ToWide(change.current.stableRuleId),
+                                L"(missing)"),
+                            Utf8ToWide(
+                                Core::EvidenceDomainDisplayText(
+                                    change.current.domain)),
+                            Utf8ToWide(
+                                Core::ObservationDispositionDisplayText(
+                                    change.current.disposition)),
+                            ValueOr(
+                                Utf8ToWide(change.current.artifactFamily),
+                                L"(none)"),
+                            field.field,
+                            field.baselineValue,
+                            field.currentValue
+                        });
+                        ++writtenRows;
+                    }
+                    if (writtenRows >= MaxCompareReportRows)
+                    {
+                        break;
+                    }
+                }
+                std::size_t totalRows = 0;
+                for (const Core::SnapshotNativeSourceEvidenceChange& change :
+                     result.selectedNativeEvidence.changedRecords)
+                {
+                    totalRows += change.fields.size();
+                }
+                writeTruncationNote(writtenRows, totalRows);
+                output << "\n";
+            }
+
+            if (!result.selectedNativeEvidence.removedRecords.empty())
+            {
+                output << "### Native Evidence Removed\n\n";
+                writeNativeEvidenceRows(
+                    result.selectedNativeEvidence.removedRecords,
+                    L"Removed");
+            }
+        }
+
+        output << "## Historical Legacy Source Evidence Changes\n\n";
         if (!result.findingsCompared)
         {
-            output << "Finding comparison unavailable because finding summaries were not captured for both snapshots.\n\n";
+            output << "Historical legacy source evidence was not compared. This section is used only when both captures retain the historical model.\n\n";
         }
         else if (result.newFindings.empty() && result.removedFindings.empty() && result.changedFindings.empty())
         {
-            output << "No finding or process indicator changes were observed.\n\n";
+            output << "No historical legacy source-finding or process-indicator changes were observed.\n\n";
         }
         else
         {
             if (!result.newFindings.empty())
             {
-                output << "### New Findings\n\n";
-                WriteTableHeader(output, { "Observation", "Severity", "Process", "PID", "Finding", "Category" });
+                output << "### New Historical Legacy Source Findings\n\n";
+                WriteTableHeader(output, { "Observation", "Historical Legacy Source Severity", "Process", "PID", "Source Finding", "Category" });
                 const std::size_t rowsToWrite = cappedCount(result.newFindings.size());
                 for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
                     const Core::SnapshotFindingRecord& finding = result.newFindings[index];
                     WriteTableRow(output, {
-                        L"Finding changed",
-                        Core::FindingSeverityToString(finding.severity),
+                        L"Historical legacy source finding appeared",
+                        Core::SnapshotFindingSeverityText(finding),
                         ValueOr(finding.processName, L"(unknown)"),
                         std::to_wstring(finding.pid),
                         ValueOr(finding.title, L"(untitled)"),
@@ -1594,8 +2110,8 @@ namespace GlassPane::Export
 
             if (!result.changedFindings.empty())
             {
-                output << "### Changed Findings\n\n";
-                WriteTableHeader(output, { "Process", "PID", "Finding", "Baseline Severity", "Current Severity" });
+                output << "### Changed Historical Legacy Source Findings\n\n";
+                WriteTableHeader(output, { "Process", "PID", "Source Finding", "Baseline Historical Legacy Source Severity", "Current Historical Legacy Source Severity" });
                 const std::size_t rowsToWrite = cappedCount(result.changedFindings.size());
                 for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
@@ -1604,8 +2120,8 @@ namespace GlassPane::Export
                         ValueOr(change.current.processName, L"(unknown)"),
                         std::to_wstring(change.current.pid),
                         ValueOr(change.current.title, L"(untitled)"),
-                        Core::FindingSeverityToString(change.baseline.severity),
-                        Core::FindingSeverityToString(change.current.severity)
+                        Core::SnapshotFindingSeverityText(change.baseline),
+                        Core::SnapshotFindingSeverityText(change.current)
                     });
                 }
                 writeTruncationNote(rowsToWrite, result.changedFindings.size());
@@ -1614,15 +2130,15 @@ namespace GlassPane::Export
 
             if (!result.removedFindings.empty())
             {
-                output << "### Removed Findings\n\n";
-                WriteTableHeader(output, { "Observation", "Severity", "Process", "PID", "Finding", "Category" });
+                output << "### Removed Historical Legacy Source Findings\n\n";
+                WriteTableHeader(output, { "Observation", "Historical Legacy Source Severity", "Process", "PID", "Source Finding", "Category" });
                 const std::size_t rowsToWrite = cappedCount(result.removedFindings.size());
                 for (std::size_t index = 0; index < rowsToWrite; ++index)
                 {
                     const Core::SnapshotFindingRecord& finding = result.removedFindings[index];
                     WriteTableRow(output, {
-                        L"Finding changed",
-                        Core::FindingSeverityToString(finding.severity),
+                        L"Historical legacy source finding removed",
+                        Core::SnapshotFindingSeverityText(finding),
                         ValueOr(finding.processName, L"(unknown)"),
                         std::to_wstring(finding.pid),
                         ValueOr(finding.title, L"(untitled)"),
@@ -1646,7 +2162,7 @@ namespace GlassPane::Export
                 WriteBullet(output, note);
             }
         }
-        output << "- Snapshot compare is local and in-memory for this preview build.\n";
+        output << "- Snapshot compare is local and in-memory.\n";
         output << "- New or changed evidence is context worth reviewing, not proof of malicious activity.\n";
         output << "- GlassPane performs read-only inspection and does not kill, inject into, tamper with, remediate, or modify processes.\n";
 

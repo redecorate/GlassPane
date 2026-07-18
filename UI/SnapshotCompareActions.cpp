@@ -2,13 +2,56 @@
 
 // This implementation file is included from ImGuiApp.cpp inside the private ImGuiApp class definition.
 // Snapshot Compare state, snapshot ownership, timings, and logs remain owned by ImGuiApp.
-        Core::ProcessSnapshotCapture CaptureSnapshotForCompare() const
+        Core::ProcessSnapshotCapture CaptureSnapshotForCompare()
         {
+            if (!loadedSnapshotActive_)
+            {
+                SynchronizeNativeObservationEngineForCurrentEvidence();
+            }
+            const Core::PersistedTriageContext triageContext =
+                CaptureAuthoritativeTriageContext();
+            Core::SnapshotSourceEvidenceCaptureContext sourceEvidenceContext;
+            sourceEvidenceContext.modelKind = UsesHistoricalSourceEvidence()
+                ? Core::SnapshotSourceEvidenceModelKind::HistoricalLegacy
+                : Core::SnapshotSourceEvidenceModelKind::Native;
+            if (sourceEvidenceContext.modelKind ==
+                Core::SnapshotSourceEvidenceModelKind::Native)
+            {
+                const Export::SavedNativeSourceEvidenceContext nativeContext =
+                    CaptureNativeSourceEvidenceContext();
+                sourceEvidenceContext.nativeModelVersion =
+                    nativeContext.modelVersion;
+                if (nativeContext.selectedRecord.has_value())
+                {
+                    const Export::SavedNativeSourceEvidenceRecord& selected =
+                        *nativeContext.selectedRecord;
+                    Core::SnapshotSelectedNativeSourceEvidenceRecord capture;
+                    capture.processKey = {
+                        selected.identity.pid,
+                        selected.identity.hasCreationTime,
+                        selected.identity.creationTimeFileTime
+                    };
+                    capture.pid = selected.identity.pid;
+                    if (const Core::ProcessInfo* process =
+                            Core::FindProcessByPid(
+                                snapshot_,
+                                selected.identity.pid);
+                        process != nullptr)
+                    {
+                        capture.processName = process->name;
+                    }
+                    capture.records = selected.records;
+                    sourceEvidenceContext.selectedNativeEvidence =
+                        std::move(capture);
+                }
+            }
             return Core::CaptureProcessSnapshotForCompare(
                 snapshot_,
                 networkLoaded_ ? &networkSnapshot_ : nullptr,
                 networkLoaded_,
-                LocalTimestamp());
+                LocalTimestamp(),
+                &triageContext,
+                &sourceEvidenceContext);
         }
 
         void ComputeSnapshotCompare()
@@ -98,7 +141,16 @@
                 compareResult_.closedNetworkConnections.empty() &&
                 compareResult_.newFindings.empty() &&
                 compareResult_.removedFindings.empty() &&
-                compareResult_.changedFindings.empty();
+                compareResult_.changedFindings.empty() &&
+                compareResult_.selectedNativeEvidence.newRecords.empty() &&
+                compareResult_.selectedNativeEvidence.removedRecords.empty() &&
+                compareResult_.selectedNativeEvidence.changedRecords.empty() &&
+                !compareResult_.sourceEvidenceModelMismatch &&
+                !compareResult_.nativeSourceEvidenceModelVersionMismatch &&
+                !compareResult_.selectedNativeEvidence.availabilityMismatch &&
+                compareResult_.triageAvailabilityMismatchCount == 0 &&
+                compareResult_.selectedTriage.fields.empty() &&
+                !compareResult_.selectedTriage.availabilityMismatch;
         }
 
         std::wstring CompareEndpointText(const Core::SnapshotNetworkEndpoint& endpoint, bool remote) const
@@ -125,7 +177,12 @@
                 return false;
             }
 
-            if (key.hasCreationTime && currentProcess.hasCreationTime)
+            if (key.hasCreationTime != currentProcess.hasCreationTime)
+            {
+                return false;
+            }
+
+            if (key.hasCreationTime)
             {
                 return key.creationTimeFileTime == currentProcess.creationTimeFileTime;
             }
@@ -208,6 +265,10 @@
                 result.newFindings.size() +
                 result.removedFindings.size() +
                 result.changedFindings.size();
+            const std::size_t nativeEvidenceChanges =
+                result.selectedNativeEvidence.newRecords.size() +
+                result.selectedNativeEvidence.removedRecords.size() +
+                result.selectedNativeEvidence.changedRecords.size();
 
             text << L"Summary:\r\n";
             text << L"- Baseline processes: " << baseline.processes.size() << L"\r\n";
@@ -219,8 +280,42 @@
                 << (result.networkCompared ? std::to_wstring(result.newNetworkConnections.size()) : L"Unavailable") << L"\r\n";
             text << L"- Closed network connections: "
                 << (result.networkCompared ? std::to_wstring(result.closedNetworkConnections.size()) : L"Unavailable") << L"\r\n";
-            text << L"- Finding changes: "
-                << (result.findingsCompared ? std::to_wstring(findingChanges) : L"Unavailable") << L"\r\n\r\n";
+            text << L"- Baseline source-evidence model: "
+                << Core::SnapshotSourceEvidenceModelKindDisplayText(
+                    result.baselineSourceEvidenceModelKind) << L"\r\n";
+            text << L"- Current source-evidence model: "
+                << Core::SnapshotSourceEvidenceModelKindDisplayText(
+                    result.currentSourceEvidenceModelKind) << L"\r\n";
+            text << L"- Selected native source evidence changes: ";
+            if (result.sourceEvidenceModelMismatch)
+            {
+                text << L"Model mismatch";
+            }
+            else if (result.nativeSourceEvidenceCompared)
+            {
+                text << nativeEvidenceChanges;
+            }
+            else
+            {
+                text << L"Unavailable";
+            }
+            text << L"\r\n";
+            text << L"- Historical legacy source evidence changes: "
+                << (result.findingsCompared
+                    ? std::to_wstring(findingChanges)
+                    : L"Not compared") << L"\r\n\r\n";
+            text << L"- Baseline processes with captured authoritative triage: "
+                << result.baselineTriageCapturedProcessCount << L"\r\n";
+            text << L"- Current processes with captured authoritative triage: "
+                << result.currentTriageCapturedProcessCount << L"\r\n";
+            text << L"- Comparable authoritative triage records: "
+                << result.comparableTriageProcessCount << L"\r\n";
+            text << L"- Authoritative triage identities unavailable: "
+                << result.triageIdentityUnavailableCount << L"\r\n";
+            text << L"- Authoritative triage availability changes: "
+                << result.triageAvailabilityMismatchCount << L"\r\n\r\n";
+            text << L"- Selected-process authoritative triage changes: "
+                << result.selectedTriage.fields.size() << L"\r\n\r\n";
 
             if (result.newProcesses.empty() &&
                 result.exitedProcesses.empty() &&
@@ -229,7 +324,14 @@
                 result.closedNetworkConnections.empty() &&
                 result.newFindings.empty() &&
                 result.removedFindings.empty() &&
-                result.changedFindings.empty())
+                result.changedFindings.empty() &&
+                result.selectedNativeEvidence.newRecords.empty() &&
+                result.selectedNativeEvidence.removedRecords.empty() &&
+                result.selectedNativeEvidence.changedRecords.empty() &&
+                !result.sourceEvidenceModelMismatch &&
+                !result.nativeSourceEvidenceModelVersionMismatch &&
+                !result.selectedNativeEvidence.availabilityMismatch &&
+                result.selectedTriage.fields.empty())
             {
                 text << L"Notable changes:\r\n";
                 text << L"- No meaningful differences found.\r\n\r\n";
@@ -305,14 +407,97 @@
                     for (std::size_t index = 0; index < newFindingCount; ++index)
                     {
                         const Core::SnapshotFindingRecord& finding = result.newFindings[index];
-                        text << L"- New finding: "
-                            << Core::FindingSeverityToString(finding.severity)
+                        text << L"- New historical legacy source finding: "
+                            << Core::SnapshotFindingSeverityText(finding)
                             << L" "
                             << (finding.title.empty() ? L"(untitled)" : finding.title)
                             << L" (PID " << finding.pid << L")\r\n";
                     }
                     appendTruncation(result.newFindings.size());
                 }
+
+                const auto appendNativeRecord =
+                    [&text](
+                        const wchar_t* observation,
+                        const Core::NativeSourceEvidenceRecord& record) {
+                        text << L"- " << observation << L": "
+                            << Utf8ToWide(record.stableRuleId.c_str())
+                            << L" ["
+                            << Utf8ToWide(
+                                Core::EvidenceDomainDisplayText(
+                                    record.domain).c_str())
+                            << L" / "
+                            << Utf8ToWide(
+                                Core::ObservationDispositionDisplayText(
+                                    record.disposition).c_str())
+                            << L"]";
+                        if (!record.artifactFamily.empty())
+                        {
+                            text << L" artifact-family="
+                                << Utf8ToWide(
+                                    record.artifactFamily.c_str());
+                        }
+                        text << L"\r\n";
+                    };
+                const std::size_t newNativeCount = (std::min)(
+                    MaxNotableItemsPerSection,
+                    result.selectedNativeEvidence.newRecords.size());
+                for (std::size_t index = 0;
+                    index < newNativeCount;
+                    ++index)
+                {
+                    appendNativeRecord(
+                        L"Native source evidence appeared",
+                        result.selectedNativeEvidence.newRecords[index]);
+                }
+                appendTruncation(
+                    result.selectedNativeEvidence.newRecords.size());
+
+                const std::size_t changedNativeCount = (std::min)(
+                    MaxNotableItemsPerSection,
+                    result.selectedNativeEvidence.changedRecords.size());
+                for (std::size_t index = 0;
+                    index < changedNativeCount;
+                    ++index)
+                {
+                    const Core::SnapshotNativeSourceEvidenceChange& change =
+                        result.selectedNativeEvidence.changedRecords[index];
+                    appendNativeRecord(
+                        L"Native source evidence changed",
+                        change.current);
+                }
+                appendTruncation(
+                    result.selectedNativeEvidence.changedRecords.size());
+
+                const std::size_t removedNativeCount = (std::min)(
+                    MaxNotableItemsPerSection,
+                    result.selectedNativeEvidence.removedRecords.size());
+                for (std::size_t index = 0;
+                    index < removedNativeCount;
+                    ++index)
+                {
+                    appendNativeRecord(
+                        L"Native source evidence removed",
+                        result.selectedNativeEvidence.removedRecords[index]);
+                }
+                appendTruncation(
+                    result.selectedNativeEvidence.removedRecords.size());
+
+                const std::size_t selectedTriageFieldCount =
+                    std::min(
+                        MaxNotableItemsPerSection,
+                        result.selectedTriage.fields.size());
+                for (std::size_t index = 0;
+                    index < selectedTriageFieldCount;
+                    ++index)
+                {
+                    const Core::SnapshotChangedField& field =
+                        result.selectedTriage.fields[index];
+                    text << L"- Selected-process " << field.field
+                        << L": " << field.baselineValue
+                        << L" -> " << field.currentValue << L"\r\n";
+                }
+                appendTruncation(result.selectedTriage.fields.size());
 
                 text << L"\r\n";
             }
@@ -322,9 +507,21 @@
             {
                 text << L"- Network comparison unavailable because network data was not loaded for both snapshots.\r\n";
             }
-            if (!result.findingsCompared)
+            if (result.sourceEvidenceModelMismatch)
             {
-                text << L"- Finding comparison unavailable for one or both snapshots.\r\n";
+                text << L"- Native and historical source evidence use different models and were not title-matched.\r\n";
+            }
+            else if (!result.sourceEvidenceCompared)
+            {
+                text << L"- Source-evidence comparison unavailable for one or both snapshots.\r\n";
+            }
+            if (result.baselineSourceEvidenceModelKind ==
+                    Core::SnapshotSourceEvidenceModelKind::HistoricalLegacy &&
+                result.currentSourceEvidenceModelKind ==
+                    Core::SnapshotSourceEvidenceModelKind::HistoricalLegacy &&
+                !result.findingsCompared)
+            {
+                text << L"- Historical legacy source-evidence comparison unavailable for one or both snapshots.\r\n";
             }
             text << L"Snapshot differences are evidence worth reviewing, not proof of malicious activity.\r\n";
             return text.str();

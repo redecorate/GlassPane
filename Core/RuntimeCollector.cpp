@@ -434,10 +434,6 @@ namespace GlassPane::Core
             runtime.architecture = process.architecture.empty() ? L"Unknown" : process.architecture;
         }
 
-        bool HasSingleBit(std::uint64_t value)
-        {
-            return value != 0 && (value & (value - 1)) == 0;
-        }
     }
 
     RuntimeInfo CollectProcessRuntimeInfo(const ProcessInfo& process)
@@ -478,10 +474,6 @@ namespace GlassPane::Core
             runtime.systemAffinityMask = static_cast<std::uint64_t>(systemAffinity);
             runtime.affinityMaskString =
                 HexMask(runtime.processAffinityMask) + L" / system " + HexMask(runtime.systemAffinityMask);
-            if (HasSingleBit(runtime.processAffinityMask))
-            {
-                runtime.contextNotes.push_back(L"Process affinity is constrained to a single logical processor.");
-            }
         }
         else
         {

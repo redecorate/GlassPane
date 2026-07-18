@@ -36,27 +36,26 @@ namespace GlassPane::UI
         std::function<void()> onSave;
     };
 
-    struct IndicatorItemView
+    struct SourceEvidenceItemView
     {
-        std::wstring text;
-        bool hasSeverity = false;
-        std::string severityLabel;
-        ImVec4 severityColor = ImVec4(0.65f, 0.70f, 0.78f, 1.0f);
+        std::wstring title;
+        std::wstring summary;
+        std::string metadata;
+        std::string role;
     };
 
-    struct IndicatorsPanelContext
+    struct SourceEvidencePanelContext
     {
         bool hasSelectedProcess = false;
-        std::vector<IndicatorItemView> processIndicators;
-        std::vector<std::wstring> chainIndicators;
-        std::vector<std::wstring> moduleIndicators;
+        bool historical = false;
+        std::vector<SourceEvidenceItemView> records;
         std::string compareSummary;
     };
 
-    struct LogsAndIndicatorsPanelContext
+    struct LogsAndEvidencePanelContext
     {
         LogsPanelContext logs;
-        IndicatorsPanelContext indicators;
+        SourceEvidencePanelContext evidence;
     };
 
     struct AppStatusBarContext
@@ -72,7 +71,7 @@ namespace GlassPane::UI
     };
 
     void RenderLogsPanelContent(const LogsPanelContext& context);
-    void RenderIndicatorsPanelContent(const IndicatorsPanelContext& context);
-    void RenderLogsAndIndicatorsPanel(const LogsAndIndicatorsPanelContext& context);
+    void RenderSourceEvidencePanelContent(const SourceEvidencePanelContext& context);
+    void RenderLogsAndEvidencePanel(const LogsAndEvidencePanelContext& context);
     void RenderAppStatusBar(const AppStatusBarContext& context);
 }

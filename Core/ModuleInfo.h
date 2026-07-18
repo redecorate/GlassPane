@@ -15,6 +15,7 @@ namespace GlassPane::Core
         std::wstring baseAddress;
         std::uint32_t sizeBytes = 0;
         bool readable = false;
+        // Schema 1-4 historical compatibility metadata only.
         std::vector<std::wstring> indicators;
     };
 
@@ -24,6 +25,7 @@ namespace GlassPane::Core
         bool success = false;
         std::wstring statusMessage;
         std::vector<ModuleInfo> modules;
+        // Schema 1-4 historical compatibility metadata only.
         std::vector<std::wstring> indicators;
     };
 }

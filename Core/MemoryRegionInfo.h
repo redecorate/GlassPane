@@ -31,7 +31,6 @@ namespace GlassPane::Core
         bool isPrivate = false;
         bool isImage = false;
         bool isMapped = false;
-        bool isSuspicious = false;
         std::vector<std::wstring> indicators;
     };
 
@@ -44,7 +43,6 @@ namespace GlassPane::Core
         std::size_t executableRegions = 0;
         std::size_t privateExecutableRegions = 0;
         std::size_t rwxRegions = 0;
-        std::size_t suspiciousRegions = 0;
         std::size_t guardRegions = 0;
         std::vector<MemoryRegionInfo> regions;
     };

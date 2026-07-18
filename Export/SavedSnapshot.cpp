@@ -84,33 +84,44 @@ namespace GlassPane::Export
             return result;
         }
 
-        std::wstring Utf8ToWide(const char* value, std::size_t length)
+        bool TryUtf8ToWide(
+            const char* value,
+            std::size_t length,
+            std::wstring& result)
         {
             if (value == nullptr || length == 0)
             {
-                return {};
+                result.clear();
+                return value != nullptr || length == 0;
             }
 
             const int required = MultiByteToWideChar(
                 CP_UTF8,
-                0,
+                MB_ERR_INVALID_CHARS,
                 value,
                 static_cast<int>(length),
                 nullptr,
                 0);
             if (required <= 0)
             {
-                return {};
+                result.clear();
+                return false;
             }
 
-            std::wstring result(static_cast<std::size_t>(required), L'\0');
-            MultiByteToWideChar(
+            result.assign(static_cast<std::size_t>(required), L'\0');
+            return MultiByteToWideChar(
                 CP_UTF8,
-                0,
+                MB_ERR_INVALID_CHARS,
                 value,
                 static_cast<int>(length),
                 result.data(),
-                required);
+                required) == required;
+        }
+
+        std::wstring Utf8ToWide(const char* value, std::size_t length)
+        {
+            std::wstring result;
+            TryUtf8ToWide(value, length, result);
             return result;
         }
 
@@ -206,9 +217,16 @@ namespace GlassPane::Export
                 bytes.push_back(static_cast<char>(0xc0 | ((codepoint >> 6) & 0x1f)));
                 bytes.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
             }
-            else
+            else if (codepoint <= 0xffff)
             {
                 bytes.push_back(static_cast<char>(0xe0 | ((codepoint >> 12) & 0x0f)));
+                bytes.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+                bytes.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+            }
+            else
+            {
+                bytes.push_back(static_cast<char>(0xf0 | ((codepoint >> 18) & 0x07)));
+                bytes.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
                 bytes.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
                 bytes.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
             }
@@ -238,6 +256,38 @@ namespace GlassPane::Export
                 return Core::Severity::Info;
             }
             return Core::Severity::None;
+        }
+
+        bool TryParseSeverity(
+            const std::wstring& value,
+            Core::Severity& severity)
+        {
+            if (value == L"High")
+            {
+                severity = Core::Severity::High;
+                return true;
+            }
+            if (value == L"Medium")
+            {
+                severity = Core::Severity::Medium;
+                return true;
+            }
+            if (value == L"Low")
+            {
+                severity = Core::Severity::Low;
+                return true;
+            }
+            if (value == L"Info")
+            {
+                severity = Core::Severity::Info;
+                return true;
+            }
+            if (value == L"None")
+            {
+                severity = Core::Severity::None;
+                return true;
+            }
+            return false;
         }
 
         std::wstring UInt64String(std::uint64_t value)
@@ -412,7 +462,14 @@ namespace GlassPane::Export
                     {
                         return false;
                     }
-                    value.objectValue[std::move(key)] = std::move(member);
+                    const auto inserted = value.objectValue.emplace(
+                        std::move(key),
+                        std::move(member));
+                    if (!inserted.second)
+                    {
+                        error = L"Duplicate key in saved snapshot object.";
+                        return false;
+                    }
 
                     SkipWhitespace();
                     if (position_ >= text_.size())
@@ -499,11 +556,20 @@ namespace GlassPane::Export
                     const char ch = text_[position_++];
                     if (ch == '"')
                     {
-                        value = Utf8ToWide(bytes.data(), bytes.size());
+                        if (!TryUtf8ToWide(bytes.data(), bytes.size(), value))
+                        {
+                            error = L"Invalid UTF-8 in saved snapshot string.";
+                            return false;
+                        }
                         return true;
                     }
                     if (ch != '\\')
                     {
+                        if (static_cast<unsigned char>(ch) < 0x20)
+                        {
+                            error = L"Unescaped control character in saved snapshot string.";
+                            return false;
+                        }
                         bytes.push_back(ch);
                         continue;
                     }
@@ -537,33 +603,74 @@ namespace GlassPane::Export
                         break;
                     case 'u':
                     {
-                        if (position_ + 4 > text_.size())
+                        const auto parseHexQuad = [this](
+                            unsigned int& codeUnit,
+                            std::wstring& parseError)
                         {
-                            error = L"Unexpected end of file while reading saved snapshot unicode escape.";
-                            return false;
-                        }
-                        unsigned int codepoint = 0;
-                        for (int index = 0; index < 4; ++index)
-                        {
-                            const char hex = text_[position_++];
-                            codepoint <<= 4;
-                            if (hex >= '0' && hex <= '9')
+                            if (position_ + 4 > text_.size())
                             {
-                                codepoint += static_cast<unsigned int>(hex - '0');
-                            }
-                            else if (hex >= 'a' && hex <= 'f')
-                            {
-                                codepoint += static_cast<unsigned int>(hex - 'a' + 10);
-                            }
-                            else if (hex >= 'A' && hex <= 'F')
-                            {
-                                codepoint += static_cast<unsigned int>(hex - 'A' + 10);
-                            }
-                            else
-                            {
-                                error = L"Invalid unicode escape in saved snapshot.";
+                                parseError = L"Unexpected end of file while reading saved snapshot unicode escape.";
                                 return false;
                             }
+                            codeUnit = 0;
+                            for (int index = 0; index < 4; ++index)
+                            {
+                                const char hex = text_[position_++];
+                                codeUnit <<= 4;
+                                if (hex >= '0' && hex <= '9')
+                                {
+                                    codeUnit += static_cast<unsigned int>(hex - '0');
+                                }
+                                else if (hex >= 'a' && hex <= 'f')
+                                {
+                                    codeUnit += static_cast<unsigned int>(hex - 'a' + 10);
+                                }
+                                else if (hex >= 'A' && hex <= 'F')
+                                {
+                                    codeUnit += static_cast<unsigned int>(hex - 'A' + 10);
+                                }
+                                else
+                                {
+                                    parseError = L"Invalid unicode escape in saved snapshot.";
+                                    return false;
+                                }
+                            }
+                            return true;
+                        };
+
+                        unsigned int codepoint = 0;
+                        if (!parseHexQuad(codepoint, error))
+                        {
+                            return false;
+                        }
+                        if (codepoint >= 0xd800 && codepoint <= 0xdbff)
+                        {
+                            if (position_ + 2 > text_.size() ||
+                                text_[position_] != '\\' ||
+                                text_[position_ + 1] != 'u')
+                            {
+                                error = L"High surrogate in saved snapshot string is not followed by a low surrogate.";
+                                return false;
+                            }
+                            position_ += 2;
+                            unsigned int low = 0;
+                            if (!parseHexQuad(low, error))
+                            {
+                                return false;
+                            }
+                            if (low < 0xdc00 || low > 0xdfff)
+                            {
+                                error = L"Invalid low surrogate in saved snapshot string.";
+                                return false;
+                            }
+                            codepoint = 0x10000 +
+                                ((codepoint - 0xd800) << 10) +
+                                (low - 0xdc00);
+                        }
+                        else if (codepoint >= 0xdc00 && codepoint <= 0xdfff)
+                        {
+                            error = L"Unexpected low surrogate in saved snapshot string.";
+                            return false;
                         }
                         AppendCodepointUtf8(bytes, codepoint);
                         break;
@@ -730,6 +837,295 @@ namespace GlassPane::Export
                 }
             }
             return values;
+        }
+
+        const char* PersistedAnalysisLevelToken(
+            Core::PersistedTriageAnalysisLevel level)
+        {
+            switch (level)
+            {
+            case Core::PersistedTriageAnalysisLevel::NotCaptured:
+                return "not_captured";
+            case Core::PersistedTriageAnalysisLevel::Baseline:
+                return "baseline";
+            case Core::PersistedTriageAnalysisLevel::Enriched:
+                return "enriched";
+            case Core::PersistedTriageAnalysisLevel::LegacyFallback:
+                return "legacy_fallback";
+            default:
+                return "unknown";
+            }
+        }
+
+        bool ParsePersistedAnalysisLevelToken(
+            const std::wstring& token,
+            Core::PersistedTriageAnalysisLevel& level)
+        {
+            if (token == L"not_captured")
+            {
+                level = Core::PersistedTriageAnalysisLevel::NotCaptured;
+                return true;
+            }
+            if (token == L"baseline")
+            {
+                level = Core::PersistedTriageAnalysisLevel::Baseline;
+                return true;
+            }
+            if (token == L"enriched")
+            {
+                level = Core::PersistedTriageAnalysisLevel::Enriched;
+                return true;
+            }
+            if (token == L"legacy_fallback")
+            {
+                level = Core::PersistedTriageAnalysisLevel::LegacyFallback;
+                return true;
+            }
+            return false;
+        }
+
+        const char* TriageVerdictToken(Core::TriageVerdict verdict)
+        {
+            switch (verdict)
+            {
+            case Core::TriageVerdict::Informational:
+                return "informational";
+            case Core::TriageVerdict::LowAttention:
+                return "low_attention";
+            case Core::TriageVerdict::MediumAttention:
+                return "medium_attention";
+            case Core::TriageVerdict::HighAttention:
+                return "high_attention";
+            default:
+                return "unknown";
+            }
+        }
+
+        bool ParseTriageVerdictToken(
+            const std::wstring& token,
+            Core::TriageVerdict& verdict)
+        {
+            if (token == L"informational")
+            {
+                verdict = Core::TriageVerdict::Informational;
+                return true;
+            }
+            if (token == L"low_attention")
+            {
+                verdict = Core::TriageVerdict::LowAttention;
+                return true;
+            }
+            if (token == L"medium_attention")
+            {
+                verdict = Core::TriageVerdict::MediumAttention;
+                return true;
+            }
+            if (token == L"high_attention")
+            {
+                verdict = Core::TriageVerdict::HighAttention;
+                return true;
+            }
+            return false;
+        }
+
+        const char* EvidenceDomainToken(Core::EvidenceDomain domain)
+        {
+            switch (domain)
+            {
+            case Core::EvidenceDomain::Unknown: return "unknown";
+            case Core::EvidenceDomain::ProcessIdentity: return "process_identity";
+            case Core::EvidenceDomain::FilePath: return "file_path";
+            case Core::EvidenceDomain::FileSignature: return "file_signature";
+            case Core::EvidenceDomain::CommandLine: return "command_line";
+            case Core::EvidenceDomain::ProcessRelationship: return "process_relationship";
+            case Core::EvidenceDomain::Network: return "network";
+            case Core::EvidenceDomain::Service: return "service";
+            case Core::EvidenceDomain::Module: return "module";
+            case Core::EvidenceDomain::Handle: return "handle";
+            case Core::EvidenceDomain::Runtime: return "runtime";
+            case Core::EvidenceDomain::MemoryMetadata: return "memory_metadata";
+            case Core::EvidenceDomain::Token: return "token";
+            case Core::EvidenceDomain::Persistence: return "persistence";
+            case Core::EvidenceDomain::CollectionQuality: return "collection_quality";
+            case Core::EvidenceDomain::EvidenceIntegrity: return "evidence_integrity";
+            case Core::EvidenceDomain::ImportedEvidence: return "imported_evidence";
+            default: return "unknown_enum";
+            }
+        }
+
+        bool ParseEvidenceDomainToken(
+            const std::wstring& token,
+            Core::EvidenceDomain& domain)
+        {
+            static constexpr std::array<std::pair<const wchar_t*, Core::EvidenceDomain>, 17> Values = {{
+                {L"unknown", Core::EvidenceDomain::Unknown},
+                {L"process_identity", Core::EvidenceDomain::ProcessIdentity},
+                {L"file_path", Core::EvidenceDomain::FilePath},
+                {L"file_signature", Core::EvidenceDomain::FileSignature},
+                {L"command_line", Core::EvidenceDomain::CommandLine},
+                {L"process_relationship", Core::EvidenceDomain::ProcessRelationship},
+                {L"network", Core::EvidenceDomain::Network},
+                {L"service", Core::EvidenceDomain::Service},
+                {L"module", Core::EvidenceDomain::Module},
+                {L"handle", Core::EvidenceDomain::Handle},
+                {L"runtime", Core::EvidenceDomain::Runtime},
+                {L"memory_metadata", Core::EvidenceDomain::MemoryMetadata},
+                {L"token", Core::EvidenceDomain::Token},
+                {L"persistence", Core::EvidenceDomain::Persistence},
+                {L"collection_quality", Core::EvidenceDomain::CollectionQuality},
+                {L"evidence_integrity", Core::EvidenceDomain::EvidenceIntegrity},
+                {L"imported_evidence", Core::EvidenceDomain::ImportedEvidence}
+            }};
+            for (const auto& value : Values)
+            {
+                if (token == value.first)
+                {
+                    domain = value.second;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        const char* ObservationDispositionToken(
+            Core::ObservationDisposition disposition)
+        {
+            switch (disposition)
+            {
+            case Core::ObservationDisposition::Informational: return "informational";
+            case Core::ObservationDisposition::Context: return "context";
+            case Core::ObservationDisposition::ReviewRelevant: return "review_relevant";
+            case Core::ObservationDisposition::CorrelatedOnly: return "correlated_only";
+            case Core::ObservationDisposition::CollectionNote: return "collection_note";
+            case Core::ObservationDisposition::EvidenceIntegrityNote: return "evidence_integrity_note";
+            case Core::ObservationDisposition::SuppressedExpected: return "suppressed_expected";
+            default: return "unknown_enum";
+            }
+        }
+
+        bool ParseObservationDispositionToken(
+            const std::wstring& token,
+            Core::ObservationDisposition& disposition)
+        {
+            static constexpr std::array<std::pair<
+                const wchar_t*, Core::ObservationDisposition>, 7> Values = {{
+                { L"informational", Core::ObservationDisposition::Informational },
+                { L"context", Core::ObservationDisposition::Context },
+                { L"review_relevant", Core::ObservationDisposition::ReviewRelevant },
+                { L"correlated_only", Core::ObservationDisposition::CorrelatedOnly },
+                { L"collection_note", Core::ObservationDisposition::CollectionNote },
+                { L"evidence_integrity_note", Core::ObservationDisposition::EvidenceIntegrityNote },
+                { L"suppressed_expected", Core::ObservationDisposition::SuppressedExpected }
+            }};
+            for (const auto& value : Values)
+            {
+                if (token == value.first)
+                {
+                    disposition = value.second;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        const char* ObservationStrengthToken(Core::ObservationStrength strength)
+        {
+            switch (strength)
+            {
+            case Core::ObservationStrength::None: return "none";
+            case Core::ObservationStrength::Weak: return "weak";
+            case Core::ObservationStrength::Moderate: return "moderate";
+            case Core::ObservationStrength::Strong: return "strong";
+            default: return "unknown_enum";
+            }
+        }
+
+        bool ParseObservationStrengthToken(
+            const std::wstring& token,
+            Core::ObservationStrength& strength)
+        {
+            if (token == L"none")
+            {
+                strength = Core::ObservationStrength::None;
+                return true;
+            }
+            if (token == L"weak")
+            {
+                strength = Core::ObservationStrength::Weak;
+                return true;
+            }
+            if (token == L"moderate")
+            {
+                strength = Core::ObservationStrength::Moderate;
+                return true;
+            }
+            if (token == L"strong")
+            {
+                strength = Core::ObservationStrength::Strong;
+                return true;
+            }
+            return false;
+        }
+
+        const char* ObservationConfidenceToken(
+            Core::ObservationConfidence confidence)
+        {
+            switch (confidence)
+            {
+            case Core::ObservationConfidence::Unknown: return "unknown";
+            case Core::ObservationConfidence::Low: return "low";
+            case Core::ObservationConfidence::Medium: return "medium";
+            case Core::ObservationConfidence::High: return "high";
+            default: return "unknown_enum";
+            }
+        }
+
+        bool ParseObservationConfidenceToken(
+            const std::wstring& token,
+            Core::ObservationConfidence& confidence)
+        {
+            if (token == L"unknown")
+            {
+                confidence = Core::ObservationConfidence::Unknown;
+                return true;
+            }
+            if (token == L"low")
+            {
+                confidence = Core::ObservationConfidence::Low;
+                return true;
+            }
+            if (token == L"medium")
+            {
+                confidence = Core::ObservationConfidence::Medium;
+                return true;
+            }
+            if (token == L"high")
+            {
+                confidence = Core::ObservationConfidence::High;
+                return true;
+            }
+            return false;
+        }
+
+        void WriteUtf8JsonString(std::ostream& output, const std::string& value)
+        {
+            WriteJsonString(output, Utf8ToWide(value.data(), value.size()));
+        }
+
+        void WritePersistedStringArray(
+            std::ostream& output,
+            const std::vector<std::string>& values)
+        {
+            output << '[';
+            for (std::size_t index = 0; index < values.size(); ++index)
+            {
+                if (index != 0)
+                {
+                    output << ", ";
+                }
+                WriteUtf8JsonString(output, values[index]);
+            }
+            output << ']';
         }
 
         const JsonValue* ArrayMember(const JsonValue& value, const wchar_t* name)
@@ -1896,10 +2292,8 @@ namespace GlassPane::Export
             WriteJsonString(output, module.baseAddress);
             output << ",\n";
             output << indent << "  \"size_bytes\": " << module.sizeBytes << ",\n";
-            output << indent << "  \"readable\": " << (module.readable ? "true" : "false") << ",\n";
-            output << indent << "  \"indicators\": ";
-            WriteJsonStringArray(output, module.indicators);
-            output << "\n" << indent << "}";
+            output << indent << "  \"readable\": " << (module.readable ? "true" : "false") << "\n";
+            output << indent << "}";
             if (trailingComma)
             {
                 output << ',';
@@ -1926,9 +2320,6 @@ namespace GlassPane::Export
             output << indent << "  \"success\": " << (modules.success ? "true" : "false") << ",\n";
             output << indent << "  \"status_message\": ";
             WriteJsonString(output, modules.statusMessage);
-            output << ",\n";
-            output << indent << "  \"indicators\": ";
-            WriteJsonStringArray(output, modules.indicators);
             output << ",\n";
             output << indent << "  \"modules\": [\n";
             for (std::size_t index = 0; index < modules.modules.size(); ++index)
@@ -1967,6 +2358,7 @@ namespace GlassPane::Export
             output << indent << "  \"handle_value\": ";
             WriteJsonString(output, UInt64String(handle.handleValue));
             output << ",\n";
+            output << indent << "  \"object_type_index\": " << handle.objectTypeIndex << ",\n";
             output << indent << "  \"object_type\": ";
             WriteJsonString(output, handle.objectType);
             output << ",\n";
@@ -1987,10 +2379,19 @@ namespace GlassPane::Export
                 output << "null";
             }
             output << ",\n";
+            output << indent << "  \"target_thread_id\": ";
+            if (handle.targetThreadId.has_value())
+            {
+                output << handle.targetThreadId.value();
+            }
+            else
+            {
+                output << "null";
+            }
+            output << ",\n";
             output << indent << "  \"target_process_name\": ";
             WriteJsonString(output, handle.targetProcessName);
             output << ",\n";
-            output << indent << "  \"is_sensitive\": " << (handle.isSensitive ? "true" : "false") << ",\n";
             output << indent << "  \"type_resolved\": " << (handle.typeResolved ? "true" : "false") << ",\n";
             output << indent << "  \"name_resolved\": " << (handle.nameResolved ? "true" : "false") << ",\n";
             output << indent << "  \"error_message\": ";
@@ -1998,9 +2399,6 @@ namespace GlassPane::Export
             output << ",\n";
             output << indent << "  \"decoded_access\": ";
             WriteJsonStringArray(output, handle.decodedAccess);
-            output << ",\n";
-            output << indent << "  \"indicators\": ";
-            WriteJsonStringArray(output, handle.indicators);
             output << "\n" << indent << "}";
             if (trailingComma)
             {
@@ -2014,6 +2412,8 @@ namespace GlassPane::Export
             Core::HandleInfo handle;
             handle.owningPid = UInt32Member(value, L"owning_pid");
             handle.handleValue = UInt64Member(value, L"handle_value");
+            handle.objectTypeIndex = static_cast<std::uint16_t>(
+                UInt32Member(value, L"object_type_index"));
             handle.objectType = StringMember(value, L"object_type");
             handle.objectName = StringMember(value, L"object_name");
             handle.grantedAccess = StringMember(value, L"granted_access");
@@ -2023,8 +2423,13 @@ namespace GlassPane::Export
             {
                 handle.targetPid = static_cast<std::uint32_t>(targetPid->numberValue);
             }
+            if (const JsonValue* targetThreadId = ObjectMember(value, L"target_thread_id");
+                targetThreadId != nullptr && targetThreadId->type == JsonValue::Type::Number)
+            {
+                handle.targetThreadId = static_cast<std::uint32_t>(
+                    targetThreadId->numberValue);
+            }
             handle.targetProcessName = StringMember(value, L"target_process_name");
-            handle.isSensitive = BoolMember(value, L"is_sensitive");
             handle.typeResolved = BoolMember(value, L"type_resolved");
             handle.nameResolved = BoolMember(value, L"name_resolved");
             handle.errorMessage = StringMember(value, L"error_message");
@@ -2033,16 +2438,139 @@ namespace GlassPane::Export
             return handle;
         }
 
+        const char* HandleCollectionStateText(
+            Core::HandleCollectionState state)
+        {
+            switch (state)
+            {
+            case Core::HandleCollectionState::NotAttempted:
+                return "not_attempted";
+            case Core::HandleCollectionState::Success:
+                return "success";
+            case Core::HandleCollectionState::Partial:
+                return "partial";
+            case Core::HandleCollectionState::Unavailable:
+                return "unavailable";
+            case Core::HandleCollectionState::Failed:
+                return "failed";
+            default:
+                return "failed";
+            }
+        }
+
+        Core::HandleCollectionState ParseHandleCollectionState(
+            const std::wstring& value,
+            bool legacySuccess)
+        {
+            if (value == L"success")
+            {
+                return Core::HandleCollectionState::Success;
+            }
+            if (value == L"partial")
+            {
+                return Core::HandleCollectionState::Partial;
+            }
+            if (value == L"unavailable")
+            {
+                return Core::HandleCollectionState::Unavailable;
+            }
+            if (value == L"failed")
+            {
+                return Core::HandleCollectionState::Failed;
+            }
+            if (value == L"not_attempted")
+            {
+                return Core::HandleCollectionState::NotAttempted;
+            }
+
+            // Schema-5 files written before typed partial-state capture retain
+            // only the compatibility success flag. The outer collection status
+            // further refines this value after the process evidence is parsed.
+            return legacySuccess
+                ? Core::HandleCollectionState::Success
+                : Core::HandleCollectionState::NotAttempted;
+        }
+
+        const char* HandleQueryFailureKindText(
+            Core::HandleQueryFailureKind kind)
+        {
+            switch (kind)
+            {
+            case Core::HandleQueryFailureKind::None:
+                return "none";
+            case Core::HandleQueryFailureKind::BudgetExceeded:
+                return "budget_exceeded";
+            case Core::HandleQueryFailureKind::AllocationFailed:
+                return "allocation_failed";
+            case Core::HandleQueryFailureKind::ApiUnavailable:
+                return "api_unavailable";
+            case Core::HandleQueryFailureKind::ApiFailed:
+                return "api_failed";
+            case Core::HandleQueryFailureKind::InvalidBuffer:
+                return "invalid_buffer";
+            default:
+                return "none";
+            }
+        }
+
+        Core::HandleQueryFailureKind ParseHandleQueryFailureKind(
+            const std::wstring& value)
+        {
+            if (value == L"budget_exceeded")
+            {
+                return Core::HandleQueryFailureKind::BudgetExceeded;
+            }
+            if (value == L"allocation_failed")
+            {
+                return Core::HandleQueryFailureKind::AllocationFailed;
+            }
+            if (value == L"api_unavailable")
+            {
+                return Core::HandleQueryFailureKind::ApiUnavailable;
+            }
+            if (value == L"api_failed")
+            {
+                return Core::HandleQueryFailureKind::ApiFailed;
+            }
+            if (value == L"invalid_buffer")
+            {
+                return Core::HandleQueryFailureKind::InvalidBuffer;
+            }
+            return Core::HandleQueryFailureKind::None;
+        }
+
         void WriteHandles(std::ostream& output, const Core::HandleCollectionResult& handles, const std::string& indent)
         {
             output << "{\n";
             output << indent << "  \"pid\": " << handles.pid << ",\n";
+            output << indent << "  \"collection_state\": \""
+                   << HandleCollectionStateText(handles.state) << "\",\n";
+            output << indent << "  \"query_failure_kind\": \""
+                   << HandleQueryFailureKindText(handles.queryFailureKind)
+                   << "\",\n";
             output << indent << "  \"success\": " << (handles.success ? "true" : "false") << ",\n";
             output << indent << "  \"status_message\": ";
             WriteJsonString(output, handles.statusMessage);
             output << ",\n";
             output << indent << "  \"system_handle_count\": " << handles.systemHandleCount << ",\n";
-            output << indent << "  \"sensitive_count\": " << handles.sensitiveCount << ",\n";
+            output << indent << "  \"system_entries_scanned\": " << handles.systemEntriesScanned << ",\n";
+            output << indent << "  \"selected_process_handles_matched\": " << handles.selectedProcessHandlesMatched << ",\n";
+            output << indent << "  \"selected_process_handles_omitted\": " << handles.selectedProcessHandlesOmitted << ",\n";
+            output << indent << "  \"names_attempted\": " << handles.namesAttempted << ",\n";
+            output << indent << "  \"names_resolved\": " << handles.namesResolved << ",\n";
+            output << indent << "  \"names_skipped\": " << handles.namesSkipped << ",\n";
+            output << indent << "  \"names_failed\": " << handles.namesFailed << ",\n";
+            output << indent << "  \"type_resolutions_attempted\": " << handles.typeResolutionsAttempted << ",\n";
+            output << indent << "  \"type_resolutions_resolved\": " << handles.typeResolutionsResolved << ",\n";
+            output << indent << "  \"type_resolutions_skipped\": " << handles.typeResolutionsSkipped << ",\n";
+            output << indent << "  \"type_resolutions_failed\": " << handles.typeResolutionsFailed << ",\n";
+            output << indent << "  \"targets_resolved\": " << handles.targetsResolved << ",\n";
+            output << indent << "  \"targets_unresolved\": " << handles.targetsUnresolved << ",\n";
+            output << indent << "  \"query_buffer_truncated\": " << (handles.queryBufferTruncated ? "true" : "false") << ",\n";
+            output << indent << "  \"retention_cap_reached\": " << (handles.retentionCapReached ? "true" : "false") << ",\n";
+            output << indent << "  \"name_resolution_cap_reached\": " << (handles.nameResolutionCapReached ? "true" : "false") << ",\n";
+            output << indent << "  \"type_resolution_cap_reached\": " << (handles.typeResolutionCapReached ? "true" : "false") << ",\n";
+            output << indent << "  \"type_or_target_resolution_partial\": " << (handles.typeOrTargetResolutionPartial ? "true" : "false") << ",\n";
             output << indent << "  \"handles\": [\n";
             for (std::size_t index = 0; index < handles.handles.size(); ++index)
             {
@@ -2057,9 +2585,53 @@ namespace GlassPane::Export
             Core::HandleCollectionResult handles;
             handles.pid = UInt32Member(value, L"pid");
             handles.success = BoolMember(value, L"success");
+            handles.state = ParseHandleCollectionState(
+                StringMember(value, L"collection_state"),
+                handles.success);
+            handles.queryFailureKind = ParseHandleQueryFailureKind(
+                StringMember(value, L"query_failure_kind"));
             handles.statusMessage = StringMember(value, L"status_message");
             handles.systemHandleCount = SizeMember(value, L"system_handle_count");
-            handles.sensitiveCount = SizeMember(value, L"sensitive_count");
+            handles.systemEntriesScanned = SizeMember(value, L"system_entries_scanned");
+            handles.selectedProcessHandlesMatched = SizeMember(
+                value,
+                L"selected_process_handles_matched");
+            handles.selectedProcessHandlesOmitted = SizeMember(
+                value,
+                L"selected_process_handles_omitted");
+            handles.namesAttempted = SizeMember(value, L"names_attempted");
+            handles.namesResolved = SizeMember(value, L"names_resolved");
+            handles.namesSkipped = SizeMember(value, L"names_skipped");
+            handles.namesFailed = SizeMember(value, L"names_failed");
+            handles.typeResolutionsAttempted = SizeMember(
+                value,
+                L"type_resolutions_attempted");
+            handles.typeResolutionsResolved = SizeMember(
+                value,
+                L"type_resolutions_resolved");
+            handles.typeResolutionsSkipped = SizeMember(
+                value,
+                L"type_resolutions_skipped");
+            handles.typeResolutionsFailed = SizeMember(
+                value,
+                L"type_resolutions_failed");
+            handles.targetsResolved = SizeMember(value, L"targets_resolved");
+            handles.targetsUnresolved = SizeMember(value, L"targets_unresolved");
+            handles.queryBufferTruncated = BoolMember(
+                value,
+                L"query_buffer_truncated");
+            handles.retentionCapReached = BoolMember(
+                value,
+                L"retention_cap_reached");
+            handles.nameResolutionCapReached = BoolMember(
+                value,
+                L"name_resolution_cap_reached");
+            handles.typeResolutionCapReached = BoolMember(
+                value,
+                L"type_resolution_cap_reached");
+            handles.typeOrTargetResolutionPartial = BoolMember(
+                value,
+                L"type_or_target_resolution_partial");
             if (const JsonValue* array = ArrayMember(value, L"handles"))
             {
                 handles.handles.reserve(array->arrayValue.size());
@@ -2121,11 +2693,8 @@ namespace GlassPane::Export
             output << indent << "  \"is_guard\": " << (region.isGuard ? "true" : "false") << ",\n";
             output << indent << "  \"is_private\": " << (region.isPrivate ? "true" : "false") << ",\n";
             output << indent << "  \"is_image\": " << (region.isImage ? "true" : "false") << ",\n";
-            output << indent << "  \"is_mapped\": " << (region.isMapped ? "true" : "false") << ",\n";
-            output << indent << "  \"is_suspicious\": " << (region.isSuspicious ? "true" : "false") << ",\n";
-            output << indent << "  \"indicators\": ";
-            WriteJsonStringArray(output, region.indicators);
-            output << "\n" << indent << "}";
+            output << indent << "  \"is_mapped\": " << (region.isMapped ? "true" : "false") << "\n";
+            output << indent << "}";
             if (trailingComma)
             {
                 output << ',';
@@ -2159,7 +2728,6 @@ namespace GlassPane::Export
             region.isPrivate = BoolMember(value, L"is_private");
             region.isImage = BoolMember(value, L"is_image");
             region.isMapped = BoolMember(value, L"is_mapped");
-            region.isSuspicious = BoolMember(value, L"is_suspicious");
             region.indicators = StringArrayMember(value, L"indicators");
             return region;
         }
@@ -2176,7 +2744,6 @@ namespace GlassPane::Export
             output << indent << "  \"executable_regions\": " << memory.executableRegions << ",\n";
             output << indent << "  \"private_executable_regions\": " << memory.privateExecutableRegions << ",\n";
             output << indent << "  \"rwx_regions\": " << memory.rwxRegions << ",\n";
-            output << indent << "  \"suspicious_regions\": " << memory.suspiciousRegions << ",\n";
             output << indent << "  \"guard_regions\": " << memory.guardRegions << ",\n";
             output << indent << "  \"regions\": [\n";
             for (std::size_t index = 0; index < memory.regions.size(); ++index)
@@ -2197,7 +2764,6 @@ namespace GlassPane::Export
             memory.executableRegions = SizeMember(value, L"executable_regions");
             memory.privateExecutableRegions = SizeMember(value, L"private_executable_regions");
             memory.rwxRegions = SizeMember(value, L"rwx_regions");
-            memory.suspiciousRegions = SizeMember(value, L"suspicious_regions");
             memory.guardRegions = SizeMember(value, L"guard_regions");
             if (const JsonValue* array = ArrayMember(value, L"regions"))
             {
@@ -2313,6 +2879,39 @@ namespace GlassPane::Export
                 handles != nullptr && handles->type == JsonValue::Type::Object)
             {
                 evidence.handles = ParseHandles(*handles);
+                // Older schema-5 files did not carry collection_state. Their
+                // existing outer status remains authoritative for whether a
+                // successful retained-row capture was partial.
+                if (evidence.handlesStatus.status == L"partial" &&
+                    (evidence.handles.success ||
+                        !evidence.handles.handles.empty()))
+                {
+                    evidence.handles.state =
+                        Core::HandleCollectionState::Partial;
+                    evidence.handles.success = true;
+                }
+                else if (evidence.handles.state ==
+                    Core::HandleCollectionState::NotAttempted)
+                {
+                    if (evidence.handlesStatus.status == L"ok")
+                    {
+                        evidence.handles.state =
+                            Core::HandleCollectionState::Success;
+                        evidence.handles.success = true;
+                    }
+                    else if (evidence.handlesStatus.status == L"unavailable" ||
+                        evidence.handlesStatus.status == L"access_denied" ||
+                        evidence.handlesStatus.status == L"process_exited")
+                    {
+                        evidence.handles.state =
+                            Core::HandleCollectionState::Unavailable;
+                    }
+                    else if (evidence.handlesStatus.status == L"failed")
+                    {
+                        evidence.handles.state =
+                            Core::HandleCollectionState::Failed;
+                    }
+                }
             }
             if (const JsonValue* memory = ObjectMember(value, L"memory");
                 memory != nullptr && memory->type == JsonValue::Type::Object)
@@ -2339,6 +2938,332 @@ namespace GlassPane::Export
                 }
             }
             output << "  }\n";
+        }
+
+        void WritePersistedTriageSummary(
+            std::ostream& output,
+            const Core::PersistedTriageSummary& summary,
+            const std::string& indent)
+        {
+            output << "{\n";
+            output << indent << "  \"captured\": " << (summary.captured ? "true" : "false") << ",\n";
+            output << indent << "  \"evaluation_succeeded\": " << (summary.evaluationSucceeded ? "true" : "false") << ",\n";
+            output << indent << "  \"analysis_level\": \"" << PersistedAnalysisLevelToken(summary.analysisLevel) << "\",\n";
+            output << indent << "  \"authoritative_verdict\": \"" << TriageVerdictToken(summary.authoritativeVerdict) << "\",\n";
+            output << indent << "  \"baseline_verdict_available\": " << (summary.baselineVerdictAvailable ? "true" : "false") << ",\n";
+            output << indent << "  \"baseline_verdict\": \"" << TriageVerdictToken(summary.baselineVerdict) << "\",\n";
+            output << indent << "  \"enriched_changed_verdict\": " << (summary.enrichedChangedVerdict ? "true" : "false") << ",\n";
+            output << indent << "  \"triage_model_version\": " << summary.triageModelVersion << ",\n";
+            output << indent << "  \"source_evidence_count\": " << summary.sourceEvidenceCount << ",\n";
+            output << indent << "  \"contributing_domains\": [";
+            for (std::size_t index = 0; index < summary.contributingDomains.size(); ++index)
+            {
+                if (index != 0)
+                {
+                    output << ", ";
+                }
+                output << '"' << EvidenceDomainToken(summary.contributingDomains[index]) << '"';
+            }
+            output << "],\n";
+            output << indent << "  \"verdict_basis\": ";
+            WritePersistedStringArray(output, summary.verdictBasis);
+            output << ",\n";
+            output << indent << "  \"completed_correlations\": ";
+            WritePersistedStringArray(output, summary.completedCorrelations);
+            output << ",\n";
+            output << indent << "  \"supporting_context\": ";
+            WritePersistedStringArray(output, summary.supportingContext);
+            output << ",\n";
+            output << indent << "  \"collection_limitations\": ";
+            WritePersistedStringArray(output, summary.collectionLimitations);
+            output << ",\n";
+            output << indent << "  \"evidence_integrity_context\": ";
+            WritePersistedStringArray(output, summary.evidenceIntegrityContext);
+            output << ",\n";
+            output << indent << "  \"unresolved_correlations\": ";
+            WritePersistedStringArray(output, summary.unresolvedCorrelations);
+            output << ",\n";
+            output << indent << "  \"status\": ";
+            WriteUtf8JsonString(output, summary.status);
+            output << "\n" << indent << '}';
+        }
+
+        void WritePersistedTriageRecord(
+            std::ostream& output,
+            const Core::PersistedProcessTriageRecord& record,
+            const std::string& indent)
+        {
+            output << indent << "{\n";
+            output << indent << "  \"pid\": " << record.identity.pid << ",\n";
+            output << indent << "  \"creation_time_available\": " << (record.identity.hasCreationTime ? "true" : "false") << ",\n";
+            output << indent << "  \"creation_time\": ";
+            WriteJsonString(output, UInt64String(record.identity.creationTimeFileTime));
+            output << ",\n";
+            output << indent << "  \"captured_triage\": ";
+            WritePersistedTriageSummary(output, record.summary, indent + "  ");
+            output << "\n" << indent << '}';
+        }
+
+        void WritePersistedTriageContext(
+            std::ostream& output,
+            const Core::PersistedTriageContext& context)
+        {
+            output << "  \"triage_context\": {\n";
+            output << "    \"process_records\": [\n";
+            for (std::size_t index = 0; index < context.processRecords.size(); ++index)
+            {
+                WritePersistedTriageRecord(output, context.processRecords[index], "      ");
+                if (index + 1 < context.processRecords.size())
+                {
+                    output << ',';
+                }
+                output << '\n';
+            }
+            output << "    ],\n";
+            output << "    \"selected_process_triage\": ";
+            if (context.selectedRecord.has_value())
+            {
+                output << '\n';
+                WritePersistedTriageRecord(output, context.selectedRecord.value(), "    ");
+                output << '\n';
+            }
+            else
+            {
+                output << "null\n";
+            }
+            output << "  },\n";
+        }
+
+        void WriteNativeSourceEvidenceRecord(
+            std::ostream& output,
+            const Core::NativeSourceEvidenceRecord& record,
+            const std::string& indent)
+        {
+            output << indent << "{\n";
+            output << indent << "  \"stable_rule_id\": ";
+            WriteUtf8JsonString(output, record.stableRuleId);
+            output << ",\n";
+            output << indent << "  \"title\": ";
+            WriteUtf8JsonString(output, record.title);
+            output << ",\n";
+            output << indent << "  \"summary\": ";
+            WriteUtf8JsonString(output, record.summary);
+            output << ",\n";
+            output << indent << "  \"details\": ";
+            WritePersistedStringArray(output, record.details);
+            output << ",\n";
+            output << indent << "  \"limitations\": ";
+            WritePersistedStringArray(output, record.limitations);
+            output << ",\n";
+            output << indent << "  \"domain\": ";
+            WriteJsonString(output, Utf8ToWide(
+                EvidenceDomainToken(record.domain),
+                std::strlen(EvidenceDomainToken(record.domain))));
+            output << ",\n";
+            output << indent << "  \"disposition\": ";
+            WriteJsonString(output, Utf8ToWide(
+                ObservationDispositionToken(record.disposition),
+                std::strlen(ObservationDispositionToken(record.disposition))));
+            output << ",\n";
+            output << indent << "  \"strength\": ";
+            WriteJsonString(output, Utf8ToWide(
+                ObservationStrengthToken(record.strength),
+                std::strlen(ObservationStrengthToken(record.strength))));
+            output << ",\n";
+            output << indent << "  \"confidence\": ";
+            WriteJsonString(output, Utf8ToWide(
+                ObservationConfidenceToken(record.confidence),
+                std::strlen(ObservationConfidenceToken(record.confidence))));
+            output << ",\n";
+            output << indent << "  \"artifact_family\": ";
+            WriteUtf8JsonString(output, record.artifactFamily);
+            output << ",\n";
+            output << indent << "  \"provenance_summary\": ";
+            WriteUtf8JsonString(output, record.provenanceSummary);
+            output << ",\n";
+            output << indent << "  \"contributed_to_verdict\": "
+                << (record.contributedToVerdict ? "true" : "false") << ",\n";
+            output << indent << "  \"suppressed_duplicate\": "
+                << (record.suppressedDuplicate ? "true" : "false") << ",\n";
+            output << indent << "  \"collection_limitation\": "
+                << (record.collectionLimitation ? "true" : "false") << "\n";
+            output << indent << '}';
+        }
+
+        void WriteNativeSourceEvidenceContext(
+            std::ostream& output,
+            const SavedNativeSourceEvidenceContext& context)
+        {
+            output << "  \"native_source_evidence\": {\n";
+            output << "    \"model_version\": " << context.modelVersion << ",\n";
+            output << "    \"selected_process\": ";
+            if (!context.selectedRecord.has_value())
+            {
+                output << "null\n";
+            }
+            else
+            {
+                const SavedNativeSourceEvidenceRecord& selected =
+                    *context.selectedRecord;
+                output << "{\n";
+                output << "      \"pid\": " << selected.identity.pid << ",\n";
+                output << "      \"creation_time_available\": "
+                    << (selected.identity.hasCreationTime ? "true" : "false")
+                    << ",\n";
+                output << "      \"creation_time\": ";
+                WriteJsonString(
+                    output,
+                    UInt64String(selected.identity.creationTimeFileTime));
+                output << ",\n";
+                output << "      \"records\": [\n";
+                for (std::size_t index = 0;
+                    index < selected.records.size();
+                    ++index)
+                {
+                    WriteNativeSourceEvidenceRecord(
+                        output,
+                        selected.records[index],
+                        "        ");
+                    if (index + 1 < selected.records.size())
+                    {
+                        output << ',';
+                    }
+                    output << '\n';
+                }
+                output << "      ]\n";
+                output << "    }\n";
+            }
+            output << "  },\n";
+        }
+
+        bool HasHistoricalLegacyEvidence(const Core::ProcessInfo& process)
+        {
+            return process.historicalSeverityCaptured ||
+                process.historicalSuspiciousCaptured ||
+                !process.indicators.empty() ||
+                !process.contextNotes.empty();
+        }
+
+        bool ValidateHistoricalLegacyEvidenceForSave(
+            const Core::ProcessSnapshot& snapshot,
+            std::wstring& error)
+        {
+            for (const Core::ProcessInfo& process : snapshot.processes)
+            {
+                const bool knownSeverity =
+                    process.severity == Core::Severity::None ||
+                    process.severity == Core::Severity::Info ||
+                    process.severity == Core::Severity::Low ||
+                    process.severity == Core::Severity::Medium ||
+                    process.severity == Core::Severity::High;
+                if (!knownSeverity ||
+                    (!process.historicalSeverityCaptured &&
+                        process.severity != Core::Severity::None) ||
+                    (!process.historicalSuspiciousCaptured &&
+                        process.suspicious) ||
+                    (!process.hasCreationTime &&
+                        process.creationTimeFileTime != 0))
+                {
+                    error = L"Historical legacy process metadata has a contradictory capture state.";
+                    return false;
+                }
+                const std::size_t recordCount =
+                    process.indicators.size() + process.contextNotes.size();
+                if (recordCount > SnapshotHistoricalMaxRecordsPerProcess)
+                {
+                    error = L"Historical legacy source evidence exceeds the per-process record cap.";
+                    return false;
+                }
+                const auto validStrings = [](const std::vector<std::wstring>& values) {
+                    return std::all_of(
+                        values.begin(),
+                        values.end(),
+                        [](const std::wstring& value) {
+                            return value.size() <= SnapshotMaxStringLength;
+                        });
+                };
+                if (!validStrings(process.indicators) ||
+                    !validStrings(process.contextNotes))
+                {
+                    error = L"Historical legacy source evidence contains an oversized string.";
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        void WriteHistoricalLegacyEvidenceContext(
+            std::ostream& output,
+            const Core::ProcessSnapshot& snapshot)
+        {
+            std::vector<const Core::ProcessInfo*> records;
+            records.reserve(snapshot.processes.size());
+            for (const Core::ProcessInfo& process : snapshot.processes)
+            {
+                if (HasHistoricalLegacyEvidence(process))
+                {
+                    records.push_back(&process);
+                }
+            }
+            if (records.empty())
+            {
+                return;
+            }
+
+            output << "  \"historical_legacy_evidence\": {\n";
+            output << "    \"model_version\": " <<
+                SnapshotHistoricalEvidenceModelVersion << ",\n";
+            output << "    \"process_records\": [\n";
+            for (std::size_t index = 0; index < records.size(); ++index)
+            {
+                const Core::ProcessInfo& process = *records[index];
+                output << "      {\n";
+                output << "        \"pid\": " << process.pid << ",\n";
+                output << "        \"creation_time_available\": " <<
+                    (process.hasCreationTime ? "true" : "false") << ",\n";
+                output << "        \"creation_time\": ";
+                WriteJsonString(output, UInt64String(process.creationTimeFileTime));
+                output << ",\n";
+                output << "        \"process_severity_captured\": " <<
+                    (process.historicalSeverityCaptured ? "true" : "false") << ",\n";
+                output << "        \"process_severity\": ";
+                if (!process.historicalSeverityCaptured)
+                {
+                    output << "null";
+                }
+                else
+                {
+                    WriteJsonString(output, SeverityName(process.severity));
+                }
+                output << ",\n";
+                // Historical schemas captured this as process metadata, not
+                // as a severity or suspicious flag on each source row.
+                output << "        \"process_suspicious_captured\": " <<
+                    (process.historicalSuspiciousCaptured ? "true" : "false") << ",\n";
+                output << "        \"process_suspicious_metadata\": ";
+                if (process.historicalSuspiciousCaptured)
+                {
+                    output << (process.suspicious ? "true" : "false");
+                }
+                else
+                {
+                    output << "null";
+                }
+                output << ",\n";
+                output << "        \"indicators\": ";
+                WriteJsonStringArray(output, process.indicators);
+                output << ",\n";
+                output << "        \"context_notes\": ";
+                WriteJsonStringArray(output, process.contextNotes);
+                output << "\n      }";
+                if (index + 1 < records.size())
+                {
+                    output << ',';
+                }
+                output << '\n';
+            }
+            output << "    ]\n";
+            output << "  },\n";
         }
 
         void WriteProcess(std::ostream& output, const Core::ProcessInfo& process, const std::string& indent, bool trailingComma)
@@ -2375,16 +3300,6 @@ namespace GlassPane::Export
             output << indent << "  \"has_creation_time\": " << (process.hasCreationTime ? "true" : "false") << ",\n";
             output << indent << "  \"creation_time_filetime\": ";
             WriteJsonString(output, UInt64String(process.creationTimeFileTime));
-            output << ",\n";
-            output << indent << "  \"suspicious\": " << (process.suspicious ? "true" : "false") << ",\n";
-            output << indent << "  \"severity\": ";
-            WriteJsonString(output, SeverityName(process.severity));
-            output << ",\n";
-            output << indent << "  \"indicators\": ";
-            WriteJsonStringArray(output, process.indicators);
-            output << ",\n";
-            output << indent << "  \"context_notes\": ";
-            WriteJsonStringArray(output, process.contextNotes);
             output << "\n" << indent << "}";
             if (trailingComma)
             {
@@ -2429,7 +3344,7 @@ namespace GlassPane::Export
             output << '\n';
         }
 
-        Core::ProcessInfo ParseProcess(const JsonValue& value)
+        Core::ProcessInfo ParseProcess(const JsonValue& value, int schemaVersion)
         {
             Core::ProcessInfo process;
             process.pid = UInt32Member(value, L"pid");
@@ -2447,11 +3362,994 @@ namespace GlassPane::Export
             process.creationTimeLocal = StringMember(value, L"creation_time_local");
             process.hasCreationTime = BoolMember(value, L"has_creation_time");
             process.creationTimeFileTime = ParseUInt64String(StringMember(value, L"creation_time_filetime"));
-            process.suspicious = BoolMember(value, L"suspicious");
-            process.severity = ParseSeverity(StringMember(value, L"severity"));
-            process.indicators = StringArrayMember(value, L"indicators");
-            process.contextNotes = StringArrayMember(value, L"context_notes");
+            if (schemaVersion < GlassPaneSnapshotTriageSchemaVersion)
+            {
+                const JsonValue* suspicious = ObjectMember(value, L"suspicious");
+                process.historicalSuspiciousCaptured =
+                    suspicious != nullptr && suspicious->type == JsonValue::Type::Boolean;
+                process.suspicious = process.historicalSuspiciousCaptured &&
+                    suspicious->boolValue;
+                const JsonValue* severity = ObjectMember(value, L"severity");
+                process.historicalSeverityCaptured =
+                    severity != nullptr && severity->type == JsonValue::Type::String &&
+                    TryParseSeverity(severity->stringValue, process.severity);
+                process.indicators = StringArrayMember(value, L"indicators");
+            }
+            else if (schemaVersion <
+                GlassPaneSnapshotNativeEvidenceSchemaVersion)
+            {
+                const JsonValue* suspicious =
+                    ObjectMember(value, L"legacy_source_suspicious");
+                process.historicalSuspiciousCaptured =
+                    suspicious != nullptr && suspicious->type == JsonValue::Type::Boolean;
+                process.suspicious = process.historicalSuspiciousCaptured &&
+                    suspicious->boolValue;
+                const JsonValue* severity =
+                    ObjectMember(value, L"legacy_source_severity");
+                process.historicalSeverityCaptured =
+                    severity != nullptr && severity->type == JsonValue::Type::String &&
+                    TryParseSeverity(severity->stringValue, process.severity);
+                process.indicators = StringArrayMember(value, L"indicators");
+            }
+            // Schema 5 has no live Finding-derived process severity or
+            // indicator fields. ProcessInfo defaults remain neutral even if an
+            // unrecognized compatibility field is injected into the object.
+            if (schemaVersion < GlassPaneSnapshotNativeEvidenceSchemaVersion)
+            {
+                process.contextNotes = StringArrayMember(value, L"context_notes");
+            }
             return process;
+        }
+
+        bool ReadHistoricalStringArray(
+            const JsonValue& object,
+            const wchar_t* name,
+            std::vector<std::wstring>& values,
+            std::wstring& error)
+        {
+            const JsonValue* array = ObjectMember(object, name);
+            if (array == nullptr || array->type != JsonValue::Type::Array)
+            {
+                error = L"historical_legacy_evidence." +
+                    std::wstring(name) + L" must be an array.";
+                return false;
+            }
+            if (array->arrayValue.size() >
+                SnapshotHistoricalMaxRecordsPerProcess)
+            {
+                error = L"historical_legacy_evidence." +
+                    std::wstring(name) + L" exceeds its per-process cap.";
+                return false;
+            }
+            values.clear();
+            values.reserve(array->arrayValue.size());
+            for (const JsonValue& item : array->arrayValue)
+            {
+                if (item.type != JsonValue::Type::String ||
+                    item.stringValue.size() > SnapshotMaxStringLength)
+                {
+                    error = L"historical_legacy_evidence." +
+                        std::wstring(name) +
+                        L" contains an invalid or oversized string.";
+                    return false;
+                }
+                values.push_back(item.stringValue);
+            }
+            return true;
+        }
+
+        bool ParseHistoricalLegacyEvidenceContext(
+            const JsonValue& value,
+            Core::ProcessSnapshot& snapshot,
+            std::wstring& error)
+        {
+            if (value.type != JsonValue::Type::Object)
+            {
+                error = L"historical_legacy_evidence must be an object.";
+                return false;
+            }
+            const JsonValue* modelVersion = ObjectMember(value, L"model_version");
+            if (modelVersion == nullptr ||
+                modelVersion->type != JsonValue::Type::Number ||
+                modelVersion->numberValue !=
+                    static_cast<double>(SnapshotHistoricalEvidenceModelVersion))
+            {
+                error = L"historical_legacy_evidence has an unsupported model_version.";
+                return false;
+            }
+            const JsonValue* records = ObjectMember(value, L"process_records");
+            if (records == nullptr || records->type != JsonValue::Type::Array ||
+                records->arrayValue.size() > SnapshotMaxProcesses)
+            {
+                error = L"historical_legacy_evidence.process_records is missing or exceeds its cap.";
+                return false;
+            }
+
+            std::map<std::wstring, bool> seen;
+            for (const JsonValue& item : records->arrayValue)
+            {
+                if (item.type != JsonValue::Type::Object)
+                {
+                    error = L"historical_legacy_evidence process record must be an object.";
+                    return false;
+                }
+                const JsonValue* pidValue = ObjectMember(item, L"pid");
+                const JsonValue* creationAvailableValue =
+                    ObjectMember(item, L"creation_time_available");
+                const JsonValue* creationValue = ObjectMember(item, L"creation_time");
+                const JsonValue* severityCapturedValue =
+                    ObjectMember(item, L"process_severity_captured");
+                const JsonValue* suspiciousCapturedValue =
+                    ObjectMember(item, L"process_suspicious_captured");
+                const JsonValue* suspiciousValue =
+                    ObjectMember(item, L"process_suspicious_metadata");
+                if (pidValue == nullptr || pidValue->type != JsonValue::Type::Number ||
+                    pidValue->numberValue < 0.0 ||
+                    std::floor(pidValue->numberValue) != pidValue->numberValue ||
+                    pidValue->numberValue >
+                        static_cast<double>((std::numeric_limits<std::uint32_t>::max)()) ||
+                    creationAvailableValue == nullptr ||
+                    creationAvailableValue->type != JsonValue::Type::Boolean ||
+                    creationValue == nullptr || creationValue->type != JsonValue::Type::String ||
+                    severityCapturedValue == nullptr ||
+                    severityCapturedValue->type != JsonValue::Type::Boolean ||
+                    suspiciousCapturedValue == nullptr ||
+                    suspiciousCapturedValue->type != JsonValue::Type::Boolean ||
+                    suspiciousValue == nullptr ||
+                    (suspiciousValue->type != JsonValue::Type::Boolean &&
+                        suspiciousValue->type != JsonValue::Type::Null))
+                {
+                    error = L"historical_legacy_evidence process identity or metadata is invalid.";
+                    return false;
+                }
+                const std::uint32_t pid =
+                    static_cast<std::uint32_t>(pidValue->numberValue);
+                const bool hasCreationTime = creationAvailableValue->boolValue;
+                std::uint64_t creationTime = 0;
+                if (creationValue->stringValue.empty())
+                {
+                    error = L"historical_legacy_evidence creation_time must be a decimal uint64 string.";
+                    return false;
+                }
+                for (const wchar_t digit : creationValue->stringValue)
+                {
+                    if (digit < L'0' || digit > L'9')
+                    {
+                        error = L"historical_legacy_evidence creation_time must be a decimal uint64 string.";
+                        return false;
+                    }
+                    const std::uint64_t value =
+                        static_cast<std::uint64_t>(digit - L'0');
+                    if (creationTime >
+                        ((std::numeric_limits<std::uint64_t>::max)() - value) / 10)
+                    {
+                        error = L"historical_legacy_evidence creation_time exceeds uint64.";
+                        return false;
+                    }
+                    creationTime = creationTime * 10 + value;
+                }
+                if (!hasCreationTime && creationTime != 0)
+                {
+                    error = L"historical_legacy_evidence has contradictory creation-time identity.";
+                    return false;
+                }
+                const std::wstring identity = std::to_wstring(pid) + L"|" +
+                    (hasCreationTime ? std::to_wstring(creationTime) : L"-");
+                if (!seen.emplace(identity, true).second)
+                {
+                    error = L"historical_legacy_evidence contains a duplicate process identity.";
+                    return false;
+                }
+
+                Core::ProcessInfo* matched = nullptr;
+                for (Core::ProcessInfo& process : snapshot.processes)
+                {
+                    if (process.pid == pid &&
+                        process.hasCreationTime == hasCreationTime &&
+                        (!hasCreationTime ||
+                            process.creationTimeFileTime == creationTime))
+                    {
+                        matched = &process;
+                        break;
+                    }
+                }
+                if (matched == nullptr)
+                {
+                    error = L"historical_legacy_evidence identity does not match a saved process.";
+                    return false;
+                }
+
+                Core::Severity severity = Core::Severity::None;
+                const bool severityCaptured = severityCapturedValue->boolValue;
+                const JsonValue* severityValue = ObjectMember(item, L"process_severity");
+                if (severityCaptured)
+                {
+                    if (severityValue == nullptr ||
+                        severityValue->type != JsonValue::Type::String ||
+                        !TryParseSeverity(severityValue->stringValue, severity))
+                    {
+                        error = L"historical_legacy_evidence has an invalid captured process severity.";
+                        return false;
+                    }
+                }
+                else if (severityValue == nullptr ||
+                    severityValue->type != JsonValue::Type::Null)
+                {
+                    error = L"historical_legacy_evidence uncaptured process severity must be null.";
+                    return false;
+                }
+
+                const bool suspiciousCaptured =
+                    suspiciousCapturedValue->boolValue;
+                if ((suspiciousCaptured &&
+                        suspiciousValue->type != JsonValue::Type::Boolean) ||
+                    (!suspiciousCaptured &&
+                        suspiciousValue->type != JsonValue::Type::Null))
+                {
+                    error = L"historical_legacy_evidence has contradictory process suspicious metadata.";
+                    return false;
+                }
+
+                std::vector<std::wstring> indicators;
+                std::vector<std::wstring> contextNotes;
+                if (!ReadHistoricalStringArray(
+                        item,
+                        L"indicators",
+                        indicators,
+                        error) ||
+                    !ReadHistoricalStringArray(
+                        item,
+                        L"context_notes",
+                        contextNotes,
+                        error) ||
+                    indicators.size() + contextNotes.size() >
+                        SnapshotHistoricalMaxRecordsPerProcess)
+                {
+                    if (error.empty())
+                    {
+                        error = L"historical_legacy_evidence exceeds the combined per-process record cap.";
+                    }
+                    return false;
+                }
+
+                matched->severity = severity;
+                matched->historicalSeverityCaptured = severityCaptured;
+                matched->suspicious = suspiciousCaptured &&
+                    suspiciousValue->boolValue;
+                matched->historicalSuspiciousCaptured = suspiciousCaptured;
+                matched->indicators = std::move(indicators);
+                matched->contextNotes = std::move(contextNotes);
+            }
+            return true;
+        }
+
+        bool ReadRequiredTriageBool(
+            const JsonValue& object,
+            const wchar_t* name,
+            bool& destination,
+            std::wstring& error)
+        {
+            const JsonValue* value = ObjectMember(object, name);
+            if (value == nullptr || value->type != JsonValue::Type::Boolean)
+            {
+                error = L"triage_context." + std::wstring(name) + L" must be a boolean.";
+                return false;
+            }
+            destination = value->boolValue;
+            return true;
+        }
+
+        bool ReadRequiredTriageUInt32(
+            const JsonValue& object,
+            const wchar_t* name,
+            std::uint32_t& destination,
+            std::wstring& error)
+        {
+            const JsonValue* value = ObjectMember(object, name);
+            if (value == nullptr || value->type != JsonValue::Type::Number ||
+                !std::isfinite(value->numberValue) ||
+                value->numberValue < 0.0 ||
+                value->numberValue >
+                    static_cast<double>((std::numeric_limits<std::uint32_t>::max)()) ||
+                std::floor(value->numberValue) != value->numberValue)
+            {
+                error = L"triage_context." + std::wstring(name) +
+                    L" must be an unsigned 32-bit integer.";
+                return false;
+            }
+            destination = static_cast<std::uint32_t>(value->numberValue);
+            return true;
+        }
+
+        bool ReadRequiredTriageSize(
+            const JsonValue& object,
+            const wchar_t* name,
+            std::size_t maximum,
+            std::size_t& destination,
+            std::wstring& error)
+        {
+            std::uint32_t parsed = 0;
+            if (!ReadRequiredTriageUInt32(object, name, parsed, error))
+            {
+                return false;
+            }
+            if (static_cast<std::size_t>(parsed) > maximum)
+            {
+                error = L"triage_context." + std::wstring(name) +
+                    L" exceeds its retained-count cap.";
+                return false;
+            }
+            destination = static_cast<std::size_t>(parsed);
+            return true;
+        }
+
+        bool ReadRequiredTriageUtf8String(
+            const JsonValue& object,
+            const wchar_t* name,
+            std::size_t maximumBytes,
+            std::string& destination,
+            std::wstring& error)
+        {
+            const JsonValue* value = ObjectMember(object, name);
+            if (value == nullptr || value->type != JsonValue::Type::String)
+            {
+                error = L"triage_context." + std::wstring(name) + L" must be a string.";
+                return false;
+            }
+            destination = WideToUtf8(value->stringValue);
+            if (destination.size() > maximumBytes)
+            {
+                error = L"triage_context." + std::wstring(name) +
+                    L" exceeds its UTF-8 byte cap.";
+                return false;
+            }
+            return true;
+        }
+
+        bool ReadRequiredTriageStringArray(
+            const JsonValue& object,
+            const wchar_t* name,
+            std::size_t maximumItems,
+            std::vector<std::string>& destination,
+            std::wstring& error)
+        {
+            const JsonValue* value = ObjectMember(object, name);
+            if (value == nullptr || value->type != JsonValue::Type::Array)
+            {
+                error = L"triage_context." + std::wstring(name) + L" must be an array.";
+                return false;
+            }
+            if (value->arrayValue.size() > maximumItems)
+            {
+                error = L"triage_context." + std::wstring(name) +
+                    L" exceeds its retained-item cap.";
+                return false;
+            }
+            destination.clear();
+            destination.reserve(value->arrayValue.size());
+            for (const JsonValue& item : value->arrayValue)
+            {
+                if (item.type != JsonValue::Type::String)
+                {
+                    error = L"triage_context." + std::wstring(name) +
+                        L" entries must be strings.";
+                    return false;
+                }
+                std::string text = WideToUtf8(item.stringValue);
+                if (text.size() > Core::PersistedTriageLineMaxUtf8Bytes)
+                {
+                    error = L"triage_context." + std::wstring(name) +
+                        L" contains a line exceeding its UTF-8 byte cap.";
+                    return false;
+                }
+                destination.push_back(std::move(text));
+            }
+            return true;
+        }
+
+        bool ParsePersistedTriageSummary(
+            const JsonValue& value,
+            Core::PersistedTriageSummary& summary,
+            bool allowHistoricalLegacyFallback,
+            std::wstring& error)
+        {
+            if (value.type != JsonValue::Type::Object)
+            {
+                error = L"triage_context captured_triage must be an object.";
+                return false;
+            }
+
+            std::string status;
+            if (!ReadRequiredTriageBool(value, L"captured", summary.captured, error) ||
+                !ReadRequiredTriageBool(value, L"evaluation_succeeded", summary.evaluationSucceeded, error) ||
+                !ReadRequiredTriageBool(value, L"baseline_verdict_available", summary.baselineVerdictAvailable, error) ||
+                !ReadRequiredTriageBool(value, L"enriched_changed_verdict", summary.enrichedChangedVerdict, error) ||
+                !ReadRequiredTriageUInt32(value, L"triage_model_version", summary.triageModelVersion, error) ||
+                !ReadRequiredTriageSize(
+                    value,
+                    L"source_evidence_count",
+                    Core::PersistedTriageMaxSourceEvidenceCount,
+                    summary.sourceEvidenceCount,
+                    error) ||
+                !ReadRequiredTriageUtf8String(
+                    value,
+                    L"status",
+                    Core::PersistedTriageStatusMaxUtf8Bytes,
+                    status,
+                    error))
+            {
+                return false;
+            }
+            summary.status = std::move(status);
+
+            const JsonValue* usingFallback =
+                ObjectMember(value, L"using_fallback");
+            const JsonValue* fallbackReason =
+                ObjectMember(value, L"fallback_reason");
+            if (allowHistoricalLegacyFallback)
+            {
+                std::string reason;
+                if (!ReadRequiredTriageBool(
+                        value,
+                        L"using_fallback",
+                        summary.usingFallback,
+                        error) ||
+                    !ReadRequiredTriageUtf8String(
+                        value,
+                        L"fallback_reason",
+                        Core::PersistedTriageFallbackReasonMaxUtf8Bytes,
+                        reason,
+                        error))
+                {
+                    return false;
+                }
+                summary.fallbackReason = std::move(reason);
+            }
+            else if (usingFallback != nullptr || fallbackReason != nullptr)
+            {
+                bool historicalFlag = false;
+                std::string historicalReason;
+                if (usingFallback == nullptr || fallbackReason == nullptr ||
+                    !ReadRequiredTriageBool(
+                        value,
+                        L"using_fallback",
+                        historicalFlag,
+                        error) ||
+                    !ReadRequiredTriageUtf8String(
+                        value,
+                        L"fallback_reason",
+                        Core::PersistedTriageFallbackReasonMaxUtf8Bytes,
+                        historicalReason,
+                        error) ||
+                    historicalFlag || !historicalReason.empty())
+                {
+                    error = L"Schema 5 triage records cannot contain a legacy fallback state.";
+                    return false;
+                }
+            }
+
+            const JsonValue* analysis = ObjectMember(value, L"analysis_level");
+            if (analysis == nullptr || analysis->type != JsonValue::Type::String ||
+                !ParsePersistedAnalysisLevelToken(
+                    analysis->stringValue,
+                    summary.analysisLevel))
+            {
+                error = L"triage_context.analysis_level is unknown.";
+                return false;
+            }
+            const JsonValue* verdict = ObjectMember(value, L"authoritative_verdict");
+            if (verdict == nullptr || verdict->type != JsonValue::Type::String ||
+                !ParseTriageVerdictToken(
+                    verdict->stringValue,
+                    summary.authoritativeVerdict))
+            {
+                error = L"triage_context.authoritative_verdict is unknown.";
+                return false;
+            }
+            const JsonValue* baselineVerdict = ObjectMember(value, L"baseline_verdict");
+            if (baselineVerdict == nullptr ||
+                baselineVerdict->type != JsonValue::Type::String ||
+                !ParseTriageVerdictToken(
+                    baselineVerdict->stringValue,
+                    summary.baselineVerdict))
+            {
+                error = L"triage_context.baseline_verdict is unknown.";
+                return false;
+            }
+
+            const JsonValue* domains = ObjectMember(value, L"contributing_domains");
+            if (domains == nullptr || domains->type != JsonValue::Type::Array ||
+                domains->arrayValue.size() >
+                    Core::PersistedTriageMaxContributingDomains)
+            {
+                error = L"triage_context.contributing_domains is missing or exceeds its cap.";
+                return false;
+            }
+            summary.contributingDomains.clear();
+            summary.contributingDomains.reserve(domains->arrayValue.size());
+            for (const JsonValue& item : domains->arrayValue)
+            {
+                Core::EvidenceDomain domain = Core::EvidenceDomain::Unknown;
+                if (item.type != JsonValue::Type::String ||
+                    !ParseEvidenceDomainToken(item.stringValue, domain))
+                {
+                    error = L"triage_context.contributing_domains contains an unknown domain.";
+                    return false;
+                }
+                summary.contributingDomains.push_back(domain);
+            }
+
+            if (!ReadRequiredTriageStringArray(
+                    value, L"verdict_basis",
+                    Core::PersistedTriageMaxVerdictBasisItems,
+                    summary.verdictBasis, error) ||
+                !ReadRequiredTriageStringArray(
+                    value, L"completed_correlations",
+                    Core::PersistedTriageMaxCompletedCorrelationItems,
+                    summary.completedCorrelations, error) ||
+                !ReadRequiredTriageStringArray(
+                    value, L"supporting_context",
+                    Core::PersistedTriageMaxSupportingContextItems,
+                    summary.supportingContext, error) ||
+                !ReadRequiredTriageStringArray(
+                    value, L"collection_limitations",
+                    Core::PersistedTriageMaxCollectionLimitationItems,
+                    summary.collectionLimitations, error) ||
+                !ReadRequiredTriageStringArray(
+                    value, L"evidence_integrity_context",
+                    Core::PersistedTriageMaxEvidenceIntegrityItems,
+                    summary.evidenceIntegrityContext, error) ||
+                !ReadRequiredTriageStringArray(
+                    value, L"unresolved_correlations",
+                    Core::PersistedTriageMaxUnresolvedCorrelationItems,
+                    summary.unresolvedCorrelations, error))
+            {
+                return false;
+            }
+
+            const Core::PersistedTriageValidationResult validation =
+                Core::ValidatePersistedTriageSummary(summary);
+            if (!validation.valid)
+            {
+                error = L"triage_context captured_triage is invalid: " +
+                    Utf8ToWide(validation.message.data(), validation.message.size());
+                return false;
+            }
+            return true;
+        }
+
+        bool ParseUInt64Decimal(
+            const std::wstring& value,
+            std::uint64_t& destination)
+        {
+            if (value.empty() ||
+                std::any_of(value.begin(), value.end(), [](wchar_t character)
+                {
+                    return character < L'0' || character > L'9';
+                }))
+            {
+                return false;
+            }
+            try
+            {
+                std::size_t parsed = 0;
+                const unsigned long long result = std::stoull(value, &parsed, 10);
+                if (parsed != value.size())
+                {
+                    return false;
+                }
+                destination = static_cast<std::uint64_t>(result);
+                return true;
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
+
+        bool ParsePersistedTriageRecord(
+            const JsonValue& value,
+            Core::PersistedProcessTriageRecord& record,
+            bool allowHistoricalLegacyFallback,
+            std::wstring& error)
+        {
+            if (value.type != JsonValue::Type::Object ||
+                !ReadRequiredTriageUInt32(value, L"pid", record.identity.pid, error) ||
+                !ReadRequiredTriageBool(
+                    value,
+                    L"creation_time_available",
+                    record.identity.hasCreationTime,
+                    error))
+            {
+                return false;
+            }
+            const JsonValue* creation = ObjectMember(value, L"creation_time");
+            if (creation == nullptr || creation->type != JsonValue::Type::String ||
+                !ParseUInt64Decimal(
+                    creation->stringValue,
+                    record.identity.creationTimeFileTime))
+            {
+                error = L"triage_context.creation_time must be a decimal uint64 string.";
+                return false;
+            }
+            const JsonValue* summary = ObjectMember(value, L"captured_triage");
+            if (summary == nullptr ||
+                !ParsePersistedTriageSummary(
+                    *summary,
+                    record.summary,
+                    allowHistoricalLegacyFallback,
+                    error))
+            {
+                if (summary == nullptr)
+                {
+                    error = L"triage_context record is missing captured_triage.";
+                }
+                return false;
+            }
+            return true;
+        }
+
+        bool ParsePersistedTriageContext(
+            const JsonValue& value,
+            std::uint32_t modelVersion,
+            bool allowHistoricalLegacyFallback,
+            Core::PersistedTriageContext& context,
+            std::wstring& error)
+        {
+            if (value.type != JsonValue::Type::Object)
+            {
+                error = L"triage_context must be an object.";
+                return false;
+            }
+            context = {};
+            context.modelVersion = modelVersion;
+            const JsonValue* records = ObjectMember(value, L"process_records");
+            if (records == nullptr || records->type != JsonValue::Type::Array ||
+                records->arrayValue.size() >
+                    Core::PersistedTriageMaxProcessRecords)
+            {
+                error = L"triage_context.process_records is missing or exceeds its cap.";
+                return false;
+            }
+            context.processRecords.reserve(records->arrayValue.size());
+            for (const JsonValue& valueRecord : records->arrayValue)
+            {
+                Core::PersistedProcessTriageRecord record;
+                if (!ParsePersistedTriageRecord(
+                        valueRecord,
+                        record,
+                        allowHistoricalLegacyFallback,
+                        error))
+                {
+                    return false;
+                }
+                context.processRecords.push_back(std::move(record));
+            }
+
+            const JsonValue* selected = ObjectMember(value, L"selected_process_triage");
+            if (selected == nullptr)
+            {
+                error = L"triage_context is missing selected_process_triage.";
+                return false;
+            }
+            if (selected->type == JsonValue::Type::Object)
+            {
+                Core::PersistedProcessTriageRecord selectedRecord;
+                if (!ParsePersistedTriageRecord(
+                        *selected,
+                        selectedRecord,
+                        allowHistoricalLegacyFallback,
+                        error))
+                {
+                    return false;
+                }
+                context.selectedRecord = std::move(selectedRecord);
+            }
+            else if (selected->type != JsonValue::Type::Null)
+            {
+                error = L"triage_context.selected_process_triage must be an object or null.";
+                return false;
+            }
+
+            const Core::PersistedTriageValidationResult validation =
+                Core::ValidatePersistedTriageContext(context);
+            if (!validation.valid)
+            {
+                error = L"triage_context is invalid: " +
+                    Utf8ToWide(validation.message.data(), validation.message.size());
+                return false;
+            }
+            return true;
+        }
+
+        bool ReadRequiredNativeEvidenceUtf8String(
+            const JsonValue& object,
+            const wchar_t* name,
+            std::size_t maximumBytes,
+            std::string& destination,
+            std::wstring& error)
+        {
+            const JsonValue* value = ObjectMember(object, name);
+            if (value == nullptr || value->type != JsonValue::Type::String)
+            {
+                error = L"native_source_evidence." + std::wstring(name) +
+                    L" must be a string.";
+                return false;
+            }
+            destination = WideToUtf8(value->stringValue);
+            if (destination.size() > maximumBytes)
+            {
+                error = L"native_source_evidence." + std::wstring(name) +
+                    L" exceeds its UTF-8 byte cap.";
+                return false;
+            }
+            return true;
+        }
+
+        bool ReadRequiredNativeEvidenceStringArray(
+            const JsonValue& object,
+            const wchar_t* name,
+            std::size_t maximumItems,
+            std::size_t maximumBytes,
+            std::vector<std::string>& destination,
+            std::wstring& error)
+        {
+            const JsonValue* value = ObjectMember(object, name);
+            if (value == nullptr || value->type != JsonValue::Type::Array ||
+                value->arrayValue.size() > maximumItems)
+            {
+                error = L"native_source_evidence." + std::wstring(name) +
+                    L" is missing or exceeds its item cap.";
+                return false;
+            }
+            destination.clear();
+            destination.reserve(value->arrayValue.size());
+            for (const JsonValue& item : value->arrayValue)
+            {
+                if (item.type != JsonValue::Type::String)
+                {
+                    error = L"native_source_evidence." + std::wstring(name) +
+                        L" must contain only strings.";
+                    return false;
+                }
+                std::string text = WideToUtf8(item.stringValue);
+                if (text.size() > maximumBytes)
+                {
+                    error = L"native_source_evidence." + std::wstring(name) +
+                        L" contains an item exceeding its UTF-8 byte cap.";
+                    return false;
+                }
+                destination.push_back(std::move(text));
+            }
+            return true;
+        }
+
+        bool ReadRequiredNativeEvidenceBool(
+            const JsonValue& object,
+            const wchar_t* name,
+            bool& destination,
+            std::wstring& error)
+        {
+            const JsonValue* value = ObjectMember(object, name);
+            if (value == nullptr || value->type != JsonValue::Type::Boolean)
+            {
+                error = L"native_source_evidence." + std::wstring(name) +
+                    L" must be a boolean.";
+                return false;
+            }
+            destination = value->boolValue;
+            return true;
+        }
+
+        bool ParseNativeSourceEvidenceRecord(
+            const JsonValue& value,
+            Core::NativeSourceEvidenceRecord& record,
+            std::wstring& error)
+        {
+            if (value.type != JsonValue::Type::Object ||
+                !ReadRequiredNativeEvidenceUtf8String(
+                    value,
+                    L"stable_rule_id",
+                    Core::NativeSourceEvidenceStableRuleIdMaxUtf8Bytes,
+                    record.stableRuleId,
+                    error) ||
+                !ReadRequiredNativeEvidenceUtf8String(
+                    value,
+                    L"title",
+                    Core::NativeSourceEvidenceTitleMaxUtf8Bytes,
+                    record.title,
+                    error) ||
+                !ReadRequiredNativeEvidenceUtf8String(
+                    value,
+                    L"summary",
+                    Core::NativeSourceEvidenceSummaryMaxUtf8Bytes,
+                    record.summary,
+                    error) ||
+                !ReadRequiredNativeEvidenceStringArray(
+                    value,
+                    L"details",
+                    Core::NativeSourceEvidenceMaxDetailItems,
+                    Core::NativeSourceEvidenceDetailMaxUtf8Bytes,
+                    record.details,
+                    error) ||
+                !ReadRequiredNativeEvidenceStringArray(
+                    value,
+                    L"limitations",
+                    Core::NativeSourceEvidenceMaxLimitationItems,
+                    Core::NativeSourceEvidenceLimitationMaxUtf8Bytes,
+                    record.limitations,
+                    error) ||
+                !ReadRequiredNativeEvidenceUtf8String(
+                    value,
+                    L"artifact_family",
+                    Core::NativeSourceEvidenceArtifactFamilyMaxUtf8Bytes,
+                    record.artifactFamily,
+                    error) ||
+                !ReadRequiredNativeEvidenceUtf8String(
+                    value,
+                    L"provenance_summary",
+                    Core::NativeSourceEvidenceProvenanceSummaryMaxUtf8Bytes,
+                    record.provenanceSummary,
+                    error) ||
+                !ReadRequiredNativeEvidenceBool(
+                    value,
+                    L"contributed_to_verdict",
+                    record.contributedToVerdict,
+                    error) ||
+                !ReadRequiredNativeEvidenceBool(
+                    value,
+                    L"suppressed_duplicate",
+                    record.suppressedDuplicate,
+                    error) ||
+                !ReadRequiredNativeEvidenceBool(
+                    value,
+                    L"collection_limitation",
+                    record.collectionLimitation,
+                    error))
+            {
+                if (error.empty())
+                {
+                    error = L"native_source_evidence record must be an object.";
+                }
+                return false;
+            }
+
+            const JsonValue* domain = ObjectMember(value, L"domain");
+            const JsonValue* disposition = ObjectMember(value, L"disposition");
+            const JsonValue* strength = ObjectMember(value, L"strength");
+            const JsonValue* confidence = ObjectMember(value, L"confidence");
+            if (domain == nullptr || domain->type != JsonValue::Type::String ||
+                !ParseEvidenceDomainToken(domain->stringValue, record.domain) ||
+                disposition == nullptr ||
+                disposition->type != JsonValue::Type::String ||
+                !ParseObservationDispositionToken(
+                    disposition->stringValue,
+                    record.disposition) ||
+                strength == nullptr || strength->type != JsonValue::Type::String ||
+                !ParseObservationStrengthToken(strength->stringValue, record.strength) ||
+                confidence == nullptr ||
+                confidence->type != JsonValue::Type::String ||
+                !ParseObservationConfidenceToken(
+                    confidence->stringValue,
+                    record.confidence))
+            {
+                error = L"native_source_evidence contains an unknown typed enum token.";
+                return false;
+            }
+
+            const Core::NativeSourceEvidenceValidationResult validation =
+                Core::ValidateNativeSourceEvidenceRecord(record);
+            if (!validation.valid)
+            {
+                error = L"native_source_evidence record is invalid: " +
+                    Utf8ToWide(
+                        validation.diagnostic.data(),
+                        validation.diagnostic.size());
+                return false;
+            }
+            return true;
+        }
+
+        bool ParseNativeSourceEvidenceContext(
+            const JsonValue& value,
+            SavedNativeSourceEvidenceContext& context,
+            std::wstring& error)
+        {
+            if (value.type != JsonValue::Type::Object)
+            {
+                error = L"native_source_evidence must be an object.";
+                return false;
+            }
+            std::uint32_t modelVersion = 0;
+            std::wstring ignoredTriageError;
+            if (!ReadRequiredTriageUInt32(
+                    value,
+                    L"model_version",
+                    modelVersion,
+                    ignoredTriageError) ||
+                modelVersion != Core::NativeSourceEvidenceModelVersion)
+            {
+                error = L"native_source_evidence has an unsupported model_version.";
+                return false;
+            }
+
+            SavedNativeSourceEvidenceContext parsed;
+            parsed.modelVersion = modelVersion;
+            const JsonValue* selected = ObjectMember(value, L"selected_process");
+            if (selected == nullptr)
+            {
+                error = L"native_source_evidence is missing selected_process.";
+                return false;
+            }
+            if (selected->type == JsonValue::Type::Null)
+            {
+                context = std::move(parsed);
+                return true;
+            }
+            if (selected->type != JsonValue::Type::Object)
+            {
+                error = L"native_source_evidence.selected_process must be an object or null.";
+                return false;
+            }
+
+            SavedNativeSourceEvidenceRecord record;
+            std::wstring ignoredIdentityError;
+            if (!ReadRequiredTriageUInt32(
+                    *selected,
+                    L"pid",
+                    record.identity.pid,
+                    ignoredIdentityError) ||
+                !ReadRequiredTriageBool(
+                    *selected,
+                    L"creation_time_available",
+                    record.identity.hasCreationTime,
+                    ignoredIdentityError))
+            {
+                error = L"native_source_evidence selected identity is invalid.";
+                return false;
+            }
+            const JsonValue* creation = ObjectMember(*selected, L"creation_time");
+            if (creation == nullptr || creation->type != JsonValue::Type::String ||
+                !ParseUInt64Decimal(
+                    creation->stringValue,
+                    record.identity.creationTimeFileTime))
+            {
+                error = L"native_source_evidence.creation_time must be a decimal uint64 string.";
+                return false;
+            }
+            const JsonValue* records = ObjectMember(*selected, L"records");
+            if (records == nullptr || records->type != JsonValue::Type::Array ||
+                records->arrayValue.size() > Core::NativeSourceEvidenceMaxRecords)
+            {
+                error = L"native_source_evidence.records is missing or exceeds its cap.";
+                return false;
+            }
+            record.records.reserve(records->arrayValue.size());
+            for (const JsonValue& valueRecord : records->arrayValue)
+            {
+                Core::NativeSourceEvidenceRecord nativeRecord;
+                if (!ParseNativeSourceEvidenceRecord(
+                        valueRecord,
+                        nativeRecord,
+                        error))
+                {
+                    return false;
+                }
+                record.records.push_back(std::move(nativeRecord));
+            }
+            const Core::NativeSourceEvidenceValidationResult validation =
+                Core::ValidateNativeSourceEvidenceRecords(record.records);
+            if (!validation.valid)
+            {
+                error = L"native_source_evidence records are invalid: " +
+                    Utf8ToWide(
+                        validation.diagnostic.data(),
+                        validation.diagnostic.size());
+                return false;
+            }
+            parsed.selectedRecord = std::move(record);
+            context = std::move(parsed);
+            return true;
         }
 
         Core::NetworkConnection ParseNetworkConnection(const JsonValue& value)
@@ -2560,6 +4458,206 @@ namespace GlassPane::Export
             return match;
         }
 
+        Core::PersistedTriageContext MakeNotCapturedTriageContext(
+            const Core::ProcessSnapshot& snapshot,
+            std::uint32_t /*selectedPid*/)
+        {
+            std::vector<Core::PersistedProcessTriageRecord> records;
+            records.reserve((std::min)(
+                snapshot.processes.size(),
+                Core::PersistedTriageMaxProcessRecords));
+            for (const Core::ProcessInfo& process : snapshot.processes)
+            {
+                Core::PersistedProcessTriageRecord record;
+                record.identity = Core::MakeProcessIdentityKey(process);
+                record.summary = Core::MakeNotCapturedPersistedTriageSummary();
+                records.push_back(std::move(record));
+            }
+            return Core::MakePersistedTriageContext(
+                std::move(records),
+                std::nullopt);
+        }
+
+        bool ValidateTriageContextForSnapshot(
+            const Core::PersistedTriageContext& context,
+            const Core::ProcessSnapshot& snapshot,
+            std::uint32_t selectedPid,
+            bool allowHistoricalLegacyFallback,
+            std::wstring& error)
+        {
+            const Core::PersistedTriageValidationResult validation =
+                Core::ValidatePersistedTriageContext(context);
+            if (!validation.valid)
+            {
+                error = L"triage_context is invalid: " +
+                    Utf8ToWide(validation.message.data(), validation.message.size());
+                return false;
+            }
+            if (context.processRecords.size() != snapshot.processes.size())
+            {
+                error = L"triage_context.process_records must contain exactly one record for every saved process identity.";
+                return false;
+            }
+
+            std::vector<Core::ProcessIdentityKey> snapshotIdentities;
+            snapshotIdentities.reserve(snapshot.processes.size());
+            for (const Core::ProcessInfo& process : snapshot.processes)
+            {
+                const Core::ProcessIdentityKey identity =
+                    Core::MakeProcessIdentityKey(process);
+                snapshotIdentities.push_back(identity);
+            }
+            std::sort(snapshotIdentities.begin(), snapshotIdentities.end());
+            if (std::adjacent_find(
+                    snapshotIdentities.begin(),
+                    snapshotIdentities.end()) != snapshotIdentities.end())
+            {
+                error = L"Saved process rows contain a duplicate PID and creation-time identity.";
+                return false;
+            }
+            if (std::adjacent_find(
+                    snapshotIdentities.begin(),
+                    snapshotIdentities.end(),
+                    [](const Core::ProcessIdentityKey& left,
+                       const Core::ProcessIdentityKey& right)
+                    {
+                        return left.pid == right.pid;
+                    }) != snapshotIdentities.end())
+            {
+                error = L"Saved process rows contain an ambiguous duplicate PID.";
+                return false;
+            }
+            for (std::size_t index = 0;
+                index < snapshotIdentities.size();
+                ++index)
+            {
+                if (context.processRecords[index].identity !=
+                    snapshotIdentities[index])
+                {
+                    error = L"triage_context identities do not exactly match the saved process identities.";
+                    return false;
+                }
+                const Core::PersistedProcessTriageRecord& record =
+                    context.processRecords[index];
+                if (!allowHistoricalLegacyFallback &&
+                    record.summary.analysisLevel ==
+                        Core::PersistedTriageAnalysisLevel::LegacyFallback)
+                {
+                    error = L"Native-evidence snapshots cannot contain a legacy-fallback process triage record.";
+                    return false;
+                }
+                if (record.summary.analysisLevel ==
+                    Core::PersistedTriageAnalysisLevel::Enriched)
+                {
+                    error = L"triage_context process-wide records cannot use the enriched analysis level.";
+                    return false;
+                }
+            }
+
+            const Core::ProcessInfo* selectedProcess = nullptr;
+            std::size_t selectedMatchCount = 0;
+            for (const Core::ProcessInfo& process : snapshot.processes)
+            {
+                if (process.pid == selectedPid)
+                {
+                    selectedProcess = &process;
+                    ++selectedMatchCount;
+                }
+            }
+            if (selectedMatchCount > 1)
+            {
+                error = L"Saved selected PID is ambiguous across multiple process identities.";
+                return false;
+            }
+            if (selectedProcess == nullptr)
+            {
+                if (context.selectedRecord.has_value())
+                {
+                    error = L"triage_context selected_process_triage exists without a selected saved process.";
+                    return false;
+                }
+                return true;
+            }
+            if (context.selectedRecord.has_value() &&
+                context.selectedRecord->identity !=
+                    Core::MakeProcessIdentityKey(*selectedProcess))
+            {
+                error = L"triage_context selected_process_triage does not match the saved selected process identity.";
+                return false;
+            }
+            if (!allowHistoricalLegacyFallback &&
+                context.selectedRecord.has_value() &&
+                context.selectedRecord->summary.analysisLevel ==
+                    Core::PersistedTriageAnalysisLevel::LegacyFallback)
+            {
+                error = L"Native-evidence snapshots cannot contain a legacy-fallback selected triage record.";
+                return false;
+            }
+            return true;
+        }
+
+        bool ValidateNativeSourceEvidenceForSnapshot(
+            const SavedNativeSourceEvidenceContext& context,
+            const Core::ProcessSnapshot& snapshot,
+            std::uint32_t selectedPid,
+            const Core::PersistedTriageContext& triageContext,
+            std::wstring& error)
+        {
+            if (context.modelVersion !=
+                Core::NativeSourceEvidenceModelVersion)
+            {
+                error = L"native_source_evidence has an unsupported model version.";
+                return false;
+            }
+            if (!context.selectedRecord.has_value())
+            {
+                return true;
+            }
+
+            const SavedNativeSourceEvidenceRecord& selected =
+                *context.selectedRecord;
+            const Core::NativeSourceEvidenceValidationResult validation =
+                Core::ValidateNativeSourceEvidenceRecords(selected.records);
+            if (!validation.valid)
+            {
+                error = L"native_source_evidence is invalid: " +
+                    Utf8ToWide(
+                        validation.diagnostic.data(),
+                        validation.diagnostic.size());
+                return false;
+            }
+
+            const Core::ProcessInfo* matchingProcess = nullptr;
+            std::size_t matchingPidCount = 0;
+            for (const Core::ProcessInfo& process : snapshot.processes)
+            {
+                if (process.pid == selected.identity.pid)
+                {
+                    matchingProcess = &process;
+                    ++matchingPidCount;
+                }
+            }
+            if (matchingPidCount != 1 || matchingProcess == nullptr ||
+                selected.identity !=
+                    Core::MakeProcessIdentityKey(*matchingProcess))
+            {
+                error = L"native_source_evidence selected identity does not exactly match one saved process.";
+                return false;
+            }
+            if (selected.identity.pid != selectedPid)
+            {
+                error = L"native_source_evidence selected identity does not match selected_pid.";
+                return false;
+            }
+            if (triageContext.selectedRecord.has_value() &&
+                triageContext.selectedRecord->identity != selected.identity)
+            {
+                error = L"native_source_evidence and selected triage identities do not match.";
+                return false;
+            }
+            return true;
+        }
+
         bool WriteAllText(const std::wstring& filePath, const std::string& text, std::wstring* errorMessage)
         {
             std::ofstream output(std::filesystem::path(filePath), std::ios::binary | std::ios::trunc);
@@ -2597,6 +4695,14 @@ namespace GlassPane::Export
             }
             return false;
         }
+        if (context.snapshot->processes.size() > SnapshotMaxProcesses)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Process snapshot exceeds the saved-snapshot process cap.";
+            }
+            return false;
+        }
         if (context.serviceContext == nullptr)
         {
             if (errorMessage != nullptr)
@@ -2612,6 +4718,59 @@ namespace GlassPane::Export
             if (errorMessage != nullptr)
             {
                 *errorMessage = L"Service context is invalid: " + serviceValidationError;
+            }
+            return false;
+        }
+
+        Core::PersistedTriageContext notCapturedTriage;
+        const Core::PersistedTriageContext* triageContext = context.triageContext;
+        if (triageContext == nullptr)
+        {
+            notCapturedTriage = MakeNotCapturedTriageContext(
+                *context.snapshot,
+                context.selectedPid);
+            triageContext = &notCapturedTriage;
+        }
+        std::wstring triageValidationError;
+        if (!ValidateTriageContextForSnapshot(
+                *triageContext,
+                *context.snapshot,
+                context.selectedPid,
+                false,
+                triageValidationError))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Captured triage context is invalid: " +
+                    triageValidationError;
+            }
+            return false;
+        }
+        std::wstring nativeEvidenceValidationError;
+        if (!ValidateNativeSourceEvidenceForSnapshot(
+                context.nativeSourceEvidence,
+                *context.snapshot,
+                context.selectedPid,
+                *triageContext,
+                nativeEvidenceValidationError))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Captured native source evidence is invalid: " +
+                    nativeEvidenceValidationError;
+            }
+            return false;
+        }
+        std::wstring historicalEvidenceValidationError;
+        if (context.preserveHistoricalLegacyEvidence &&
+            !ValidateHistoricalLegacyEvidenceForSave(
+                *context.snapshot,
+                historicalEvidenceValidationError))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Historical compatibility evidence is invalid: " +
+                    historicalEvidenceValidationError;
             }
             return false;
         }
@@ -2635,6 +4794,7 @@ namespace GlassPane::Export
             WriteJsonString(output, GlassPaneSnapshotFormat);
             output << ",\n";
             output << "  \"schema_version\": " << GlassPaneSnapshotSchemaVersion << ",\n";
+            output << "  \"triage_model_version\": " << triageContext->modelVersion << ",\n";
             output << "  \"glasspane_version\": ";
             WriteJsonString(output, context.glassPaneVersion);
             output << ",\n";
@@ -2684,6 +4844,16 @@ namespace GlassPane::Export
             output << "\n";
             output << "  },\n";
             WriteServiceContext(output, *context.serviceContext, "  ");
+            WritePersistedTriageContext(output, *triageContext);
+            WriteNativeSourceEvidenceContext(
+                output,
+                context.nativeSourceEvidence);
+            if (context.preserveHistoricalLegacyEvidence)
+            {
+                WriteHistoricalLegacyEvidenceContext(
+                    output,
+                    *context.snapshot);
+            }
             output << "  \"processes\": [\n";
             for (std::size_t index = 0; index < context.snapshot->processes.size(); ++index)
             {
@@ -2835,15 +5005,39 @@ namespace GlassPane::Export
             return false;
         }
         const int schemaVersion = static_cast<int>(schemaVersionValue->numberValue);
-        if (schemaVersion != GlassPaneSnapshotSchemaVersion &&
-            schemaVersion != GlassPaneSnapshotPreviousSchemaVersion &&
-            schemaVersion != GlassPaneSnapshotLegacySchemaVersion)
+        if (schemaVersion < GlassPaneSnapshotLegacySchemaVersion ||
+            schemaVersion > GlassPaneSnapshotSchemaVersion)
         {
             if (errorMessage != nullptr)
             {
                 *errorMessage = L"Unsupported snapshot schema version.";
             }
             return false;
+        }
+
+        std::uint32_t persistedTriageModelVersion = 0;
+        if (schemaVersion >= GlassPaneSnapshotTriageSchemaVersion)
+        {
+            std::wstring triageVersionError;
+            if (!ReadRequiredTriageUInt32(
+                    root,
+                    L"triage_model_version",
+                    persistedTriageModelVersion,
+                    triageVersionError) ||
+                persistedTriageModelVersion !=
+                    Core::PersistedTriageModelVersion)
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage =
+                        persistedTriageModelVersion == 0
+                            ? (triageVersionError.empty()
+                                ? L"Saved snapshot has an invalid triage_model_version."
+                                : triageVersionError)
+                            : L"Unsupported persisted triage model version.";
+                }
+                return false;
+            }
         }
 
         SavedSnapshotDocument loaded;
@@ -2881,14 +5075,14 @@ namespace GlassPane::Export
             loaded.networkIntel.localFeedSha256 = StringMember(*intel, L"local_feed_sha256");
         }
 
-        if (schemaVersion == GlassPaneSnapshotSchemaVersion)
+        if (schemaVersion >= GlassPaneSnapshotServiceContextSchemaVersion)
         {
             const JsonValue* serviceContext = ObjectMember(root, L"service_context");
             if (serviceContext == nullptr)
             {
                 if (errorMessage != nullptr)
                 {
-                    *errorMessage = L"Schema 3 snapshot is missing service_context.";
+                    *errorMessage = L"Snapshot schema 3 or newer is missing service_context.";
                 }
                 return false;
             }
@@ -2915,16 +5109,113 @@ namespace GlassPane::Export
             }
             return false;
         }
+        if (schemaVersion >= GlassPaneSnapshotTriageSchemaVersion &&
+            processes->arrayValue.size() > SnapshotMaxProcesses)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = L"Saved-snapshot process array exceeds its retained-record cap.";
+            }
+            return false;
+        }
 
         loaded.snapshot.processes.reserve(processes->arrayValue.size());
         for (const JsonValue& process : processes->arrayValue)
         {
-            if (process.type == JsonValue::Type::Object)
+            if (process.type != JsonValue::Type::Object)
             {
-                loaded.snapshot.processes.push_back(ParseProcess(process));
+                if (schemaVersion >= GlassPaneSnapshotTriageSchemaVersion)
+                {
+                    if (errorMessage != nullptr)
+                    {
+                        *errorMessage = L"Saved-snapshot process entries must be objects.";
+                    }
+                    return false;
+                }
+                continue;
+            }
+            loaded.snapshot.processes.push_back(ParseProcess(process, schemaVersion));
+        }
+        if (schemaVersion >= GlassPaneSnapshotNativeEvidenceSchemaVersion)
+        {
+            if (const JsonValue* historicalEvidence =
+                    ObjectMember(root, L"historical_legacy_evidence");
+                historicalEvidence != nullptr)
+            {
+                std::wstring historicalEvidenceError;
+                if (!ParseHistoricalLegacyEvidenceContext(
+                        *historicalEvidence,
+                        loaded.snapshot,
+                        historicalEvidenceError))
+                {
+                    if (errorMessage != nullptr)
+                    {
+                        *errorMessage = historicalEvidenceError.empty()
+                            ? L"Malformed historical_legacy_evidence in saved snapshot."
+                            : historicalEvidenceError;
+                    }
+                    return false;
+                }
             }
         }
         Core::BuildProcessTree(loaded.snapshot);
+
+        if (schemaVersion >= GlassPaneSnapshotTriageSchemaVersion)
+        {
+            const JsonValue* triageContext =
+                ObjectMember(root, L"triage_context");
+            std::wstring triageError;
+            if (triageContext == nullptr ||
+                !ParsePersistedTriageContext(
+                    *triageContext,
+                    persistedTriageModelVersion,
+                    schemaVersion < GlassPaneSnapshotNativeEvidenceSchemaVersion,
+                    loaded.triageContext,
+                    triageError) ||
+                !ValidateTriageContextForSnapshot(
+                    loaded.triageContext,
+                    loaded.snapshot,
+                    loaded.metadata.selectedPid,
+                    schemaVersion < GlassPaneSnapshotNativeEvidenceSchemaVersion,
+                    triageError))
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = triageError.empty()
+                        ? L"Saved snapshot is missing triage_context."
+                        : triageError;
+                }
+                return false;
+            }
+        }
+
+        if (schemaVersion >= GlassPaneSnapshotNativeEvidenceSchemaVersion)
+        {
+            const JsonValue* nativeEvidence =
+                ObjectMember(root, L"native_source_evidence");
+            std::wstring nativeEvidenceError;
+            if (nativeEvidence == nullptr ||
+                !ParseNativeSourceEvidenceContext(
+                    *nativeEvidence,
+                    loaded.nativeSourceEvidence,
+                    nativeEvidenceError) ||
+                !ValidateNativeSourceEvidenceForSnapshot(
+                    loaded.nativeSourceEvidence,
+                    loaded.snapshot,
+                    loaded.metadata.selectedPid,
+                    loaded.triageContext,
+                    nativeEvidenceError))
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = nativeEvidenceError.empty()
+                        ? L"Schema 5 snapshot is missing native_source_evidence."
+                        : nativeEvidenceError;
+                }
+                return false;
+            }
+            loaded.nativeSourceEvidenceCaptured = true;
+        }
 
         const JsonValue* networkConnections = ObjectMember(root, L"network_connections");
         if (networkConnections != nullptr && networkConnections->type == JsonValue::Type::Array)
@@ -3020,10 +5311,12 @@ namespace GlassPane::Export
         output << "==========================\n\n";
         output << "Generated by GlassPane " << WideToUtf8(glassPaneVersion) << "\n";
         output << "Generated at: " << WideToUtf8(generatedAt) << "\n\n";
+        output << "Authoritative triage model: "
+            << Core::PersistedTriageModelVersion << "\n\n";
         output << "Package source: " <<
             (generatedFromLoadedSnapshot ? "loaded saved snapshot / offline viewer" : "live endpoint view") << "\n\n";
         output << "This package contains local evidence preserved by GlassPane for review or escalation.\n";
-        output << "The saved snapshot contains process, relationship, available network data, and bounded process metadata where collection was possible.\n";
+        output << "The schema-5 saved snapshot contains captured authoritative triage summaries, native source evidence for the captured selected process, process relationships, available network and service context, and bounded process metadata where collection was possible.\n";
         output << "Default evidence packages use the portable bounded snapshot mode. Deep lists such as handles, memory regions, module rows, and thread rows are summarized or capped.\n";
         output << "Collection status is recorded per process and evidence type, so access denied, process exited, partial, not-attempted, and failed states are expected on some endpoints.\n";
         output << "Memory region metadata does not include memory contents. Packet contents are not captured.\n";
@@ -3035,7 +5328,7 @@ namespace GlassPane::Export
             output << "- " << WideToUtf8(file) << "\n";
         }
         output << "\nNotes:\n";
-        output << "- Snapshot differences and findings are evidence worth reviewing, not proof of malicious activity.\n";
+        output << "- Snapshot differences and source-evidence records are evidence worth reviewing, not proof of malicious activity.\n";
         output << "- No endpoint data was uploaded by this export action.\n";
         return WriteAllText(filePath, output.str(), errorMessage);
     }

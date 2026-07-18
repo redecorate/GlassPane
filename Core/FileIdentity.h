@@ -1,10 +1,7 @@
 #pragma once
 
-#include "ProcessInfo.h"
-
 #include <cstdint>
 #include <string>
-#include <vector>
 
 namespace GlassPane::Core
 {
@@ -25,16 +22,5 @@ namespace GlassPane::Core
         std::wstring errorMessage;
     };
 
-    struct FileIdentityIndicator
-    {
-        Severity severity = Severity::Info;
-        std::wstring message;
-    };
-
     FileIdentity CollectFileIdentity(const std::wstring& path);
-
-    std::vector<FileIdentityIndicator> BuildFileIdentityIndicators(
-        const FileIdentity& identity,
-        const std::wstring& imageName,
-        bool executableContext);
 }

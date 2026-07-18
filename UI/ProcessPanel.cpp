@@ -6,15 +6,10 @@
 #define NOMINMAX
 #endif
 #include <Windows.h>
-#include <shellapi.h>
 
 #include <algorithm>
-#include <cstring>
-#include <cwctype>
 #include <exception>
-#include <memory>
 #include <string>
-#include <unordered_map>
 
 namespace GlassPane::UI
 {
@@ -172,150 +167,6 @@ namespace GlassPane::UI
         ImVec4 SelectedProcessRowColor(const ImVec4& accent)
         {
             return GlassSelectedRowColor(accent);
-        }
-
-        std::wstring NormalizeIconCacheKey(const std::wstring& path)
-        {
-            std::wstring key = path;
-            std::transform(key.begin(), key.end(), key.begin(), [](wchar_t character) {
-                return static_cast<wchar_t>(std::towlower(character));
-            });
-            return key;
-        }
-
-        bool RasterizeIcon(HICON icon, ImTextureData& texture)
-        {
-            if (icon == nullptr)
-            {
-                return false;
-            }
-
-            constexpr int TextureSize = 16;
-            BITMAPINFO bitmapInfo = {};
-            bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            bitmapInfo.bmiHeader.biWidth = TextureSize;
-            bitmapInfo.bmiHeader.biHeight = -TextureSize;
-            bitmapInfo.bmiHeader.biPlanes = 1;
-            bitmapInfo.bmiHeader.biBitCount = 32;
-            bitmapInfo.bmiHeader.biCompression = BI_RGB;
-
-            HDC screenDc = GetDC(nullptr);
-            if (screenDc == nullptr)
-            {
-                return false;
-            }
-
-            void* bitmapBits = nullptr;
-            HBITMAP bitmap = CreateDIBSection(screenDc, &bitmapInfo, DIB_RGB_COLORS, &bitmapBits, nullptr, 0);
-            if (bitmap == nullptr || bitmapBits == nullptr)
-            {
-                if (bitmap != nullptr)
-                {
-                    DeleteObject(bitmap);
-                }
-                ReleaseDC(nullptr, screenDc);
-                return false;
-            }
-
-            HDC memoryDc = CreateCompatibleDC(screenDc);
-            if (memoryDc == nullptr)
-            {
-                DeleteObject(bitmap);
-                ReleaseDC(nullptr, screenDc);
-                return false;
-            }
-
-            HGDIOBJ previousBitmap = SelectObject(memoryDc, bitmap);
-            if (previousBitmap == nullptr || previousBitmap == HGDI_ERROR)
-            {
-                DeleteDC(memoryDc);
-                DeleteObject(bitmap);
-                ReleaseDC(nullptr, screenDc);
-                return false;
-            }
-
-            constexpr std::size_t PixelBytes = static_cast<std::size_t>(TextureSize * TextureSize * 4);
-            std::memset(bitmapBits, 0, PixelBytes);
-            const bool drawn = DrawIconEx(
-                memoryDc,
-                0,
-                0,
-                icon,
-                TextureSize,
-                TextureSize,
-                0,
-                nullptr,
-                DI_NORMAL) != FALSE;
-            SelectObject(memoryDc, previousBitmap);
-
-            if (drawn)
-            {
-                texture.Create(ImTextureFormat_RGBA32, TextureSize, TextureSize);
-                const auto* source = static_cast<const unsigned char*>(bitmapBits);
-                auto* destination = static_cast<unsigned char*>(texture.GetPixels());
-                bool hasAlpha = false;
-                for (std::size_t offset = 3; offset < PixelBytes; offset += 4)
-                {
-                    hasAlpha = hasAlpha || source[offset] != 0;
-                }
-
-                for (std::size_t offset = 0; offset < PixelBytes; offset += 4)
-                {
-                    destination[offset + 0] = source[offset + 2];
-                    destination[offset + 1] = source[offset + 1];
-                    destination[offset + 2] = source[offset + 0];
-                    destination[offset + 3] = hasAlpha
-                        ? source[offset + 3]
-                        : ((source[offset + 0] | source[offset + 1] | source[offset + 2]) != 0 ? 255 : 0);
-                }
-                texture.UseColors = true;
-            }
-
-            DeleteDC(memoryDc);
-            DeleteObject(bitmap);
-            ReleaseDC(nullptr, screenDc);
-            return drawn;
-        }
-
-        ImTextureData* GetCachedProcessIcon(const Core::ProcessInfo& process)
-        {
-            if (process.pid == 0 || process.executablePath.empty() ||
-                (ImGui::GetIO().BackendFlags & ImGuiBackendFlags_RendererHasTextures) == 0)
-            {
-                return nullptr;
-            }
-
-            static std::unordered_map<std::wstring, std::unique_ptr<ImTextureData>> iconCache;
-            const std::wstring cacheKey = NormalizeIconCacheKey(process.executablePath);
-            const auto [cached, inserted] = iconCache.try_emplace(cacheKey);
-            if (!inserted)
-            {
-                return cached->second.get();
-            }
-
-            SHFILEINFOW shellInfo = {};
-            if (SHGetFileInfoW(
-                    process.executablePath.c_str(),
-                    0,
-                    &shellInfo,
-                    sizeof(shellInfo),
-                    SHGFI_ICON | SHGFI_SMALLICON) == 0 ||
-                shellInfo.hIcon == nullptr)
-            {
-                return nullptr;
-            }
-
-            auto texture = std::make_unique<ImTextureData>();
-            const bool rasterized = RasterizeIcon(shellInfo.hIcon, *texture);
-            DestroyIcon(shellInfo.hIcon);
-            if (!rasterized)
-            {
-                return nullptr;
-            }
-
-            ImGui::RegisterUserTexture(texture.get());
-            cached->second = std::move(texture);
-            return cached->second.get();
         }
 
         void DrawProcessIconGlyph(
@@ -557,8 +408,8 @@ namespace GlassPane::UI
                         const float processColumnRight = processCellCursor.x + ImGui::GetContentRegionAvail().x;
                         const ImVec4 nameColor = selected
                             ? ImVec4(0.92f, 0.96f, 1.0f, 1.0f)
-                            : (Core::SeverityRank(row.filterSeverity) >= Core::SeverityRank(Core::Severity::Low)
-                                ? SeverityColor(row.filterSeverity)
+                            : (Core::SeverityRank(row.authoritySeverity) >= Core::SeverityRank(Core::Severity::Low)
+                                ? SeverityColor(row.authoritySeverity)
                                 : ImGui::GetStyleColorVec4(ImGuiCol_Text));
 
                         const ImVec2 itemSpacing = ImGui::GetStyle().ItemSpacing;
@@ -601,7 +452,7 @@ namespace GlassPane::UI
                         }
                         else
                         {
-                            rowColor = RowTint(row.filterSeverity);
+                            rowColor = RowTint(row.authoritySeverity);
                             hasRowColor = rowColor.w > 0.0f;
                         }
                         if (hasRowColor)
@@ -638,10 +489,12 @@ namespace GlassPane::UI
                             ImVec2(processCellCursor.x, rowTop),
                             ImVec2(processColumnRight, rowBottom),
                             true);
-                        ImTextureData* processIcon = GetCachedProcessIcon(process);
-                        if (processIcon != nullptr)
+                        const ImTextureID processIcon = context.resolveProcessIcon
+                            ? context.resolveProcessIcon(process)
+                            : ImTextureID{};
+                        if (processIcon != ImTextureID{})
                         {
-                            drawList->AddImage(processIcon->GetTexRef(), iconMin, iconMax);
+                            drawList->AddImage(processIcon, iconMin, iconMax);
                         }
                         else
                         {
@@ -649,7 +502,7 @@ namespace GlassPane::UI
                                 drawList,
                                 iconMin,
                                 IconSize,
-                                row.filterSeverity,
+                                row.authoritySeverity,
                                 context.accentColor,
                                 selected,
                                 process.pid == 0);
@@ -681,10 +534,18 @@ namespace GlassPane::UI
                         const ImVec4 normalTextColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
                         drawCellText(1, std::to_string(process.pid), normalTextColor);
                         drawCellText(2, std::to_string(process.parentPid), normalTextColor);
+                        std::string severityText =
+                            WideToUtf8(Core::SeverityToString(row.authoritySeverity));
+#ifdef _DEBUG
+                        if (row.triageUnavailable)
+                        {
+                            severityText += " *";
+                        }
+#endif
                         drawCellText(
                             3,
-                            WideToUtf8(Core::SeverityToString(row.filterSeverity)),
-                            SeverityColor(row.filterSeverity));
+                            severityText,
+                            SeverityColor(row.authoritySeverity));
 
                         ImGui::PopID();
                     }
@@ -702,6 +563,13 @@ namespace GlassPane::UI
         ImGui::TextDisabled("|");
         ImGui::SameLine(0.0f, 8.0f);
         ImGui::TextColored(SeverityColor(Core::Severity::High), "%zu suspicious", context.suspiciousCount);
+#ifdef _DEBUG
+        if (context.unavailableCount != 0)
+        {
+            ImGui::SameLine(0.0f, 8.0f);
+            ImGui::TextDisabled("| %zu TriageEngine unavailable (*)", context.unavailableCount);
+        }
+#endif
         ImGui::SameLine(0.0f, 8.0f);
         ImGui::TextDisabled("| %zu visible", visibleRows.size());
     }

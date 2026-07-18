@@ -2,11 +2,484 @@
 // This file is intentionally included inside the ImGuiApp class definition so
 // inspector rendering can move out of ImGuiApp.cpp without moving state ownership.
 
-        Core::Severity TriageSeverityForFindings(const std::vector<Core::Finding>& findings)
+        Core::SelectedProcessTriageAuthority SelectedTriageAuthorityForProcess(
+            const Core::ProcessInfo& process) const
         {
-            return findings.empty()
-                ? Core::Severity::None
-                : FindingSeverityAsCoreSeverity(Core::HighestFindingSeverity(findings));
+            if (loadedSnapshotActive_)
+            {
+                Core::SelectedProcessTriageAuthority selected =
+                    Core::SelectCapturedSelectedProcessTriageAuthority(
+                    loadedSnapshotTriage_,
+                    true,
+                    process);
+                if (loadedSnapshotMetadata_.schemaVersion >=
+                        Export::GlassPaneSnapshotNativeEvidenceSchemaVersion &&
+                    (selected.historicalFallbackCaptured || selected.notCaptured))
+                {
+                    selected.verdict = Core::TriageVerdict::Informational;
+                    selected.analysisLevel =
+                        Core::SelectedTriageAnalysisLevel::Unavailable;
+                    selected.historicalFallbackCaptured = false;
+                    selected.unavailable = true;
+                    selected.notCaptured = false;
+                    selected.availability.category =
+                        Core::TriageAvailabilityCategory::ResultMissing;
+                    selected.availability.disclosure =
+                        Core::TriageAvailabilityDisclosure::TriageUnavailable;
+                    selected.availabilityReason =
+                        "The captured native TriageEngine result is unavailable for this process identity.";
+                    selected.availability.diagnostic =
+                        selected.availabilityReason;
+                }
+                return selected;
+            }
+            const Core::ObservationShadowState& authoritativeShadow =
+                AuthoritativeSelectedObservationShadow();
+            return Core::SelectNativeSelectedProcessTriageAuthority(
+                authoritativeShadow,
+                true,
+                process,
+                selectedEvidenceGeneration_,
+                ObservationShadowEntityScope(process, loadedSnapshotActive_),
+                processTriageCache_,
+                CurrentProcessTriageCacheStamp());
+        }
+
+        const std::vector<Core::NativeSourceEvidenceRecord>&
+        SelectedNativeSourceEvidenceForProcess(
+            const Core::ProcessInfo& process) const
+        {
+            static const std::vector<Core::NativeSourceEvidenceRecord> empty;
+            if (loadedSnapshotActive_)
+            {
+                if (loadedSnapshotMetadata_.schemaVersion <
+                        Export::GlassPaneSnapshotNativeEvidenceSchemaVersion ||
+                    !loadedSnapshotNativeSourceEvidence_.selectedRecord.has_value())
+                {
+                    return empty;
+                }
+                const Export::SavedNativeSourceEvidenceRecord& saved =
+                    loadedSnapshotNativeSourceEvidence_.selectedRecord.value();
+                return saved.identity == Core::MakeProcessIdentityKey(process)
+                    ? saved.records
+                    : empty;
+            }
+
+            const bool current =
+                SelectedProcessEnrichedPublicationMatchesCurrent() &&
+                Core::ObservationShadowMatches(
+                    selectedObservationShadow_,
+                    true,
+                    process.pid,
+                    ProcessCacheStamp(process),
+                    selectedEvidenceGeneration_) &&
+                selectedObservationShadow_.entityScope ==
+                    ObservationShadowEntityScope(process, false);
+            return current && selectedNativeSourceEvidence_.success
+                ? selectedNativeSourceEvidence_.records
+                : empty;
+        }
+
+        std::vector<Core::Finding> HistoricalSourceEvidenceForProcess(
+            const Core::ProcessInfo& process) const
+        {
+            std::vector<Core::Finding> historical;
+            if (!UsesHistoricalSourceEvidence())
+            {
+                return historical;
+            }
+
+            historical.reserve(
+                process.indicators.size() + process.contextNotes.size());
+            for (const std::wstring& indicator : process.indicators)
+            {
+                Core::Finding record;
+                record.observationKind = Core::ExistingFindingKind::Unknown;
+                // Historical process severity was not captured per source row.
+                // Keep each projected row neutral rather than fabricating a
+                // row-level legacy severity.
+                record.severity = Core::FindingSeverity::Info;
+                record.severityCaptured = false;
+                record.title = indicator.empty()
+                    ? L"Historical source record"
+                    : indicator;
+                record.category = L"Historical Source Evidence";
+                record.description =
+                    L"Imported legacy record retained as historical metadata. It is not current TriageEngine input.";
+                historical.push_back(std::move(record));
+            }
+            for (const std::wstring& note : process.contextNotes)
+            {
+                Core::Finding record;
+                record.observationKind = Core::ExistingFindingKind::Unknown;
+                record.severity = Core::FindingSeverity::Info;
+                record.severityCaptured = false;
+                record.title = L"Historical collection/context note";
+                record.category = L"Historical Source Evidence";
+                record.description = note;
+                historical.push_back(std::move(record));
+            }
+            return historical;
+        }
+
+        bool UsesHistoricalSourceEvidence() const
+        {
+            if (!loadedSnapshotActive_)
+            {
+                return false;
+            }
+            if (loadedSnapshotMetadata_.schemaVersion <
+                Export::GlassPaneSnapshotNativeEvidenceSchemaVersion)
+            {
+                return true;
+            }
+            return std::any_of(
+                snapshot_.processes.begin(),
+                snapshot_.processes.end(),
+                [](const Core::ProcessInfo& process) {
+                    return process.historicalSeverityCaptured ||
+                        process.historicalSuspiciousCaptured ||
+                        !process.indicators.empty() ||
+                        !process.contextNotes.empty();
+                });
+        }
+
+        std::wstring InspectorTriageVerdictText(Core::TriageVerdict verdict)
+        {
+            const std::string text = Core::TriageVerdictDisplayText(verdict);
+            return Utf8ToWide(text.c_str());
+        }
+
+        void RenderAuthoritativeRationaleSection(
+            const Core::TriageResult& triage,
+            Core::TriageRationaleSection section,
+            const char* emptyText)
+        {
+            ImGui::TextDisabled(
+                "%s",
+                Core::TriageRationaleSectionDisplayText(section).c_str());
+
+            bool rendered = false;
+            for (const Core::TriageRationaleEntry& entry :
+                 triage.previewRationaleEntries)
+            {
+                if (entry.section != section || entry.text.empty())
+                {
+                    continue;
+                }
+                ImGui::Bullet();
+                ImGui::SameLine();
+                WrappedTextColored(
+                    ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                    entry.text);
+                rendered = true;
+            }
+
+            if (!rendered)
+            {
+                WrappedTextDisabled(emptyText);
+            }
+        }
+
+        void RenderAuthoritativeTriageRationale(
+            const Core::SelectedProcessTriageAuthority& authority)
+        {
+            if (authority.persistedSummary != nullptr)
+            {
+                const auto renderPersisted = [this](
+                    const char* heading,
+                    const std::vector<std::string>& lines,
+                    const char* emptyText)
+                {
+                    ImGui::TextDisabled("%s", heading);
+                    if (lines.empty())
+                    {
+                        WrappedTextDisabled(emptyText);
+                        return;
+                    }
+                    for (const std::string& line : lines)
+                    {
+                        ImGui::Bullet();
+                        ImGui::SameLine();
+                        WrappedTextColored(
+                            ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                            line);
+                    }
+                };
+                renderPersisted(
+                    "Verdict basis",
+                    authority.persistedSummary->verdictBasis,
+                    "No review-relevant observation or completed correlation contributed.");
+                renderPersisted(
+                    "Completed correlations",
+                    authority.persistedSummary->completedCorrelations,
+                    "None observed.");
+                renderPersisted(
+                    "Supporting context",
+                    authority.persistedSummary->supportingContext,
+                    "None observed.");
+                renderPersisted(
+                    "Collection limitations",
+                    authority.persistedSummary->collectionLimitations,
+                    "None observed.");
+                renderPersisted(
+                    "Evidence-integrity context",
+                    authority.persistedSummary->evidenceIntegrityContext,
+                    "None observed.");
+                renderPersisted(
+                    "Unresolved correlations",
+                    authority.persistedSummary->unresolvedCorrelations,
+                    "None observed.");
+                return;
+            }
+
+            if (authority.triageResult == nullptr ||
+                !authority.triageResult->Succeeded())
+            {
+                return;
+            }
+
+            const Core::TriageResult& triage = *authority.triageResult;
+            RenderAuthoritativeRationaleSection(
+                triage,
+                Core::TriageRationaleSection::VerdictBasis,
+                "No review-relevant observation or completed correlation contributed.");
+            RenderAuthoritativeRationaleSection(
+                triage,
+                Core::TriageRationaleSection::CompletedCorrelations,
+                "None observed.");
+            RenderAuthoritativeRationaleSection(
+                triage,
+                Core::TriageRationaleSection::SupportingContext,
+                "None observed.");
+            RenderAuthoritativeRationaleSection(
+                triage,
+                Core::TriageRationaleSection::CollectionLimitations,
+                "None observed.");
+            RenderAuthoritativeRationaleSection(
+                triage,
+                Core::TriageRationaleSection::EvidenceIntegrityContext,
+                "None observed.");
+            RenderAuthoritativeRationaleSection(
+                triage,
+                Core::TriageRationaleSection::UnresolvedCorrelations,
+                "None observed.");
+        }
+
+        std::wstring FormatSelectedAuthorityForClipboard(
+            const Core::ProcessInfo& process,
+            const Core::SelectedProcessTriageAuthority& authority,
+            std::size_t sourceEvidenceCount,
+            bool historicalSourceEvidence)
+        {
+            std::wstringstream text;
+            text << L"GlassPane Triage Summary\r\n\r\n";
+            text << L"Verdict: ";
+            if (authority.notCaptured)
+            {
+                text << L"Not captured\r\n";
+            }
+            else if (authority.unavailable)
+            {
+                text << L"Unavailable\r\n";
+            }
+            else
+            {
+                text << InspectorTriageVerdictText(authority.verdict) << L"\r\n";
+            }
+            text << L"Analysis level: " << Utf8ToWide(
+                Core::SelectedTriageAnalysisLevelDisplayText(
+                    authority.analysisLevel).c_str()) << L"\r\n";
+            if (authority.UsesEnrichedTriage() && authority.baselineAvailable)
+            {
+                text << L"Baseline verdict: " <<
+                    InspectorTriageVerdictText(authority.baselineVerdict) <<
+                    L"\r\n";
+            }
+            text << L"Process: " <<
+                (process.name.empty() ? L"(unknown)" : process.name) <<
+                L" (PID " << process.pid << L")\r\n";
+
+            if (authority.notCaptured)
+            {
+                text << L"\r\nAuthoritative TriageEngine results were not captured in this older snapshot.\r\n";
+            }
+            else if (authority.unavailable)
+            {
+                text << L"\r\nTriageEngine result unavailable for this entity. No authoritative attention level is available.\r\n";
+            }
+            else if (authority.analysisLevel ==
+                Core::SelectedTriageAnalysisLevel::LegacyFallback)
+            {
+                text << L"\r\nThis schema-4 snapshot retained a captured historical legacy-fallback state. It was not recomputed.\r\n";
+            }
+            else if (authority.triageResult != nullptr &&
+                authority.triageResult->Succeeded())
+            {
+                constexpr Core::TriageRationaleSection sections[] = {
+                    Core::TriageRationaleSection::VerdictBasis,
+                    Core::TriageRationaleSection::CompletedCorrelations,
+                    Core::TriageRationaleSection::SupportingContext,
+                    Core::TriageRationaleSection::CollectionLimitations,
+                    Core::TriageRationaleSection::EvidenceIntegrityContext,
+                    Core::TriageRationaleSection::UnresolvedCorrelations
+                };
+                for (Core::TriageRationaleSection section : sections)
+                {
+                    bool headingWritten = false;
+                    for (const Core::TriageRationaleEntry& entry :
+                        authority.triageResult->previewRationaleEntries)
+                    {
+                        if (entry.section != section || entry.text.empty())
+                        {
+                            continue;
+                        }
+                        if (!headingWritten)
+                        {
+                            text << L"\r\n" << Utf8ToWide(
+                                Core::TriageRationaleSectionDisplayText(
+                                    section).c_str()) << L":\r\n";
+                            headingWritten = true;
+                        }
+                        text << L"- " << Utf8ToWide(entry.text.c_str()) <<
+                            L"\r\n";
+                    }
+                    if (!headingWritten &&
+                        section == Core::TriageRationaleSection::VerdictBasis)
+                    {
+                        text << L"\r\n" << Utf8ToWide(
+                        Core::TriageRationaleSectionDisplayText(
+                            section).c_str()) <<
+                            L":\r\n- No review-relevant observation or completed correlation contributed.\r\n";
+                    }
+                }
+            }
+            else if (authority.persistedSummary != nullptr)
+            {
+                const auto appendLines = [&text](
+                    const wchar_t* heading,
+                    const std::vector<std::string>& lines)
+                {
+                    if (lines.empty())
+                    {
+                        return;
+                    }
+                    text << L"\r\n" << heading << L":\r\n";
+                    for (const std::string& line : lines)
+                    {
+                        text << L"- " << Utf8ToWide(line.c_str()) << L"\r\n";
+                    }
+                };
+                appendLines(L"Verdict basis", authority.persistedSummary->verdictBasis);
+                appendLines(L"Completed correlations", authority.persistedSummary->completedCorrelations);
+                appendLines(L"Supporting context", authority.persistedSummary->supportingContext);
+                appendLines(L"Collection limitations", authority.persistedSummary->collectionLimitations);
+                appendLines(L"Evidence-integrity context", authority.persistedSummary->evidenceIntegrityContext);
+                appendLines(L"Unresolved correlations", authority.persistedSummary->unresolvedCorrelations);
+            }
+
+            text << L"\r\n" <<
+                (historicalSourceEvidence
+                    ? L"Historical source evidence"
+                    : L"Native source evidence") << L":\r\n- " <<
+                sourceEvidenceCount <<
+                (sourceEvidenceCount == 1
+                    ? L" record retained.\r\n"
+                    : L" records retained.\r\n");
+            return text.str();
+        }
+
+        std::wstring FormatNativeSourceEvidenceRecordForClipboard(
+            const Core::NativeSourceEvidenceRecord& record)
+        {
+            std::wstringstream text;
+            text << Utf8ToWide(record.title.c_str()) << L"\r\n";
+            text << L"Domain: " << Utf8ToWide(
+                Core::EvidenceDomainDisplayText(record.domain).c_str()) << L"\r\n";
+            text << L"Disposition: " << Utf8ToWide(
+                Core::ObservationDispositionDisplayText(
+                    record.disposition).c_str()) << L"\r\n";
+            text << L"Strength: " << Utf8ToWide(
+                Core::ObservationStrengthDisplayText(
+                    record.strength).c_str()) << L"\r\n";
+            text << L"Confidence: " << Utf8ToWide(
+                Core::ObservationConfidenceDisplayText(
+                    record.confidence).c_str()) << L"\r\n";
+            text << L"Role: " << (record.collectionLimitation
+                ? L"Collection limitation"
+                : (record.contributedToVerdict
+                    ? L"Contributed to verdict"
+                    : L"Supporting context")) << L"\r\n";
+            if (!record.summary.empty())
+            {
+                text << Utf8ToWide(record.summary.c_str()) << L"\r\n";
+            }
+            for (const std::string& detail : record.details)
+            {
+                text << L"- " << Utf8ToWide(detail.c_str()) << L"\r\n";
+            }
+            for (const std::string& limitation : record.limitations)
+            {
+                text << L"- Limitation: " << Utf8ToWide(
+                    limitation.c_str()) << L"\r\n";
+            }
+            if (!record.provenanceSummary.empty())
+            {
+                text << L"Provenance: " << Utf8ToWide(
+                    record.provenanceSummary.c_str()) << L"\r\n";
+            }
+            return text.str();
+        }
+
+        std::wstring FormatSourceEvidenceForClipboard(
+            const Core::ProcessInfo& process,
+            const Core::SelectedProcessTriageAuthority& authority,
+            const std::vector<Core::NativeSourceEvidenceRecord>& evidence)
+        {
+            std::wstringstream text;
+            text << FormatSelectedAuthorityForClipboard(
+                process,
+                authority,
+                evidence.size(),
+                false);
+            if (!evidence.empty())
+            {
+                text << L"\r\nNative Source Evidence\r\n";
+                for (const Core::NativeSourceEvidenceRecord& record : evidence)
+                {
+                    text << L"\r\n" <<
+                        FormatNativeSourceEvidenceRecordForClipboard(record);
+                }
+            }
+            return text.str();
+        }
+
+        std::wstring FormatHistoricalSourceEvidenceForClipboard(
+            const Core::ProcessInfo& process,
+            const Core::SelectedProcessTriageAuthority& authority)
+        {
+            std::wstringstream text;
+            text << FormatSelectedAuthorityForClipboard(
+                process,
+                authority,
+                process.indicators.size() + process.contextNotes.size(),
+                true);
+            if (!process.indicators.empty() || !process.contextNotes.empty())
+            {
+                text << L"\r\nHistorical Source Evidence\r\n";
+                text << L"Imported legacy records are retained as historical metadata and are not current TriageEngine input.\r\n";
+                for (const std::wstring& indicator : process.indicators)
+                {
+                    text << L"- " << indicator <<
+                        L" (historical source severity: Not captured)\r\n";
+                }
+                for (const std::wstring& note : process.contextNotes)
+                {
+                    text << L"- Collection/context note: " << note <<
+                        L" (historical source severity: Not captured)\r\n";
+                }
+            }
+            return text.str();
         }
 
         std::wstring InspectorProcessName(const Core::ProcessInfo& process)
@@ -14,9 +487,10 @@
             return process.name.empty() ? L"(unknown process)" : process.name;
         }
 
-        std::wstring InspectorFindingCountText(std::size_t findingCount)
+        std::wstring InspectorEvidenceCountText(std::size_t recordCount)
         {
-            return std::to_wstring(findingCount) + (findingCount == 1 ? L" finding" : L" findings");
+            return std::to_wstring(recordCount) +
+                (recordCount == 1 ? L" record" : L" records");
         }
 
         static int CompareInspectorTextCaseInsensitive(const std::wstring& left, const std::wstring& right)
@@ -360,24 +834,1921 @@
             ImGui::Dummy(ImVec2(size, size));
         }
 
+#ifdef _DEBUG
+        static constexpr std::size_t DebugObservationMaxVisibleCorrelations = 128;
+        static constexpr std::size_t DebugObservationMaxVisibleGroups = 256;
+        static constexpr std::size_t DebugObservationMaxVisibleRecords = 256;
+
+        Core::Severity DebugObservationVerdictSeverity(Core::TriageVerdict verdict)
+        {
+            switch (verdict)
+            {
+            case Core::TriageVerdict::HighAttention:
+                return Core::Severity::High;
+            case Core::TriageVerdict::MediumAttention:
+                return Core::Severity::Medium;
+            case Core::TriageVerdict::LowAttention:
+                return Core::Severity::Low;
+            case Core::TriageVerdict::Informational:
+            default:
+                return Core::Severity::None;
+            }
+        }
+
+        std::string DebugObservationDomainsText(const std::set<Core::EvidenceDomain>& domains)
+        {
+            std::string text;
+            for (Core::EvidenceDomain domain : domains)
+            {
+                if (!text.empty())
+                {
+                    text += ", ";
+                }
+                text += Core::EvidenceDomainDisplayText(domain);
+            }
+            return text.empty() ? "None" : text;
+        }
+
+        std::string DebugObservationDomainsText(const std::vector<Core::EvidenceDomain>& domains)
+        {
+            std::string text;
+            for (Core::EvidenceDomain domain : domains)
+            {
+                if (!text.empty())
+                {
+                    text += ", ";
+                }
+                text += Core::EvidenceDomainDisplayText(domain);
+            }
+            return text.empty() ? "None" : text;
+        }
+
+        std::string DebugObservationArtifactDomainCountsText(
+            const std::vector<Core::ObservationDomainArtifactCount>& counts)
+        {
+            std::string text;
+            for (const Core::ObservationDomainArtifactCount& count : counts)
+            {
+                if (!text.empty())
+                {
+                    text += ", ";
+                }
+                text += Core::EvidenceDomainDisplayText(count.domain) + ": " +
+                    std::to_string(count.distinctArtifactCount);
+            }
+            return text.empty() ? "None" : text;
+        }
+
+        const char* DebugRefinedObservationRoleText(Core::RefinedObservationRole role)
+        {
+            switch (role)
+            {
+            case Core::RefinedObservationRole::Supporting:
+                return "Supporting";
+            case Core::RefinedObservationRole::ArtifactAttribute:
+                return "Artifact attribute";
+            case Core::RefinedObservationRole::Duplicate:
+                return "Duplicate";
+            case Core::RefinedObservationRole::Primary:
+            default:
+                return "Primary";
+            }
+        }
+
+        void RenderDebugObservationField(const char* label, const std::string& value)
+        {
+            ImGui::TextDisabled("%s", label);
+            if (value.empty())
+            {
+                WrappedTextDisabled("(not supplied)");
+                return;
+            }
+            WrappedTextColored(ImGui::GetStyleColorVec4(ImGuiCol_Text), value);
+        }
+
+        void RenderDebugObservationStringList(
+            const char* label,
+            const std::vector<std::string>& values,
+            const char* emptyText)
+        {
+            ImGui::TextDisabled("%s", label);
+            if (values.empty())
+            {
+                WrappedTextDisabled(emptyText);
+                return;
+            }
+            const std::size_t visibleCount = std::min(
+                values.size(),
+                DebugObservationMaxVisibleRecords);
+            for (std::size_t index = 0; index < visibleCount; ++index)
+            {
+                ImGui::Bullet();
+                ImGui::SameLine();
+                WrappedTextColored(
+                    ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                    values[index]);
+            }
+            if (values.size() > visibleCount)
+            {
+                WrappedTextDisabled(
+                    std::to_string(values.size() - visibleCount) +
+                    " additional bounded item(s) are retained in the pipeline state but omitted from this view.");
+            }
+        }
+
+        void RenderDebugObservationArtifactAttributes(
+            const std::vector<Core::ObservationArtifactAttribute>& attributes)
+        {
+            ImGui::TextDisabled("Artifact attributes");
+            if (attributes.empty())
+            {
+                WrappedTextDisabled("No typed artifact attributes supplied.");
+                return;
+            }
+
+            const std::size_t visibleCount = std::min(
+                attributes.size(),
+                DebugObservationMaxVisibleRecords);
+            for (std::size_t index = 0; index < visibleCount; ++index)
+            {
+                const Core::ObservationArtifactAttribute& attribute =
+                    attributes[index];
+                std::string text = attribute.key.empty()
+                    ? "Attribute"
+                    : attribute.key;
+                if (!attribute.value.empty())
+                {
+                    text += ": " + attribute.value;
+                }
+                ImGui::Bullet();
+                ImGui::SameLine();
+                WrappedTextColored(
+                    ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                    text);
+            }
+            if (attributes.size() > visibleCount)
+            {
+                WrappedTextDisabled(
+                    std::to_string(attributes.size() - visibleCount) +
+                    " additional artifact attribute(s) are retained in the pipeline state but omitted from this view.");
+            }
+        }
+
+        void RenderDebugObservationRecord(
+            const Core::ObservationRecord& record,
+            const Core::RefinedObservationMember* refinedMember)
+        {
+            const Core::Observation& sourceObservation = record.observation;
+            const std::string label = sourceObservation.title.empty()
+                ? (sourceObservation.id.empty()
+                    ? "Untitled observation"
+                    : sourceObservation.id)
+                : sourceObservation.title;
+
+            ImGui::PushID(static_cast<const void*>(&record));
+            if (ImGui::TreeNodeEx(
+                    "ObservationRecord",
+                    ImGuiTreeNodeFlags_SpanAvailWidth,
+                    "%s",
+                    label.c_str()))
+            {
+                const Core::Observation effective = refinedMember != nullptr
+                    ? Core::EffectiveObservation(*refinedMember)
+                    : sourceObservation;
+                RenderDebugObservationField("Observation ID", effective.id);
+                RenderDebugObservationField("Rule ID", effective.ruleId);
+                RenderDebugObservationField("Summary", effective.summary);
+                RenderDebugObservationField(
+                    "Domain",
+                    Core::EvidenceDomainDisplayText(effective.domain));
+                RenderDebugObservationField(
+                    "Disposition",
+                    Core::ObservationDispositionDisplayText(effective.disposition));
+                RenderDebugObservationField(
+                    "Strength (evidence significance)",
+                    Core::ObservationStrengthDisplayText(effective.strength));
+                RenderDebugObservationField(
+                    "Confidence (support for the fact)",
+                    Core::ObservationConfidenceDisplayText(effective.confidence));
+                RenderDebugObservationField(
+                    "Verdict contribution",
+                    effective.contributesToVerdict ? "Contributing" : "Not contributing");
+                RenderDebugObservationField("Entity scope", effective.entityScope);
+                RenderDebugObservationField("Grouping key", effective.groupingKey);
+                RenderDebugObservationField("Correlation key", effective.correlationKey);
+                RenderDebugObservationField(
+                    "Artifact kind",
+                    Core::ObservationArtifactKindDisplayText(
+                        effective.artifactIdentity.kind));
+                RenderDebugObservationField(
+                    "Artifact entity scope",
+                    effective.artifactIdentity.entityScope);
+                RenderDebugObservationField(
+                    "Artifact key",
+                    effective.artifactIdentity.artifactKey);
+                RenderDebugObservationArtifactAttributes(
+                    effective.artifactAttributes);
+
+                if (refinedMember != nullptr)
+                {
+                    RenderDebugObservationField(
+                        "Refined role",
+                        DebugRefinedObservationRoleText(refinedMember->role));
+                    RenderDebugObservationField(
+                        "Semantic fingerprint",
+                        refinedMember->semanticFingerprint);
+                    if (!refinedMember->primaryObservationId.empty())
+                    {
+                        RenderDebugObservationField(
+                            "Primary observation",
+                            refinedMember->primaryObservationId);
+                    }
+                    if (refinedMember->suppressed)
+                    {
+                        RenderDebugObservationField(
+                            "Original disposition",
+                            Core::ObservationDispositionDisplayText(
+                                record.observation.disposition));
+                        RenderDebugObservationField(
+                            "Original verdict contribution",
+                            record.observation.contributesToVerdict
+                                ? "Eligible"
+                                : "Not contributing");
+                        RenderDebugObservationField(
+                            "Structural suppressor",
+                            refinedMember->suppression.suppressorId);
+                        RenderDebugObservationField(
+                            "Suppression reason",
+                            refinedMember->suppression.reason);
+                    }
+                }
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Native typed source");
+                RenderDebugObservationField("Source rule ID", record.source.sourceRuleId);
+                RenderDebugObservationField("Source title", record.source.sourceTitle);
+                RenderDebugObservationField("Source message", record.source.sourceMessage);
+                RenderDebugObservationField("Source category", record.source.sourceCategory);
+
+                ImGui::Separator();
+                ImGui::TextDisabled("Provenance");
+                RenderDebugObservationField(
+                    "Source kind",
+                    Core::ObservationSourceKindDisplayText(effective.provenance.sourceKind));
+                RenderDebugObservationField(
+                    "Source identifier",
+                    effective.provenance.sourceIdentifier);
+                RenderDebugObservationField(
+                    "Collection method",
+                    effective.provenance.collectionMethod);
+                RenderDebugObservationField(
+                    "Collection timestamp",
+                    effective.provenance.collectionTimestamp);
+                RenderDebugObservationField(
+                    "Required privilege",
+                    effective.provenance.requiredPrivilege);
+                RenderDebugObservationField(
+                    "Source availability",
+                    effective.provenance.sourceAvailable ? "Available" : "Unavailable");
+                RenderDebugObservationStringList(
+                    "Provenance limitations",
+                    effective.provenance.limitations,
+                    "No provenance limitations supplied.");
+
+                RenderDebugObservationStringList(
+                    "Evidence",
+                    effective.evidence,
+                    "No source evidence strings supplied.");
+                RenderDebugObservationStringList(
+                    "Observation limitations",
+                    effective.limitations,
+                    "No observation limitations supplied.");
+
+                if (ImGui::TreeNodeEx(
+                        "EvidenceValues",
+                        ImGuiTreeNodeFlags_SpanAvailWidth,
+                        "Evidence values (expand to inspect)"))
+                {
+                    RenderDebugObservationField("Raw value", effective.rawValue);
+                    RenderDebugObservationField("Normalized value", effective.normalizedValue);
+                    RenderDebugObservationField(
+                        "Raw source reference",
+                        effective.provenance.rawSourceReference);
+                    ImGui::TreePop();
+                }
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+
+        struct DebugObservationLookup
+        {
+            std::unordered_map<std::string, const Core::ObservationRecord*> records;
+        };
+
+        DebugObservationLookup BuildDebugObservationLookup(
+            const Core::ObservationRefinementResult& refinement)
+        {
+            DebugObservationLookup lookup;
+            lookup.records.reserve(refinement.summary.rawObservationCount);
+            for (const Core::RefinedObservationGroup& group : refinement.groups)
+            {
+                for (const Core::RefinedObservationMember& member : group.members)
+                {
+                    lookup.records.emplace(
+                        member.sourceRecord.observation.id,
+                        &member.sourceRecord);
+                }
+            }
+            for (const Core::ObservationRecord& note : refinement.collectionNotes)
+            {
+                lookup.records.emplace(note.observation.id, &note);
+            }
+            for (const Core::ObservationRecord& note : refinement.evidenceIntegrityNotes)
+            {
+                lookup.records.emplace(note.observation.id, &note);
+            }
+            return lookup;
+        }
+
+        void RenderDebugObservationReference(
+            const std::string& observationId,
+            const DebugObservationLookup& lookup)
+        {
+            const auto recordIterator = lookup.records.find(observationId);
+            if (recordIterator == lookup.records.end() || recordIterator->second == nullptr)
+            {
+                ImGui::Bullet();
+                ImGui::SameLine();
+                WrappedTextDisabled(observationId + " (source observation unavailable)");
+                return;
+            }
+
+            const Core::ObservationRecord& record = *recordIterator->second;
+            const Core::Observation& observation = record.observation;
+
+            std::string heading = observationId;
+            if (!observation.title.empty())
+            {
+                heading += " — " + observation.title;
+            }
+            ImGui::Bullet();
+            ImGui::SameLine();
+            WrappedTextColored(ImGui::GetStyleColorVec4(ImGuiCol_Text), heading);
+            if (!observation.summary.empty())
+            {
+                ImGui::Indent();
+                WrappedTextDisabled(observation.summary);
+                ImGui::Unindent();
+            }
+        }
+
+        void RenderDebugObservationReferences(
+            const char* emptyText,
+            const std::vector<std::string>& observationIds,
+            const DebugObservationLookup& lookup)
+        {
+            if (observationIds.empty())
+            {
+                WrappedTextDisabled(emptyText);
+                return;
+            }
+            const std::size_t visibleCount = std::min(
+                observationIds.size(),
+                DebugObservationMaxVisibleRecords);
+            for (std::size_t index = 0; index < visibleCount; ++index)
+            {
+                RenderDebugObservationReference(observationIds[index], lookup);
+            }
+            if (observationIds.size() > visibleCount)
+            {
+                WrappedTextDisabled(
+                    std::to_string(observationIds.size() - visibleCount) +
+                    " additional observation reference(s) are retained in the pipeline state but omitted from this view.");
+            }
+        }
+
+        void RenderDebugRationaleEntries(
+            const std::vector<Core::TriageRationaleEntry>& entries,
+            Core::TriageRationaleSection section,
+            std::size_t maximumItems,
+            const char* emptyText,
+            const char* omittedText)
+        {
+            std::size_t rendered = 0;
+            for (const Core::TriageRationaleEntry& entry : entries)
+            {
+                if (entry.section != section)
+                {
+                    continue;
+                }
+                if (rendered >= maximumItems)
+                {
+                    break;
+                }
+                ImGui::Bullet();
+                ImGui::SameLine();
+                WrappedTextColored(ImGui::GetStyleColorVec4(ImGuiCol_Text), entry.text);
+                ++rendered;
+            }
+
+            if (rendered == 0)
+            {
+                WrappedTextDisabled(emptyText);
+                return;
+            }
+
+            std::size_t total = 0;
+            for (const Core::TriageRationaleEntry& entry : entries)
+            {
+                if (entry.section == section)
+                {
+                    ++total;
+                }
+            }
+            if (total > rendered)
+            {
+                WrappedTextDisabled(
+                    std::to_string(total - rendered) +
+                    omittedText);
+            }
+        }
+
+        void RenderDebugRationaleSection(
+            const Core::TriageResult& triage,
+            Core::TriageRationaleSection section,
+            std::size_t maximumItems)
+        {
+            RenderDebugRationaleEntries(
+                triage.rationaleEntries,
+                section,
+                maximumItems,
+                "No Core rationale entries in this section.",
+                " additional Core rationale line(s) are available in details.");
+        }
+
+        void RenderDebugPreviewRationaleSection(
+            const Core::TriageResult& triage,
+            Core::TriageRationaleSection section,
+            std::size_t maximumItems)
+        {
+            // Compact preview text is generated by Core specifically for the
+            // summary surface. Never fall back to the detailed rationale here:
+            // detailed entries intentionally retain internal audit identities.
+            RenderDebugRationaleEntries(
+                triage.previewRationaleEntries,
+                section,
+                maximumItems,
+                "No compact Core rationale entries in this section.",
+                " additional compact rationale line(s) are available in details.");
+        }
+
+        void RenderDebugCorrelationCard(
+            const Core::ObservationCorrelation& correlation,
+            const DebugObservationLookup& lookup)
+        {
+            ImGui::PushID(correlation.id.c_str());
+            const std::string title = correlation.title.empty()
+                ? "Completed typed correlation"
+                : correlation.title;
+            if (ImGui::TreeNodeEx(
+                    "CorrelationCard",
+                    ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_SpanAvailWidth,
+                    "%s",
+                    title.c_str()))
+            {
+                RenderDebugObservationField("Correlation ID", correlation.id);
+                RenderDebugObservationField("Rule ID", correlation.ruleId);
+                RenderDebugObservationField(
+                    "Significance",
+                    Core::CorrelationSignificanceDisplayText(correlation.significance));
+                RenderDebugObservationField(
+                    "Confidence",
+                    Core::ObservationConfidenceDisplayText(correlation.confidence));
+                RenderDebugObservationField(
+                    "Participating domains",
+                    DebugObservationDomainsText(correlation.participatingDomains));
+                RenderDebugObservationField(
+                    "Participating domain count",
+                    std::to_string(correlation.participatingDomains.size()));
+                RenderDebugObservationField("Rationale", correlation.rationale);
+                RenderDebugObservationField(
+                    "Verdict contribution",
+                    correlation.contributesToVerdict ? "Contributing" : "Not contributing");
+
+                ImGui::TextDisabled("Participating observations");
+                RenderDebugObservationReferences(
+                    "No participating observation references supplied.",
+                    correlation.participatingObservationIds,
+                    lookup);
+
+                ImGui::TextDisabled("Supporting observations");
+                RenderDebugObservationReferences(
+                    "No supporting observation references supplied.",
+                    correlation.supportingObservationIds,
+                    lookup);
+                RenderDebugObservationStringList(
+                    "Limitations",
+                    correlation.limitations,
+                    "No correlation limitations supplied.");
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
+
+        void RenderDebugObservationDetails(const Core::ObservationShadowState& shadow)
+        {
+            const Core::TriageResult& triage = shadow.triage;
+            std::optional<DebugObservationLookup> lookup;
+            const auto observationLookup = [&]() -> const DebugObservationLookup&
+            {
+                if (!lookup.has_value())
+                {
+                    lookup.emplace(BuildDebugObservationLookup(shadow.refinement));
+                }
+                return lookup.value();
+            };
+
+            if (ImGui::CollapsingHeader(
+                    "Native pipeline diagnostics##ObservationDebugDiagnostics"))
+            {
+                const Core::ObservationShadowDecisionSummary& decision =
+                    shadow.decisionSummary;
+                RenderDebugObservationField(
+                    "Raw observations",
+                    std::to_string(decision.rawObservationCount));
+                RenderDebugObservationField(
+                    "Refined groups",
+                    std::to_string(decision.refinedGroupCount));
+                RenderDebugObservationField(
+                    "Artifact groups",
+                    std::to_string(decision.artifactGroupCount));
+                RenderDebugObservationField(
+                    "Distinct artifacts",
+                    std::to_string(decision.distinctArtifactCount));
+                RenderDebugObservationField(
+                    "Artifact attributes",
+                    std::to_string(decision.artifactAttributeCount));
+                RenderDebugObservationField(
+                    "Distinct artifacts by domain",
+                    DebugObservationArtifactDomainCountsText(
+                        shadow.refinement.summary.distinctArtifactCountsByDomain));
+                RenderDebugObservationField(
+                    "Activated correlations",
+                    std::to_string(decision.activatedCorrelationCount));
+                RenderDebugObservationField(
+                    "Contributing observations",
+                    std::to_string(decision.contributingObservationCount));
+                RenderDebugObservationField(
+                    "Contributing correlations",
+                    std::to_string(decision.contributingCorrelationCount));
+                RenderDebugObservationField(
+                    "Contributing domains",
+                    std::to_string(decision.contributingDomainCount));
+                RenderDebugObservationField(
+                    "Maximum correlation domains",
+                    std::to_string(
+                        decision.maximumContributingCorrelationDomainCount));
+                RenderDebugObservationField(
+                    "Same-domain correlations",
+                    std::to_string(
+                        decision.sameDomainContributingCorrelationCount));
+                RenderDebugObservationField(
+                    "Same-domain correlation Medium ceiling",
+                    decision.sameDomainVerdictCeilingApplied
+                        ? "Applied"
+                        : "Not applied");
+                RenderDebugObservationField(
+                    "Standalone Strong High gate",
+                    decision.qualifiedStandaloneStrongHighGateSatisfied
+                        ? "Satisfied"
+                        : "Not satisfied");
+                RenderDebugObservationField(
+                    "Coherent multi-domain High gate",
+                    decision.coherentMultiDomainHighGateSatisfied
+                        ? "Satisfied"
+                        : "Not satisfied");
+                RenderDebugObservationField(
+                    "Context observations",
+                    std::to_string(decision.contextCount));
+                RenderDebugObservationField(
+                    "Collection notes",
+                    std::to_string(decision.collectionNoteCount));
+                RenderDebugObservationField(
+                    "Unresolved correlations",
+                    std::to_string(decision.unresolvedCorrelationCount));
+                RenderDebugObservationField(
+                    "Typed source facts represented",
+                    std::to_string(decision.typedSourceFactCount));
+                RenderDebugObservationField(
+                    "Source facts declared",
+                    std::to_string(decision.declaredSourceFactCount));
+                RenderDebugObservationField(
+                    "Duplicate typed facts excluded",
+                    std::to_string(decision.typedSourceFactDuplicateCount));
+                RenderDebugObservationField(
+                    "Native build duration",
+                    std::to_string(decision.nativeBuildDurationMicroseconds) + " us");
+                RenderDebugObservationField(
+                    "Refinement duration",
+                    std::to_string(decision.refinementDurationMicroseconds) + " us");
+                RenderDebugObservationField(
+                    "Correlation duration",
+                    std::to_string(decision.correlationDurationMicroseconds) + " us");
+                RenderDebugObservationField(
+                    "Triage duration",
+                    std::to_string(decision.triageDurationMicroseconds) + " us");
+                RenderDebugObservationField(
+                    "Rationale aggregation",
+                    std::to_string(
+                        decision.rationaleAggregationDurationMicroseconds) +
+                        " us");
+                RenderDebugObservationField(
+                    "Total enriched pipeline duration",
+                    std::to_string(decision.totalPipelineDurationMicroseconds) +
+                        " us");
+                WrappedTextDisabled(
+                    "These counters are bounded in-memory diagnostics. They are not uploaded or persisted by this view.");
+                RenderDebugObservationStringList(
+                    "Refinement warnings",
+                    shadow.refinement.warnings,
+                    "No refinement warnings were retained.");
+                RenderDebugObservationStringList(
+                    "Correlation warnings",
+                    shadow.correlation.warnings,
+                    "No correlation warnings were retained.");
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "Triage rationale##ObservationDebugRationale",
+                    ImGuiTreeNodeFlags_DefaultOpen))
+            {
+                constexpr Core::TriageRationaleSection Sections[] = {
+                    Core::TriageRationaleSection::VerdictBasis,
+                    Core::TriageRationaleSection::CompletedCorrelations,
+                    Core::TriageRationaleSection::SupportingContext,
+                    Core::TriageRationaleSection::CollectionLimitations,
+                    Core::TriageRationaleSection::EvidenceIntegrityContext,
+                    Core::TriageRationaleSection::UnresolvedCorrelations,
+                    Core::TriageRationaleSection::PresentationNotes
+                };
+                for (Core::TriageRationaleSection section : Sections)
+                {
+                    ImGui::TextDisabled(
+                        "%s",
+                        Core::TriageRationaleSectionDisplayText(section).c_str());
+                    RenderDebugRationaleSection(
+                        triage,
+                        section,
+                        Core::TriageMaxRationaleEntries);
+                }
+                RenderDebugObservationStringList(
+                    "Triage limitations",
+                    triage.limitations,
+                    "No triage-result limitations supplied.");
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "Completed correlations##ObservationDebugCorrelations"))
+            {
+                if (shadow.correlation.correlations.empty())
+                {
+                    WrappedTextDisabled("No typed correlations were completed.");
+                }
+                const std::size_t visibleCount = std::min(
+                    shadow.correlation.correlations.size(),
+                    DebugObservationMaxVisibleCorrelations);
+                if (visibleCount > 0)
+                {
+                    const DebugObservationLookup& references = observationLookup();
+                    for (std::size_t index = 0; index < visibleCount; ++index)
+                    {
+                        RenderDebugCorrelationCard(
+                            shadow.correlation.correlations[index],
+                            references);
+                    }
+                }
+                if (shadow.correlation.correlations.size() > visibleCount)
+                {
+                    WrappedTextDisabled(
+                        std::to_string(
+                            shadow.correlation.correlations.size() - visibleCount) +
+                        " additional completed correlation(s) are retained in the pipeline state but omitted from this view.");
+                }
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "Contributing observations##ObservationDebugContributors"))
+            {
+                if (triage.contributingObservationIds.empty())
+                {
+                    WrappedTextDisabled(
+                        "No observations contribute directly to the triage verdict.");
+                }
+                else
+                {
+                    RenderDebugObservationReferences(
+                        "No observations contribute directly to the triage verdict.",
+                        triage.contributingObservationIds,
+                        observationLookup());
+                }
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "Supporting context##ObservationDebugContext"))
+            {
+                if (triage.contextObservationIds.empty())
+                {
+                    WrappedTextDisabled(
+                        "No supporting context observations were retained.");
+                }
+                else
+                {
+                    RenderDebugObservationReferences(
+                        "No supporting context observations were retained.",
+                        triage.contextObservationIds,
+                        observationLookup());
+                }
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "Collection limitations##ObservationDebugCollectionNotes"))
+            {
+                if (shadow.refinement.collectionNotes.empty())
+                {
+                    WrappedTextDisabled("No collection notes were retained.");
+                }
+                const std::size_t visibleCount = std::min(
+                    shadow.refinement.collectionNotes.size(),
+                    DebugObservationMaxVisibleRecords);
+                for (std::size_t index = 0; index < visibleCount; ++index)
+                {
+                    RenderDebugObservationRecord(
+                        shadow.refinement.collectionNotes[index],
+                        nullptr);
+                }
+                if (shadow.refinement.collectionNotes.size() > visibleCount)
+                {
+                    WrappedTextDisabled(
+                        std::to_string(
+                            shadow.refinement.collectionNotes.size() - visibleCount) +
+                        " additional collection note(s) are retained in the pipeline state but omitted from this view.");
+                }
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "Evidence-integrity context##ObservationDebugIntegrityNotes"))
+            {
+                if (shadow.refinement.evidenceIntegrityNotes.empty())
+                {
+                    WrappedTextDisabled("No evidence-integrity notes were retained.");
+                }
+                const std::size_t visibleCount = std::min(
+                    shadow.refinement.evidenceIntegrityNotes.size(),
+                    DebugObservationMaxVisibleRecords);
+                for (std::size_t index = 0; index < visibleCount; ++index)
+                {
+                    RenderDebugObservationRecord(
+                        shadow.refinement.evidenceIntegrityNotes[index],
+                        nullptr);
+                }
+                if (shadow.refinement.evidenceIntegrityNotes.size() > visibleCount)
+                {
+                    WrappedTextDisabled(
+                        std::to_string(
+                            shadow.refinement.evidenceIntegrityNotes.size() - visibleCount) +
+                        " additional evidence-integrity note(s) are retained in the pipeline state but omitted from this view.");
+                }
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "Unresolved correlations##ObservationDebugUnresolved"))
+            {
+                if (shadow.correlation.unresolvedPreparations.empty())
+                {
+                    WrappedTextDisabled("No unresolved typed correlation preparations remain.");
+                }
+                const std::size_t visibleCount = std::min(
+                    shadow.correlation.unresolvedPreparations.size(),
+                    DebugObservationMaxVisibleCorrelations);
+                for (std::size_t index = 0; index < visibleCount; ++index)
+                {
+                    const Core::ObservationCorrelationPreparation& preparation =
+                        shadow.correlation.unresolvedPreparations[index];
+                    ImGui::PushID(static_cast<const void*>(&preparation));
+                    const std::string heading = preparation.correlationKey.empty()
+                        ? "Unresolved typed correlation"
+                        : preparation.correlationKey;
+                    if (ImGui::TreeNodeEx(
+                            "UnresolvedCorrelation",
+                            ImGuiTreeNodeFlags_SpanAvailWidth,
+                            "%s",
+                            heading.c_str()))
+                    {
+                        RenderDebugObservationField("Entity scope", preparation.entityScope);
+                        RenderDebugObservationField(
+                            "Available supporting domains",
+                            DebugObservationDomainsText(
+                                preparation.availableSupportingDomains));
+                        RenderDebugObservationField(
+                            "Contains CorrelatedOnly evidence",
+                            preparation.containsCorrelatedOnly ? "Yes" : "No");
+                        ImGui::TextDisabled("Participating source observations");
+                        RenderDebugObservationReferences(
+                            "No source observation references supplied.",
+                            preparation.sourceObservationIds,
+                            observationLookup());
+                        ImGui::TreePop();
+                    }
+                    ImGui::PopID();
+                }
+                if (shadow.correlation.unresolvedPreparations.size() > visibleCount)
+                {
+                    WrappedTextDisabled(
+                        std::to_string(
+                            shadow.correlation.unresolvedPreparations.size() - visibleCount) +
+                        " additional unresolved correlation preparation(s) are retained in the pipeline state but omitted from this view.");
+                }
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "Suppressed observations##ObservationDebugSuppressions"))
+            {
+                std::size_t suppressedCount = 0;
+                std::size_t renderedCount = 0;
+                for (const Core::RefinedObservationGroup& group : shadow.refinement.groups)
+                {
+                    for (const Core::RefinedObservationMember& member : group.members)
+                    {
+                        if (!member.suppressed)
+                        {
+                            continue;
+                        }
+                        ++suppressedCount;
+                        if (renderedCount < DebugObservationMaxVisibleRecords)
+                        {
+                            RenderDebugObservationRecord(member.sourceRecord, &member);
+                            ++renderedCount;
+                        }
+                    }
+                }
+                if (suppressedCount == 0)
+                {
+                    WrappedTextDisabled("No structural suppressions were applied.");
+                }
+                else if (suppressedCount > renderedCount)
+                {
+                    WrappedTextDisabled(
+                        std::to_string(suppressedCount - renderedCount) +
+                        " additional suppressed observation(s) are retained in the pipeline state but omitted from this view.");
+                }
+            }
+
+            if (ImGui::CollapsingHeader(
+                    "All refined groups and source observations##ObservationDebugAllGroups"))
+            {
+                if (shadow.refinement.groups.empty())
+                {
+                    WrappedTextDisabled("No behavioral or context groups were retained.");
+                }
+                const std::size_t visibleGroupCount = std::min(
+                    shadow.refinement.groups.size(),
+                    DebugObservationMaxVisibleGroups);
+                for (std::size_t groupIndex = 0;
+                     groupIndex < visibleGroupCount;
+                     ++groupIndex)
+                {
+                    const Core::RefinedObservationGroup& group =
+                        shadow.refinement.groups[groupIndex];
+                    ImGui::PushID(static_cast<const void*>(&group));
+                    std::string heading = group.semanticFamily.empty()
+                        ? (group.groupingKey.empty() ? "Singleton observation group" : group.groupingKey)
+                        : group.semanticFamily;
+                    heading += " — " + Core::EvidenceDomainDisplayText(group.domain);
+                    heading += " — " + std::to_string(group.members.size()) + " source observation(s)";
+                    if (ImGui::TreeNodeEx(
+                            "RefinedObservationGroup",
+                            ImGuiTreeNodeFlags_Framed | ImGuiTreeNodeFlags_SpanAvailWidth,
+                            "%s",
+                            heading.c_str()))
+                    {
+                        RenderDebugObservationField("Entity scope", group.entityScope);
+                        RenderDebugObservationField("Grouping key", group.groupingKey);
+                        RenderDebugObservationField("Semantic family", group.semanticFamily);
+                        RenderDebugObservationField(
+                            "Artifact kind",
+                            Core::ObservationArtifactKindDisplayText(
+                                group.artifactIdentity.kind));
+                        RenderDebugObservationField(
+                            "Artifact entity scope",
+                            group.artifactIdentity.entityScope);
+                        RenderDebugObservationField(
+                            "Artifact key",
+                            group.artifactIdentity.artifactKey);
+                        RenderDebugObservationField(
+                            "Artifact attributes",
+                            std::to_string(group.artifactAttributeCount));
+                        const std::size_t visibleMemberCount = std::min(
+                            group.members.size(),
+                            DebugObservationMaxVisibleRecords);
+                        for (std::size_t memberIndex = 0;
+                             memberIndex < visibleMemberCount;
+                             ++memberIndex)
+                        {
+                            const Core::RefinedObservationMember& member =
+                                group.members[memberIndex];
+                            RenderDebugObservationRecord(member.sourceRecord, &member);
+                        }
+                        if (group.members.size() > visibleMemberCount)
+                        {
+                            WrappedTextDisabled(
+                                std::to_string(
+                                    group.members.size() - visibleMemberCount) +
+                        " additional source observation(s) in this group are retained in the pipeline state but omitted from this view.");
+                        }
+                        ImGui::TreePop();
+                    }
+                    ImGui::PopID();
+                }
+                if (shadow.refinement.groups.size() > visibleGroupCount)
+                {
+                    WrappedTextDisabled(
+                        std::to_string(
+                            shadow.refinement.groups.size() - visibleGroupCount) +
+                        " additional refined group(s) are retained in the pipeline state but omitted from this view.");
+                }
+            }
+        }
+
+        void RenderProcessTriageCacheDebugSummary(
+            const Core::ProcessTriageCache& cache,
+            bool hasCurrentSourceStamp)
+        {
+            if (!ImGui::CollapsingHeader(
+                    "Process-wide baseline cache (Debug)##BaselineCacheDiagnostics"))
+            {
+                return;
+            }
+
+            const Core::ProcessTriageCacheSummary& summary = cache.summary;
+            RenderDebugObservationField(
+                "Cache source",
+                cache.sourceStamp.loadedSnapshot
+                    ? "Loaded snapshot evidence only"
+                    : "Live process-wide evidence only");
+            RenderDebugObservationField(
+                "Current source stamp",
+                hasCurrentSourceStamp ? "Yes" : "No");
+            RenderDebugObservationField(
+                "Status",
+                Core::ProcessTriageCacheStatusDisplayText(cache.status));
+            RenderDebugObservationField(
+                "Process generation",
+                std::to_string(cache.sourceStamp.processGeneration));
+            RenderDebugObservationField(
+                "Evidence generation",
+                std::to_string(cache.sourceStamp.evidenceGeneration));
+            RenderDebugObservationField(
+                "Scope generation",
+                std::to_string(cache.sourceStamp.scopeGeneration));
+            RenderDebugObservationField(
+                "Build invocations",
+                std::to_string(baselineCacheBuildInvocationCount_));
+            RenderDebugObservationField(
+                "Source processes",
+                std::to_string(summary.sourceProcessCount));
+            RenderDebugObservationField(
+                "Retained entries",
+                std::to_string(summary.retainedProcessCount));
+            RenderDebugObservationField(
+                "Successful entries",
+                std::to_string(summary.successfulEntryCount));
+            RenderDebugObservationField(
+                "Failed entries",
+                std::to_string(summary.failedEntryCount));
+            RenderDebugObservationField(
+                "Omitted entries",
+                std::to_string(summary.omittedProcessCount));
+            RenderDebugObservationField(
+                "Authority lookups",
+                std::to_string(processAuthorityUnavailableKinds_.size()));
+            RenderDebugObservationField(
+                "Baseline authority successes",
+                std::to_string(
+                    processAuthorityUnavailableKinds_.size() >=
+                            processAuthorityUnavailableCount_
+                        ? processAuthorityUnavailableKinds_.size() -
+                            processAuthorityUnavailableCount_
+                        : 0));
+            RenderDebugObservationField(
+                "Per-entity unavailable",
+                std::to_string(processAuthorityUnavailableCount_));
+            for (std::size_t index = 1;
+                index < processAuthorityUnavailableCountsByKind_.size();
+                ++index)
+            {
+                if (processAuthorityUnavailableCountsByKind_[index] == 0)
+                {
+                    continue;
+                }
+                const auto kind =
+                    static_cast<Core::ProcessTriageUnavailableKind>(index);
+                std::string value = std::to_string(
+                    processAuthorityUnavailableCountsByKind_[index]);
+                const Core::TriageAvailabilityDisposition disposition =
+                    loadedSnapshotActive_ &&
+                        loadedSnapshotMetadata_.schemaVersion <
+                            Export::GlassPaneSnapshotSchemaVersion
+                        ? Core::TriageAvailabilityDisposition::HistoricalCompatibilityOnly
+                        : Core::ClassifyTriageAvailability(
+                            Core::CanonicalTriageUnavailableCategory(kind));
+                value += "; " +
+                    Core::TriageAvailabilityDispositionDisplayText(disposition);
+                if (!processAuthorityUnavailableFirstIdentityByKind_[index].empty())
+                {
+                    value += "; first " +
+                        processAuthorityUnavailableFirstIdentityByKind_[index];
+                }
+                if (!processAuthorityUnavailableFirstDiagnosticByKind_[index].empty())
+                {
+                    value += "; " +
+                        processAuthorityUnavailableFirstDiagnosticByKind_[index];
+                }
+                RenderDebugObservationField(
+                    Core::ProcessTriageUnavailableKindDisplayText(kind).c_str(),
+                    value);
+            }
+            RenderDebugObservationField(
+                "Duplicate identities",
+                std::to_string(summary.duplicateIdentityCount));
+            RenderDebugObservationField(
+                "Ambiguous PID entries",
+                std::to_string(summary.ambiguousPidEntryCount));
+            RenderDebugObservationField(
+                "Truncated entries",
+                std::to_string(summary.truncatedEntryCount));
+            RenderDebugObservationField(
+                "Omitted source facts",
+                std::to_string(summary.omittedFactCount));
+            RenderDebugObservationField(
+                "Verdicts",
+                "Informational " + std::to_string(summary.informationalCount) +
+                    ", Low " + std::to_string(summary.lowAttentionCount) +
+                    ", Medium " + std::to_string(summary.mediumAttentionCount) +
+                    ", High " + std::to_string(summary.highAttentionCount));
+            RenderDebugObservationField(
+                "Raw observations",
+                std::to_string(summary.observationCount));
+            RenderDebugObservationField(
+                "Native typed facts",
+                std::to_string(summary.nativeFactCount));
+            RenderDebugObservationField(
+                "Duplicate typed facts excluded",
+                std::to_string(summary.duplicateExcludedCount));
+            RenderDebugObservationField(
+                "Contributing domains (sum across entries)",
+                std::to_string(summary.contributingDomainCount));
+            RenderDebugObservationField(
+                "Activated correlations (sum across entries)",
+                std::to_string(summary.activatedCorrelationCount));
+            RenderDebugObservationField(
+                "Total build duration",
+                std::to_string(summary.totalBuildDurationMicroseconds) + " us");
+            RenderDebugObservationField(
+                "Maximum per-process duration",
+                std::to_string(summary.maximumEntryBuildDurationMicroseconds) + " us");
+            RenderDebugObservationField(
+                "Average per-process duration",
+                std::to_string(summary.averageEntryBuildDurationMicroseconds) + " us");
+            if (!cache.statusMessage.empty())
+            {
+                RenderDebugObservationField("Cache diagnostic", cache.statusMessage);
+            }
+            RenderDebugObservationStringList(
+                "Cache warnings",
+                cache.warnings,
+                "No process-wide cache warnings were retained.");
+            WrappedTextDisabled(
+                "These aggregate counters are bounded, local Debug diagnostics. Rendering this section does not rebuild the cache or collect evidence.");
+        }
+
+        void RenderSelectedBaselineDebugDetails(
+            const Core::CachedBaselineTriage& entry)
+        {
+            if (!ImGui::CollapsingHeader(
+                    "Selected baseline details (Debug)##SelectedBaselineDetails"))
+            {
+                return;
+            }
+
+            RenderDebugObservationField(
+                "Entity PID",
+                std::to_string(entry.identity.pid));
+            RenderDebugObservationField(
+                "Creation time identity",
+                entry.identity.hasCreationTime
+                    ? std::to_string(entry.identity.creationTimeFileTime)
+                    : "Unavailable");
+            RenderDebugObservationField(
+                "Build status",
+                entry.success ? "Success" : "Failed");
+            RenderDebugObservationField(
+                "Build duration",
+                std::to_string(entry.buildDurationMicroseconds) + " us");
+            if (!entry.diagnostic.empty())
+            {
+                RenderDebugObservationField("Diagnostic", entry.diagnostic);
+            }
+            RenderDebugObservationStringList(
+                "Baseline evidence limitations",
+                entry.baseline.limitations,
+                "No baseline-evidence limitations were retained.");
+            RenderDebugObservationStringList(
+                "Triage limitations",
+                entry.triage.limitations,
+                "No baseline triage limitations were retained.");
+
+            ImGui::TextDisabled("Core-generated baseline rationale");
+            RenderDebugRationaleSection(
+                entry.triage,
+                Core::TriageRationaleSection::VerdictBasis,
+                Core::TriageMaxRationaleEntries);
+            RenderDebugRationaleSection(
+                entry.triage,
+                Core::TriageRationaleSection::CompletedCorrelations,
+                Core::TriageMaxRationaleEntries);
+            RenderDebugRationaleSection(
+                entry.triage,
+                Core::TriageRationaleSection::SupportingContext,
+                Core::TriageMaxRationaleEntries);
+            RenderDebugRationaleSection(
+                entry.triage,
+                Core::TriageRationaleSection::CollectionLimitations,
+                Core::TriageMaxRationaleEntries);
+
+            if (ImGui::TreeNodeEx(
+                    "BaselineRawObservations",
+                    ImGuiTreeNodeFlags_SpanAvailWidth,
+                    "Raw baseline observations (%zu)",
+                    entry.baseline.inventory.records.size()))
+            {
+                const std::size_t visibleCount = std::min(
+                    entry.baseline.inventory.records.size(),
+                    DebugObservationMaxVisibleRecords);
+                for (std::size_t index = 0; index < visibleCount; ++index)
+                {
+                    RenderDebugObservationRecord(
+                        entry.baseline.inventory.records[index],
+                        nullptr);
+                }
+                if (entry.baseline.inventory.records.size() > visibleCount)
+                {
+                    WrappedTextDisabled(
+                        std::to_string(
+                            entry.baseline.inventory.records.size() -
+                            visibleCount) +
+                        " additional baseline observation(s) are retained but omitted from this view.");
+                }
+                ImGui::TreePop();
+            }
+
+            if (ImGui::TreeNodeEx(
+                    "BaselineCompletedCorrelations",
+                    ImGuiTreeNodeFlags_SpanAvailWidth,
+                    "Completed baseline correlations (%zu)",
+                    entry.correlations.correlations.size()))
+            {
+                const std::size_t visibleCount = std::min(
+                    entry.correlations.correlations.size(),
+                    DebugObservationMaxVisibleCorrelations);
+                if (visibleCount > 0)
+                {
+                    const DebugObservationLookup lookup =
+                        BuildDebugObservationLookup(entry.refinement);
+                    for (std::size_t index = 0; index < visibleCount; ++index)
+                    {
+                        RenderDebugCorrelationCard(
+                            entry.correlations.correlations[index],
+                            lookup);
+                    }
+                }
+                if (entry.correlations.correlations.size() > visibleCount)
+                {
+                    WrappedTextDisabled(
+                        std::to_string(
+                            entry.correlations.correlations.size() -
+                            visibleCount) +
+                        " additional baseline correlation(s) are retained but omitted from this view.");
+                }
+                ImGui::TreePop();
+            }
+
+            WrappedTextDisabled(
+                "Deep selected-process collectors are not inputs to this baseline result. Expanding these details performs no collection or triage recomputation.");
+        }
+
+        static const char* SelectedEnrichedRejectionDebugText(
+            Core::SelectedProcessEnrichedRejection rejection)
+        {
+            switch (rejection)
+            {
+            case Core::SelectedProcessEnrichedRejection::None:
+                return "None";
+            case Core::SelectedProcessEnrichedRejection::NoSelectedEntity:
+                return "No selected entity";
+            case Core::SelectedProcessEnrichedRejection::LoadedSnapshotScope:
+                return "Loaded snapshot scope";
+            case Core::SelectedProcessEnrichedRejection::PidMismatch:
+                return "PID mismatch";
+            case Core::SelectedProcessEnrichedRejection::CreationTimeAvailabilityMismatch:
+                return "Creation-time availability mismatch";
+            case Core::SelectedProcessEnrichedRejection::CreationTimeMismatch:
+                return "Creation-time mismatch";
+            case Core::SelectedProcessEnrichedRejection::ProcessGenerationMismatch:
+                return "Process generation mismatch";
+            case Core::SelectedProcessEnrichedRejection::EvidenceGenerationMismatch:
+                return "Evidence generation mismatch";
+            case Core::SelectedProcessEnrichedRejection::ScopeGenerationMismatch:
+                return "Scope generation mismatch";
+            case Core::SelectedProcessEnrichedRejection::ScopeMismatch:
+                return "Live/snapshot scope mismatch";
+            case Core::SelectedProcessEnrichedRejection::NativeObservationBuildFailed:
+                return "Native observation build failed";
+            case Core::SelectedProcessEnrichedRejection::RefinementFailed:
+                return "Observation refinement failed";
+            case Core::SelectedProcessEnrichedRejection::CorrelationFailed:
+                return "Observation correlation failed";
+            case Core::SelectedProcessEnrichedRejection::TriageFailed:
+                return "TriageEngine failed";
+            case Core::SelectedProcessEnrichedRejection::MaterialEvidenceIncomplete:
+                return "Material evidence incomplete";
+            case Core::SelectedProcessEnrichedRejection::InvalidResult:
+            default:
+                return "Invalid result";
+            }
+        }
+
+        static const char* SelectedEnrichedRequestReasonDebugText(
+            Core::SelectedProcessEnrichedRebuildReason reason)
+        {
+            switch (reason)
+            {
+            case Core::SelectedProcessEnrichedRebuildReason::SelectionChanged:
+                return "Selection changed";
+            case Core::SelectedProcessEnrichedRebuildReason::ProcessSnapshotChanged:
+                return "Process snapshot changed";
+            case Core::SelectedProcessEnrichedRebuildReason::FileIdentityChanged:
+                return "File identity changed";
+            case Core::SelectedProcessEnrichedRebuildReason::ChainChanged:
+                return "Chain changed";
+            case Core::SelectedProcessEnrichedRebuildReason::ModulesChanged:
+                return "Modules changed";
+            case Core::SelectedProcessEnrichedRebuildReason::MemoryChanged:
+                return "Memory changed";
+            case Core::SelectedProcessEnrichedRebuildReason::HandlesChanged:
+                return "Handles changed";
+            case Core::SelectedProcessEnrichedRebuildReason::TokenChanged:
+                return "Token changed";
+            case Core::SelectedProcessEnrichedRebuildReason::RuntimeChanged:
+                return "Runtime changed";
+            case Core::SelectedProcessEnrichedRebuildReason::NetworkChanged:
+                return "Network changed";
+            case Core::SelectedProcessEnrichedRebuildReason::ServiceAssociationChanged:
+                return "Service association changed";
+            case Core::SelectedProcessEnrichedRebuildReason::ExactIndicatorMatchesChanged:
+                return "Exact indicator matches changed";
+            case Core::SelectedProcessEnrichedRebuildReason::CollectionStateChanged:
+                return "Collection state changed";
+            case Core::SelectedProcessEnrichedRebuildReason::AllSelectedEvidenceChanged:
+                return "All selected evidence changed";
+            case Core::SelectedProcessEnrichedRebuildReason::ReturnToLive:
+                return "Return to Live";
+            case Core::SelectedProcessEnrichedRebuildReason::GenerationChangedDuringBuild:
+                return "Generation changed during build";
+            case Core::SelectedProcessEnrichedRebuildReason::None:
+            default:
+                return "None";
+            }
+        }
+
+        void RenderSelectedProcessEnrichedLifecycleDebug(
+            const Core::ProcessInfo& process)
+        {
+            const Core::SelectedProcessEnrichedLifecycleState& lifecycle =
+                selectedEnrichedLifecycle_;
+            const Core::SelectedProcessEnrichedSourceStamp current =
+                CurrentSelectedProcessEnrichedSourceStamp();
+            const Core::SelectedProcessTriageAuthority authority =
+                SelectedTriageAuthorityForProcess(process);
+            const char* authorityDecision = authority.UsesEnrichedTriage()
+                ? "Enriched"
+                : (authority.UsesBaselineTriage() ? "Baseline" : "Unavailable");
+            const auto yesNo = [](bool value) { return value ? "Yes" : "No"; };
+            const auto line = [this](const char* label, const std::string& value)
+            {
+                ImGui::TextDisabled("%s", label);
+                ImGui::SameLine();
+                WrappedTextDisabled(value);
+            };
+
+            BeginInspectorCard(
+                "selected_enriched_lifecycle_debug",
+                "Selected Enriched Lifecycle (Debug)",
+                fonts_.bold);
+            line("Selected PID:", std::to_string(current.identity.pid));
+            line("Selected creation time available:",
+                yesNo(current.identity.hasCreationTime));
+            line("Selected creation time value:",
+                current.identity.hasCreationTime
+                    ? std::to_string(current.identity.creationTimeFileTime)
+                    : std::string("Unavailable"));
+            line("Live/snapshot scope:",
+                current.scope == Core::SelectedProcessAnalysisScope::Live
+                    ? std::string("Live")
+                    : std::string("Loaded snapshot"));
+            line("Selection generation:",
+                std::to_string(lifecycle.selectionGeneration));
+            line("Process generation:",
+                std::to_string(current.processGeneration));
+            line("Evidence generation:",
+                std::to_string(current.evidenceGeneration));
+            line("Scope generation:",
+                std::to_string(current.scopeGeneration));
+            line("Enriched request generation:",
+                std::to_string(lifecycle.requestGeneration));
+            line("Enriched request reason:",
+                SelectedEnrichedRequestReasonDebugText(
+                    lifecycle.lastRequestReason));
+            line("Enriched build requested:", yesNo(lifecycle.buildRequested));
+            line("Enriched build pending:", yesNo(lifecycle.buildPending));
+            line("Enriched build started:", yesNo(lifecycle.buildStarted));
+            line("Enriched build completed:", yesNo(lifecycle.buildCompleted));
+            line("Native observation build success:",
+                yesNo(lifecycle.nativeObservationBuildSuccess));
+            line("Refinement success:", yesNo(lifecycle.refinementSuccess));
+            line("Correlation success:", yesNo(lifecycle.correlationSuccess));
+            line("Triage success:", yesNo(lifecycle.triageSuccess));
+            line("Completeness sufficient for authority:",
+                yesNo(lifecycle.completenessSufficientForAuthority));
+            line("Publication attempted:",
+                yesNo(lifecycle.publicationAttempted));
+            line("Publication accepted:",
+                yesNo(lifecycle.publicationAccepted));
+            line("Publication rejected:",
+                yesNo(lifecycle.publicationAttempted &&
+                    !lifecycle.publicationAccepted));
+            line("Exact rejection reason:",
+                SelectedEnrichedRejectionDebugText(lifecycle.rejection));
+            line("Stored enriched PID:",
+                lifecycle.publicationAccepted
+                    ? std::to_string(lifecycle.storedSource.identity.pid)
+                    : std::string("Unavailable"));
+            line("Stored enriched creation time:",
+                lifecycle.publicationAccepted &&
+                    lifecycle.storedSource.identity.hasCreationTime
+                    ? std::to_string(
+                        lifecycle.storedSource.identity.creationTimeFileTime)
+                    : std::string("Unavailable"));
+            line("Stored process/evidence/scope generations:",
+                lifecycle.publicationAccepted
+                    ? std::to_string(lifecycle.storedSource.processGeneration) +
+                        "/" +
+                        std::to_string(lifecycle.storedSource.evidenceGeneration) +
+                        "/" +
+                        std::to_string(lifecycle.storedSource.scopeGeneration)
+                    : std::string("Unavailable"));
+            line("Authority accessor decision:", authorityDecision);
+            line("Completion timestamp/timing:",
+                std::to_string(lifecycle.completionTimestampMilliseconds) +
+                    " ms tick / " +
+                    std::to_string(lifecycle.completionDurationMicroseconds) +
+                    " us");
+            if (!lifecycle.diagnostic.empty())
+            {
+                line("Bounded diagnostic:", lifecycle.diagnostic);
+            }
+            EndInspectorCard();
+        }
+
+        void RenderObservationEngineDebugPreview(
+            const Core::ProcessInfo& process)
+        {
+            BeginInspectorCard(
+                "observation_engine_debug_preview",
+                "ObservationEngine Diagnostics (Debug)",
+                fonts_.bold);
+            WrappedTextColored(
+                AccentBlue(),
+                "TriageEngine uses the current native enriched result when available, then the current native baseline. An unavailable result never revives legacy verdict policy.");
+
+            if (const CachedIconTexture* icon = FindCachedProcessIcon(process);
+                icon != nullptr)
+            {
+                const char* stateText = "Unavailable";
+                switch (icon->state)
+                {
+                case Core::ProcessIconState::Extracted:
+                    stateText = "Extracted";
+                    break;
+                case Core::ProcessIconState::GenericFallback:
+                    stateText = "Generic fallback";
+                    break;
+                case Core::ProcessIconState::Failed:
+                    stateText = "Failed";
+                    break;
+                case Core::ProcessIconState::Unavailable:
+                default:
+                    break;
+                }
+                WrappedTextDisabled(
+                    std::string("Process icon: ") + stateText + ". " +
+                    icon->diagnostic);
+                WrappedTextDisabled(
+                    "Icon cache: " + std::to_string(processIconCacheHits_) +
+                    " hit(s), " + std::to_string(processIconCacheMisses_) +
+                    " miss(es), " +
+                    std::to_string(processIconExtractionAttempts_) +
+                    " extraction attempt(s), " +
+                    std::to_string(genericProcessIconTextureBuilds_) +
+                    " generic texture build(s).");
+            }
+
+            const Core::SelectedProcessTriageAuthority selectedAuthority =
+                SelectedTriageAuthorityForProcess(process);
+            ImGui::TextDisabled("Selected-process authority");
+            WrappedTextColored(
+                SeverityColor(
+                    Core::ClassifyTriageVerdictForSurfaces(
+                        selectedAuthority.verdict).severity),
+                Core::TriageVerdictDisplayText(
+                    selectedAuthority.verdict) + " - " +
+                    Core::SelectedTriageAnalysisLevelDisplayText(
+                        selectedAuthority.analysisLevel));
+            if (selectedAuthority.unavailable &&
+                !selectedAuthority.availabilityReason.empty())
+            {
+                WrappedTextDisabled(
+                    "Unavailable category: " +
+                    Core::TriageAvailabilityCategoryDisplayText(
+                        selectedAuthority.availability.category));
+                WrappedTextDisabled(
+                    "Unavailable disposition: " +
+                    Core::TriageAvailabilityDispositionDisplayText(
+                        Core::ClassifyTriageAvailability(
+                            selectedAuthority.availability.category)));
+                WrappedTextDisabled(selectedAuthority.availabilityReason);
+            }
+
+            const Core::ProcessTriageCacheSourceStamp currentBaselineStamp =
+                CurrentProcessTriageCacheStamp();
+            // MatchesStamp intentionally means "current and usable." Debug
+            // diagnosis must distinguish a failed build for the current source
+            // generation from a successfully built but stale cache.
+            const bool baselineCacheHasCurrentSourceStamp =
+                processTriageCache_.attempted &&
+                processTriageCache_.sourceStamp == currentBaselineStamp;
+            const Core::CachedBaselineTriage* baselineEntry =
+                baselineCacheHasCurrentSourceStamp
+                    ? processTriageCache_.Find(process)
+                    : nullptr;
+
+            ImGui::TextDisabled("Baseline OE (process-wide authority when current)");
+            if (baselineEntry != nullptr &&
+                baselineEntry->success &&
+                baselineEntry->triage.Succeeded())
+            {
+                WrappedTextColored(
+                    SeverityColor(
+                        DebugObservationVerdictSeverity(
+                            baselineEntry->triage.verdict)),
+                    Core::TriageVerdictDisplayText(
+                        baselineEntry->triage.verdict));
+                WrappedTextDisabled(
+                    std::to_string(
+                        baselineEntry->baseline.inventory.records.size()) +
+                    " baseline observation(s), " +
+                    std::to_string(
+                        baselineEntry->triage.contributingDomains.size()) +
+                    " contributing domain(s), " +
+                    std::to_string(
+                        baselineEntry->correlations.summary
+                            .activatedCorrelationCount) +
+                    " completed correlation(s), " +
+                    std::to_string(
+                        baselineEntry->buildDurationMicroseconds) +
+                    " us.");
+                WrappedTextDisabled(
+                    "Coverage: globally available process, network, and service context only; selected-process deep evidence was not evaluated.");
+                RenderSelectedBaselineDebugDetails(*baselineEntry);
+            }
+            else
+            {
+                WrappedTextColored(
+                    SeverityColor(Core::Severity::Medium),
+                    "Unavailable — no current baseline result is shown.");
+                if (!baselineCacheHasCurrentSourceStamp)
+                {
+                    WrappedTextDisabled(
+                        "The process-wide cache does not match the current process/evidence/scope generation.");
+                }
+                else if (!processTriageCache_.Succeeded())
+                {
+                    WrappedTextDisabled(
+                        "The process-wide cache build failed for the current process/evidence/scope generation.");
+                    if (!processTriageCache_.statusMessage.empty())
+                    {
+                        WrappedTextDisabled(processTriageCache_.statusMessage);
+                    }
+                }
+                else if (baselineEntry == nullptr)
+                {
+                    WrappedTextDisabled(
+                        "No retained baseline cache entry matches this process identity.");
+                }
+                else if (!baselineEntry->diagnostic.empty())
+                {
+                    WrappedTextDisabled(baselineEntry->diagnostic);
+                }
+            }
+            RenderProcessTriageCacheDebugSummary(
+                processTriageCache_,
+                baselineCacheHasCurrentSourceStamp);
+            WrappedTextDisabled(
+                std::string("Authority projection: ") +
+                (ProcessAuthorityProjectionMatchesCurrent()
+                    ? "current"
+                    : "unavailable or stale") +
+                "; " + std::to_string(processAuthorityUnavailableCount_) +
+                " per-entity unavailable row(s); " +
+                std::to_string(processAuthorityProjectionBuildMicroseconds_) +
+                " us projection time.");
+
+            ImGui::TextDisabled("Enriched OE (selected-process authority when current)");
+
+            const bool matchesCurrentGeneration = Core::ObservationShadowMatches(
+                selectedObservationShadow_,
+                true,
+                process.pid,
+                ProcessCacheStamp(process),
+                selectedEvidenceGeneration_) &&
+                selectedObservationShadow_.entityScope ==
+                    ObservationShadowEntityScope(process, loadedSnapshotActive_) &&
+                SelectedProcessEnrichedPublicationMatchesCurrent();
+            if (!matchesCurrentGeneration)
+            {
+                WrappedTextDisabled(
+                    "The enriched TriageEngine result is pending for the current selected-evidence generation. The current baseline remains authoritative when available; no prior enriched entity result is shown.");
+                EndInspectorCard();
+                return;
+            }
+
+            const Core::ObservationShadowState& shadow = selectedObservationShadow_;
+            const Core::ObservationShadowDecisionSummary& decision = shadow.decisionSummary;
+            const bool pipelineFailed = !shadow.success ||
+                (shadow.refinement.attempted && !shadow.refinement.success) ||
+                (shadow.correlation.attempted && !shadow.correlation.success) ||
+                (shadow.triage.attempted && !shadow.triage.success);
+
+            if (pipelineFailed)
+            {
+                WrappedTextColored(
+                    SeverityColor(Core::Severity::Medium),
+                    "Unavailable - enriched triage is not authoritative for this generation.");
+                if (!shadow.success && !shadow.diagnosticMessage.empty())
+                {
+                    WrappedTextDisabled(shadow.diagnosticMessage);
+                }
+                else if (shadow.refinement.attempted && !shadow.refinement.success)
+                {
+                    WrappedTextDisabled(
+                        "Refinement status: " +
+                        Core::ObservationRefinementStatusDisplayText(
+                            shadow.refinement.status));
+                    RenderDebugObservationStringList(
+                        "Refinement warnings",
+                        shadow.refinement.warnings,
+                        "No additional refinement diagnostic was retained.");
+                }
+                else if (shadow.correlation.attempted && !shadow.correlation.success)
+                {
+                    WrappedTextDisabled(
+                        "Correlation status: " +
+                        Core::ObservationCorrelationStatusDisplayText(
+                            shadow.correlation.status));
+                    RenderDebugObservationStringList(
+                        "Correlation warnings",
+                        shadow.correlation.warnings,
+                        "No additional correlation diagnostic was retained.");
+                }
+                else if (shadow.triage.attempted && !shadow.triage.success)
+                {
+                    WrappedTextDisabled(
+                        "Triage status: " +
+                        Core::TriageEngineStatusDisplayText(
+                            shadow.triage.status));
+                    if (!shadow.triage.statusMessage.empty())
+                    {
+                        WrappedTextDisabled(shadow.triage.statusMessage);
+                    }
+                }
+                if (shadow.refinement.Succeeded() &&
+                    ImGui::CollapsingHeader(
+                        "Available refined pipeline details##ObservationDebugFailureDetails"))
+                {
+                    WrappedTextDisabled(
+                        "The enriched pipeline failed, but successful earlier stages remain available for audit. Baseline authority remains available independently.");
+                    RenderDebugObservationDetails(shadow);
+                }
+                else if (shadow.success &&
+                    ImGui::CollapsingHeader(
+                        "Available raw observations##ObservationDebugFailureRaw"))
+                {
+                    WrappedTextDisabled(
+                        "Refinement was unavailable. These retained raw native observations did not become authoritative.");
+                    const std::size_t visibleCount = std::min(
+                        shadow.inventory.records.size(),
+                        DebugObservationMaxVisibleRecords);
+                    for (std::size_t index = 0; index < visibleCount; ++index)
+                    {
+                        RenderDebugObservationRecord(
+                            shadow.inventory.records[index],
+                            nullptr);
+                    }
+                    if (shadow.inventory.records.size() > visibleCount)
+                    {
+                        WrappedTextDisabled(
+                            std::to_string(
+                                shadow.inventory.records.size() - visibleCount) +
+                            " additional raw observation(s) are retained in the pipeline state but omitted from this view.");
+                    }
+                }
+                EndInspectorCard();
+                return;
+            }
+
+            if (!decision.attempted || !decision.success)
+            {
+                WrappedTextDisabled(
+                    "The TriageEngine pipeline is pending for this current selected-evidence generation.");
+                EndInspectorCard();
+                return;
+            }
+
+            WrappedTextColored(
+                SeverityColor(DebugObservationVerdictSeverity(decision.verdict)),
+                Core::TriageVerdictDisplayText(decision.verdict));
+            WrappedTextDisabled("TriageEngine pipeline status: Success.");
+            ImGui::Spacing();
+            InspectorSummaryChip(
+                "debug_shadow_source_findings",
+                "Native inputs",
+                std::to_wstring(decision.nativeObservationCount),
+                AccentBlue());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Refined groups",
+                    std::to_wstring(decision.refinedGroupCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_groups",
+                "Refined groups",
+                std::to_wstring(decision.refinedGroupCount),
+                AccentBlue());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Artifacts",
+                    std::to_wstring(decision.distinctArtifactCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_artifacts",
+                "Artifacts",
+                std::to_wstring(decision.distinctArtifactCount),
+                AccentBlue());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Correlations",
+                    std::to_wstring(decision.activatedCorrelationCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_correlations",
+                "Correlations",
+                std::to_wstring(decision.activatedCorrelationCount),
+                AccentBlue());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Domains",
+                    std::to_wstring(decision.contributingDomainCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_domains",
+                "Domains",
+                std::to_wstring(decision.contributingDomainCount),
+                AccentBlue());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Collection notes",
+                    std::to_wstring(decision.collectionNoteCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_collection_notes",
+                "Collection notes",
+                std::to_wstring(decision.collectionNoteCount),
+                MutedText());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Typed facts",
+                    std::to_wstring(decision.typedSourceFactCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_typed_facts",
+                "Typed facts",
+                std::to_wstring(decision.typedSourceFactCount),
+                AccentBlue());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Duplicates excluded",
+                    std::to_wstring(
+                        decision.typedSourceFactDuplicateCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_duplicate_facts",
+                "Duplicates excluded",
+                std::to_wstring(
+                    decision.typedSourceFactDuplicateCount),
+                MutedText());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Native facts",
+                    std::to_wstring(decision.nativeObservationCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_native_facts",
+                "Native facts",
+                std::to_wstring(decision.nativeObservationCount),
+                AccentBlue());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Token native",
+                    std::to_wstring(
+                        decision.nativeTokenObservationCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_native_token",
+                "Token native",
+                std::to_wstring(decision.nativeTokenObservationCount),
+                MutedText());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Handle native",
+                    std::to_wstring(
+                        decision.nativeHandleObservationCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_native_handle",
+                "Handle native",
+                std::to_wstring(decision.nativeHandleObservationCount),
+                MutedText());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Runtime native",
+                    std::to_wstring(
+                        decision.nativeRuntimeObservationCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_native_runtime",
+                "Runtime native",
+                std::to_wstring(decision.nativeRuntimeObservationCount),
+                MutedText());
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Priority native",
+                    std::to_wstring(
+                        decision.nativePriorityObservationCount)),
+                6.0f);
+            InspectorSummaryChip(
+                "debug_shadow_native_priority",
+                "Priority native",
+                std::to_wstring(decision.nativePriorityObservationCount),
+                MutedText());
+            WrappedTextDisabled(
+                std::string("Native selected-process producer: ") +
+                (decision.nativeBuildSucceeded
+                    ? "Success"
+                    : decision.nativeBuildAttempted
+                        ? "Unavailable"
+                        : "Not attempted") +
+                "; " +
+                std::to_string(
+                    decision.nativeBuildDurationMicroseconds) +
+                " us; material omissions " +
+                std::to_string(
+                    shadow.nativeObservations.omittedFactCount) + ".");
+
+            WrappedTextDisabled(
+                "Artifact grouping: " +
+                std::to_string(decision.artifactGroupCount) +
+                (decision.artifactGroupCount == 1
+                    ? " group from "
+                    : " groups from ") +
+                std::to_string(decision.artifactAttributeCount) +
+                (decision.artifactAttributeCount == 1
+                    ? " retained artifact attribute."
+                    : " retained artifact attributes."));
+            WrappedTextDisabled(
+                std::string("Same-domain correlation Medium ceiling: ") +
+                (decision.sameDomainVerdictCeilingApplied
+                    ? "Applied."
+                    : "Not applied."));
+            WrappedTextDisabled(
+                std::string("High gates: standalone Strong ") +
+                (decision.qualifiedStandaloneStrongHighGateSatisfied
+                    ? "satisfied"
+                    : "not satisfied") +
+                "; coherent multi-domain " +
+                (decision.coherentMultiDomainHighGateSatisfied
+                    ? "satisfied."
+                    : "not satisfied."));
+
+            ImGui::Spacing();
+            ImGui::TextDisabled("Verdict basis (Core-generated)");
+            RenderDebugPreviewRationaleSection(
+                shadow.triage,
+                Core::TriageRationaleSection::VerdictBasis,
+                3);
+            ImGui::TextDisabled("Supporting context (Core-generated)");
+            RenderDebugPreviewRationaleSection(
+                shadow.triage,
+                Core::TriageRationaleSection::SupportingContext,
+                6);
+            ImGui::TextDisabled("Collection limitations (Core-generated)");
+            RenderDebugPreviewRationaleSection(
+                shadow.triage,
+                Core::TriageRationaleSection::CollectionLimitations,
+                3);
+            ImGui::TextDisabled("Presentation notes (Core-generated)");
+            RenderDebugPreviewRationaleSection(
+                shadow.triage,
+                Core::TriageRationaleSection::PresentationNotes,
+                2);
+
+            if (ImGui::CollapsingHeader(
+                    "ObservationEngine details (Debug)##ObservationDebugDetails"))
+            {
+                WrappedTextDisabled(
+                    "Details render the retained Core pipeline state. Expanding this view performs no collection, observation building, refinement, correlation, or triage work.");
+                RenderDebugObservationDetails(shadow);
+            }
+            EndInspectorCard();
+        }
+#endif
+
         void RenderTriagePanel()
         {
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
-                RenderEmptyState("No process is selected.", "Select a process to review triage findings.");
+                RenderEmptyState("No process is selected.", "Select a process to review triage evidence.");
                 return;
             }
 
-            const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            Core::FileIdentity loadedSnapshotFileIdentity;
-            const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
-                ? loadedSnapshotFileIdentity
-                : CachedFileIdentity(*process);
-            const std::vector<Core::Finding>& findings =
-                FindingsForSelectedProcess(*process, chain, fileIdentity);
-            const std::wstring triageSummary = Core::TriageSummary(findings);
-            const Core::Severity verdictColorSeverity = TriageSeverityForFindings(findings);
+            const Core::SelectedProcessTriageAuthority authority =
+                SelectedTriageAuthorityForProcess(*process);
+            const std::vector<Core::NativeSourceEvidenceRecord>& nativeEvidence =
+                SelectedNativeSourceEvidenceForProcess(*process);
+            const bool historicalEvidence = UsesHistoricalSourceEvidence();
+            const std::vector<Core::Finding> historicalRecords =
+                historicalEvidence
+                    ? HistoricalSourceEvidenceForProcess(*process)
+                    : std::vector<Core::Finding>{};
+            const std::size_t sourceRecordCount = historicalEvidence
+                ? historicalRecords.size()
+                : nativeEvidence.size();
+            const NativeSourceEvidenceSectionPlan nativeEvidenceSection =
+                PlanNativeSourceEvidenceSection(nativeEvidence.size());
+            const std::wstring triageSummary = authority.notCaptured
+                ? std::wstring(L"Not captured")
+                : (authority.unavailable
+                    ? std::wstring(L"Unavailable")
+                    : InspectorTriageVerdictText(authority.verdict));
+            const Core::TriageSurfaceClassification authorityClassification =
+                Core::ClassifyTriageVerdictForSurfaces(authority.verdict);
+            const Core::Severity verdictColorSeverity =
+                authorityClassification.severity;
+            const bool enrichedPending = !loadedSnapshotActive_ &&
+                (selectedEnrichedLifecycle_.buildPending ||
+                    selectedEnrichedLifecycle_.buildInProgress);
+            const bool enrichedFailed = !loadedSnapshotActive_ &&
+                selectedEnrichedLifecycle_.buildCompleted &&
+                selectedEnrichedLifecycle_.publicationAttempted &&
+                !selectedEnrichedLifecycle_.publicationAccepted &&
+                !enrichedPending;
+            const EnrichedAnalysisPresentationPlan enrichedPresentation =
+                PlanEnrichedAnalysisPresentation(
+                    authority.UsesEnrichedTriage(),
+                    enrichedPending,
+                    enrichedFailed,
+                    IsExplicitEvidenceRefreshReason(
+                        selectedEnrichedLifecycle_.lastRequestReason));
 
             BeginInspectorCard("triage_summary", "Triage Summary", fonts_.bold);
 
@@ -395,12 +2766,77 @@
 
             ImGui::Spacing();
             InspectorSummaryChip("triage_verdict_chip", "Triage", triageSummary, SeverityColor(verdictColorSeverity));
-            SameLineIfFits(InspectorSummaryChipWidth("Findings", InspectorFindingCountText(findings.size())), 6.0f);
+            SameLineIfFits(
+                InspectorSummaryChipWidth(
+                    "Source records",
+                    InspectorEvidenceCountText(sourceRecordCount)),
+                6.0f);
             InspectorSummaryChip(
                 "triage_finding_count_chip",
-                "Findings",
-                InspectorFindingCountText(findings.size()),
-                findings.empty() ? MutedText() : SeverityColor(verdictColorSeverity));
+                "Source records",
+                InspectorEvidenceCountText(sourceRecordCount),
+                sourceRecordCount == 0 ? MutedText() : SeverityColor(verdictColorSeverity));
+
+            ImGui::Spacing();
+            ImGui::TextDisabled(
+                "Analysis level: %s",
+                Core::SelectedTriageAnalysisLevelDisplayText(
+                    authority.analysisLevel).c_str());
+            if (authority.UsesEnrichedTriage() && authority.baselineAvailable)
+            {
+                ImGui::TextDisabled(
+                    "Baseline triage: %s",
+                    Core::TriageVerdictDisplayText(
+                        authority.baselineVerdict).c_str());
+                if (authority.verdict != authority.baselineVerdict)
+                {
+                    WrappedTextColored(
+                        AccentBlue(),
+                        "Additional selected-process evidence changed the result from the process-wide baseline.");
+                }
+            }
+            else if (authority.UsesBaselineTriage())
+            {
+                WrappedTextDisabled(
+                    enrichedPresentation.message[0] != '\0'
+                        ? enrichedPresentation.message
+                        : EnrichedAnalysisFailedMessage);
+            }
+
+            if (authority.notCaptured)
+            {
+                WrappedTextDisabled(
+                    "Authoritative TriageEngine results were not captured in this older snapshot.");
+            }
+            else if (authority.unavailable)
+            {
+                WrappedTextColored(
+                    SeverityColor(Core::Severity::Medium),
+                    AuthoritativeTriageUnavailableMessage);
+#ifdef _DEBUG
+                if (!authority.availabilityReason.empty())
+                {
+                    WrappedTextDisabled(authority.availabilityReason);
+                }
+#endif
+            }
+            else if (authority.analysisLevel ==
+                Core::SelectedTriageAnalysisLevel::LegacyFallback)
+            {
+                WrappedTextDisabled(
+                    "This schema-4 snapshot retained a captured historical legacy-fallback state. It is displayed as captured metadata and is not recomputed.");
+            }
+            else
+            {
+                ImGui::Spacing();
+                RenderAuthoritativeTriageRationale(authority);
+                if (authority.persistedSummary != nullptr)
+                {
+                    ImGui::TextDisabled(
+                        "Captured triage model: %u",
+                        authority.persistedSummary->triageModelVersion);
+                }
+            }
 
             ImGui::Spacing();
             if (!process->executablePath.empty())
@@ -424,23 +2860,39 @@
             ImGui::Spacing();
             if (ImGui::SmallButton("Copy Triage Summary"))
             {
-                CopyTextToClipboard(FormatTriageSummaryForClipboard(*process, findings));
+                CopyTextToClipboard(
+                    FormatSelectedAuthorityForClipboard(
+                        *process,
+                        authority,
+                        sourceRecordCount,
+                        historicalEvidence));
                 AddLog(LogLevel::Info, "Copied triage summary to clipboard.");
             }
-            SameLineIfFits(StandardButtonWidth("Copy All Findings"), 6.0f);
-            if (findings.empty())
+            SameLineIfFits(StandardButtonWidth("Copy Source Evidence"), 6.0f);
+            const bool sourceEvidenceCopyEnabled = historicalEvidence
+                ? sourceRecordCount != 0
+                : nativeEvidenceSection.copyEnabled;
+            if (!sourceEvidenceCopyEnabled)
             {
                 ImGui::BeginDisabled();
             }
-            if (ImGui::SmallButton("Copy All Findings"))
+            if (ImGui::SmallButton("Copy Source Evidence"))
             {
-                CopyTextToClipboard(FormatFindingsForClipboard(*process, findings));
-                AddLog(LogLevel::Info, "Copied all triage findings to clipboard.");
+                CopyTextToClipboard(historicalEvidence
+                    ? FormatHistoricalSourceEvidenceForClipboard(
+                        *process,
+                        authority)
+                    : FormatSourceEvidenceForClipboard(
+                        *process,
+                        authority,
+                        nativeEvidence));
+                AddLog(LogLevel::Info, "Copied source evidence to clipboard.");
             }
-            if (findings.empty())
+            if (!sourceEvidenceCopyEnabled)
             {
                 ImGui::EndDisabled();
-                RenderDisabledReasonTooltip("No findings are available to copy for this process.");
+                RenderDisabledReasonTooltip(
+                    "No source evidence is available to copy for this process.");
             }
             SameLineIfFits(StandardButtonWidth("Export Report"), 6.0f);
             if (ImGui::SmallButton("Export Report"))
@@ -449,102 +2901,273 @@
             }
             EndInspectorCard();
 
-            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 6.0f));
-            if (ChipButton("All##TriageFilter", triageFilter_ == TriageFilter::All, AccentBlue()))
+#ifdef _DEBUG
+            RenderSelectedProcessEnrichedLifecycleDebug(*process);
+            RenderObservationEngineDebugPreview(*process);
+#endif
+            if (historicalEvidence)
             {
-                triageFilter_ = TriageFilter::All;
-            }
-            SameLineIfChipFits("Info");
-            if (ChipButton("Info##TriageFilter", triageFilter_ == TriageFilter::Info, FindingSeverityColor(Core::FindingSeverity::Info)))
-            {
-                triageFilter_ = TriageFilter::Info;
-            }
-            SameLineIfChipFits("Low");
-            if (ChipButton("Low##TriageFilter", triageFilter_ == TriageFilter::Low, FindingSeverityColor(Core::FindingSeverity::Low)))
-            {
-                triageFilter_ = TriageFilter::Low;
-            }
-            SameLineIfChipFits("Medium");
-            if (ChipButton("Medium##TriageFilter", triageFilter_ == TriageFilter::Medium, FindingSeverityColor(Core::FindingSeverity::Medium)))
-            {
-                triageFilter_ = TriageFilter::Medium;
-            }
-            SameLineIfChipFits("High");
-            if (ChipButton("High##TriageFilter", triageFilter_ == TriageFilter::High, FindingSeverityColor(Core::FindingSeverity::High)))
-            {
-                triageFilter_ = TriageFilter::High;
-            }
-            ImGui::PopStyleVar();
-            ImGui::Spacing();
+                BeginInspectorCard(
+                    "triage_source_evidence_note",
+                    "Historical Source Evidence",
+                    fonts_.bold);
+                WrappedTextDisabled(
+                    "These imported legacy records are retained as historical metadata. They are readable and copyable, but they are not current TriageEngine input and no native verdict is fabricated from them.");
+                ImGui::TextDisabled("Imported process-level severity metadata");
+                ImGui::SameLine();
+                if (process->historicalSeverityCaptured)
+                {
+                    SeverityText(process->severity);
+                }
+                else
+                {
+                    ImGui::TextDisabled("Not captured");
+                }
+                EndInspectorCard();
 
-            if (findings.empty())
+                if (historicalRecords.empty())
+                {
+                    BeginInspectorCard(
+                        "triage_historical_empty",
+                        "Historical Source Evidence",
+                        fonts_.bold);
+                    RenderEmptyState(
+                        "No historical source records were captured for the selected process.");
+                    EndInspectorCard();
+                    return;
+                }
+
+                for (std::size_t index = 0; index < historicalRecords.size(); ++index)
+                {
+                    const Core::Finding& record = historicalRecords[index];
+                    const std::string cardId =
+                        "triage_historical_record_" + std::to_string(index);
+                    const ImVec4 accent = AccentBlue();
+                    ImGui::PushStyleColor(
+                        ImGuiCol_ChildBg,
+                        ImVec4(0.044f, 0.055f, 0.073f, 1.0f));
+                    ImGui::PushStyleColor(
+                        ImGuiCol_Border,
+                        ImVec4(accent.x, accent.y, accent.z, 0.45f));
+                    ImGui::BeginChild(
+                        cardId.c_str(),
+                        ImVec2(0.0f, 0.0f),
+                        ImGuiChildFlags_Borders |
+                            ImGuiChildFlags_AlwaysUseWindowPadding |
+                            ImGuiChildFlags_AutoResizeY);
+                    ImGui::TextColored(accent, "Historical source record");
+                    ImGui::SameLine();
+                    const bool pushedTitle = PushFontIfAvailable(fonts_.bold);
+                    WrappedTextWide(
+                        record.title.empty()
+                            ? L"Historical source record"
+                            : record.title);
+                    PopFontIfPushed(pushedTitle);
+                    WrappedTextWide(record.description);
+                    ImGui::TextDisabled(
+                        "Historical source severity: %s",
+                        WideToUtf8(
+                            Core::HistoricalFindingSeverityText(record)).c_str());
+                    if (ImGui::SmallButton("Copy Historical Record"))
+                    {
+                        std::wstringstream copied;
+                        copied << (record.title.empty()
+                            ? L"Historical source record"
+                            : record.title) << L"\r\n";
+                        if (!record.description.empty())
+                        {
+                            copied << record.description << L"\r\n";
+                        }
+                        copied << L"Historical source severity: " <<
+                            Core::HistoricalFindingSeverityText(record) <<
+                            L"\r\n";
+                        CopyTextToClipboard(copied.str());
+                        AddLog(
+                            LogLevel::Info,
+                            "Copied historical source-evidence record to clipboard.");
+                    }
+                    ImGui::EndChild();
+                    ImGui::PopStyleColor(2);
+                    ImGui::Spacing();
+                }
+                return;
+            }
+
+            BeginInspectorCard(
+                "triage_source_evidence_note",
+                "Native Source Evidence",
+                fonts_.bold);
+            WrappedTextDisabled(
+                "These bounded native records are projected from refined observations. They distinguish verdict contribution, supporting context, and collection limitations.");
+            if (nativeEvidenceSection.showEmptyState)
             {
-                BeginInspectorCard("triage_clean", "Findings", fonts_.bold);
+                ImGui::Spacing();
                 RenderEmptyState(
-                    "No findings are available for the selected process.",
-                    "Review process, module, network, and chain context as needed.");
+                    "No native source-evidence records are available for this process.",
+                    authority.unavailable
+                        ? "The current analysis result is unavailable; no authoritative attention level is available."
+                        : "A successful Informational result may legitimately contain no review-relevant source records.");
                 EndInspectorCard();
                 return;
             }
 
-            std::size_t visibleFindings = 0;
-            for (std::size_t index = 0; index < findings.size(); ++index)
+            if (nativeEvidenceSection.showFilters)
             {
-                const Core::Finding& finding = findings[index];
-                if (!FindingMatchesFilter(finding, triageFilter_))
+                ImGui::Spacing();
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(6.0f, 6.0f));
+                if (ChipButton("All##TriageFilter", triageFilter_ == TriageFilter::All, AccentBlue()))
+                {
+                    triageFilter_ = TriageFilter::All;
+                }
+                SameLineIfChipFits("Contributing");
+                if (ChipButton(
+                        "Contributing##TriageFilter",
+                        triageFilter_ == TriageFilter::Contributing,
+                        SeverityColor(Core::Severity::Medium)))
+                {
+                    triageFilter_ = TriageFilter::Contributing;
+                }
+                SameLineIfChipFits("Context");
+                if (ChipButton(
+                        "Context##TriageFilter",
+                        triageFilter_ == TriageFilter::Context,
+                        AccentBlue()))
+                {
+                    triageFilter_ = TriageFilter::Context;
+                }
+                SameLineIfChipFits("Limitations");
+                if (ChipButton(
+                        "Limitations##TriageFilter",
+                        triageFilter_ == TriageFilter::Limitations,
+                        SeverityColor(Core::Severity::Low)))
+                {
+                    triageFilter_ = TriageFilter::Limitations;
+                }
+                ImGui::PopStyleVar();
+            }
+            EndInspectorCard();
+
+            std::size_t visibleRecords = 0;
+            for (std::size_t index = 0; index < nativeEvidence.size(); ++index)
+            {
+                const Core::NativeSourceEvidenceRecord& record =
+                    nativeEvidence[index];
+                if (!NativeEvidenceMatchesFilter(record, triageFilter_))
                 {
                     continue;
                 }
 
-                ++visibleFindings;
-                const std::string cardId = "triage_finding_" + std::to_string(index);
-                const ImVec4 accent = FindingSeverityColor(finding.severity);
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, FindingCardBg(finding.severity));
-                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.55f));
+                ++visibleRecords;
+                const std::string cardId =
+                    "triage_native_evidence_" + std::to_string(index);
+                const ImVec4 accent = record.collectionLimitation
+                    ? SeverityColor(Core::Severity::Low)
+                    : (record.contributedToVerdict
+                        ? SeverityColor(Core::Severity::Medium)
+                        : AccentBlue());
+                ImGui::PushStyleColor(
+                    ImGuiCol_ChildBg,
+                    ImVec4(0.044f, 0.055f, 0.073f, 1.0f));
+                ImGui::PushStyleColor(
+                    ImGuiCol_Border,
+                    ImVec4(accent.x, accent.y, accent.z, 0.55f));
                 ImGui::BeginChild(
                     cardId.c_str(),
                     ImVec2(0.0f, 0.0f),
                     ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY);
 
-                SeverityBadge(FindingSeverityAsCoreSeverity(finding.severity));
+                ImGui::TextColored(
+                    accent,
+                    "%s",
+                    record.collectionLimitation
+                        ? "Collection limitation"
+                        : (record.contributedToVerdict
+                            ? "Contributed to verdict"
+                            : "Supporting context"));
                 ImGui::SameLine();
-                const bool pushedFindingTitleFont = PushFontIfAvailable(fonts_.bold);
-                ImGui::TextColored(ImVec4(0.88f, 0.93f, 0.98f, 1.0f), "%s", WideToUtf8(finding.title.empty() ? L"(untitled finding)" : finding.title).c_str());
-                PopFontIfPushed(pushedFindingTitleFont);
+                const bool pushedTitle = PushFontIfAvailable(fonts_.bold);
+                WrappedTextColored(
+                    ImVec4(0.88f, 0.93f, 0.98f, 1.0f),
+                    record.title.empty()
+                        ? "Untitled source evidence"
+                        : record.title);
+                PopFontIfPushed(pushedTitle);
                 ImGui::SameLine();
-                if (ImGui::SmallButton("Copy Finding"))
+                if (ImGui::SmallButton("Copy Record"))
                 {
-                    CopyTextToClipboard(FormatFindingForClipboard(finding));
-                    AddLog(LogLevel::Info, "Copied triage finding to clipboard.");
+                    CopyTextToClipboard(
+                        FormatNativeSourceEvidenceRecordForClipboard(record));
+                    AddLog(LogLevel::Info, "Copied source-evidence record to clipboard.");
                 }
 
-                ImGui::TextDisabled("Category");
+                ImGui::TextDisabled("Domain");
                 ImGui::SameLine(145.0f);
-                TextWide(finding.category.empty() ? L"(none)" : finding.category);
-                WrappedTextWide(finding.description);
-
-                if (!finding.evidence.empty())
+                ImGui::TextUnformatted(
+                    Core::EvidenceDomainDisplayText(record.domain).c_str());
+                ImGui::TextDisabled("Disposition");
+                ImGui::SameLine(145.0f);
+                ImGui::TextUnformatted(
+                    Core::ObservationDispositionDisplayText(
+                        record.disposition).c_str());
+                ImGui::TextDisabled("Strength / confidence");
+                ImGui::SameLine(145.0f);
+                ImGui::Text(
+                    "%s / %s",
+                    Core::ObservationStrengthDisplayText(
+                        record.strength).c_str(),
+                    Core::ObservationConfidenceDisplayText(
+                        record.confidence).c_str());
+                if (!record.summary.empty())
                 {
-                    ImGui::SeparatorText("Evidence");
-                    for (const std::wstring& evidence : finding.evidence)
+                    WrappedTextColored(
+                        ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                        record.summary);
+                }
+
+                if (!record.details.empty())
+                {
+                    ImGui::SeparatorText("Details");
+                    for (const std::string& detail : record.details)
                     {
                         ImGui::TextColored(ImVec4(accent.x, accent.y, accent.z, 0.80f), "-");
                         ImGui::SameLine();
-                        WrappedTextDisabled(evidence);
+                        WrappedTextDisabled(detail);
                     }
                 }
+                if (!record.limitations.empty())
+                {
+                    ImGui::SeparatorText("Limitations");
+                    for (const std::string& limitation : record.limitations)
+                    {
+                        ImGui::Bullet();
+                        ImGui::SameLine();
+                        WrappedTextDisabled(limitation);
+                    }
+                }
+                if (!record.provenanceSummary.empty())
+                {
+                    ImGui::TextDisabled("Provenance");
+                    WrappedTextDisabled(record.provenanceSummary);
+                }
+#ifdef _DEBUG
+                if (record.suppressedDuplicate)
+                {
+                    WrappedTextDisabled(
+                        "Duplicate/supporting source retained for audit; it did not reinforce the verdict.");
+                }
+#endif
                 ImGui::EndChild();
                 ImGui::PopStyleColor(2);
                 ImGui::Spacing();
             }
 
-            if (visibleFindings == 0)
+            if (visibleRecords == 0)
             {
-                BeginInspectorCard("triage_filter_empty", "Findings", fonts_.bold);
                 const std::string filterDetail =
                     "Current filter: " + WideToUtf8(TriageFilterLabel(triageFilter_));
-                RenderEmptyState("No findings match the current filter.", filterDetail.c_str());
-                EndInspectorCard();
+                RenderEmptyState(
+                    "No source-evidence records match the current filter.",
+                    filterDetail.c_str());
             }
         }
 
@@ -563,18 +3186,18 @@
                 Core::IsUsableParentRelationship(parentRelationshipStatus)
                     ? Core::FindProcessByPid(snapshot_, process->parentPid)
                     : nullptr;
-            const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
             const NetworkSummary networkSummary = GetNetworkSummary(process->pid);
             Core::FileIdentity loadedSnapshotFileIdentity;
             const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
                 ? loadedSnapshotFileIdentity
                 : CachedFileIdentity(*process);
-            const std::vector<Core::FileIdentityIndicator> fileIdentityIndicators =
-                loadedSnapshotActive_
-                    ? std::vector<Core::FileIdentityIndicator>{}
-                    : BuildProcessFileIdentityIndicators(*process, fileIdentity);
-            const std::vector<Core::Finding>& findings =
-                FindingsForSelectedProcess(*process, chain, fileIdentity);
+            const Core::SelectedProcessTriageAuthority authority =
+                SelectedTriageAuthorityForProcess(*process);
+            const std::vector<Core::NativeSourceEvidenceRecord>& nativeEvidence =
+                SelectedNativeSourceEvidenceForProcess(*process);
+            const bool historicalEvidence = UsesHistoricalSourceEvidence();
+            const Core::TriageSurfaceClassification authorityClassification =
+                Core::ClassifyTriageVerdictForSurfaces(authority.verdict);
             if (!ProcessMatchesFilters(*process))
             {
                 ImGui::TextColored(
@@ -612,25 +3235,16 @@
             PopFontIfPushed(pushedProcessTitleFont);
             ImGui::TextDisabled("Triage");
             ImGui::SameLine(82.0f);
-            ImGui::TextColored(SeverityColor(findings.empty()
-                ? Core::Severity::None
-                : FindingSeverityAsCoreSeverity(Core::HighestFindingSeverity(findings))),
+            ImGui::TextColored(SeverityColor(authorityClassification.severity),
                 "%s",
-                WideToUtf8(Core::TriageSummary(findings)).c_str());
-            ImGui::TextDisabled("Process severity");
-            ImGui::SameLine(118.0f);
-            SeverityBadge(process->severity);
-            if (!findings.empty())
-            {
-                const Core::Severity triageSeverity = FindingSeverityAsCoreSeverity(Core::HighestFindingSeverity(findings));
-                if (triageSeverity != process->severity)
-                {
-                    ImGui::SameLine();
-                    ImGui::TextDisabled("Triage severity");
-                    ImGui::SameLine();
-                    SeverityBadge(triageSeverity);
-                }
-            }
+                authority.unavailable
+                    ? "Unavailable"
+                    : Core::TriageVerdictDisplayText(authority.verdict).c_str());
+            ImGui::TextDisabled("Analysis");
+            ImGui::SameLine(82.0f);
+            ImGui::TextUnformatted(
+                Core::SelectedTriageAnalysisLevelDisplayText(
+                    authority.analysisLevel).c_str());
             const bool pushedHeaderPidFont = PushFontIfAvailable(fonts_.monospace);
             ImGui::TextDisabled("PID %u  |  PPID %u", process->pid, process->parentPid);
             PopFontIfPushed(pushedHeaderPidFont);
@@ -730,76 +3344,114 @@
             RenderFileIdentityFields(
                 "process_file_identity",
                 fileIdentity,
-                fileIdentityIndicators,
                 "process executable");
             EndInspectorCard();
 
             BeginInspectorCard("details_security", "Security", fonts_.bold);
-            LabelValue("Triage", Core::TriageSummary(findings));
-            LabelValue("Suspicious", process->IsSuspicious() ? "Yes" : "No");
-            ImGui::TextDisabled("Severity");
+            LabelValue(
+                "Triage",
+                authority.unavailable
+                    ? std::wstring(L"Unavailable")
+                    : InspectorTriageVerdictText(authority.verdict));
+            LabelValue(
+                "Analysis Level",
+                Core::SelectedTriageAnalysisLevelDisplayText(
+                    authority.analysisLevel).c_str());
+            LabelValue(
+                "Suspicious",
+                authorityClassification.suspicious ? "Yes" : "No");
+            ImGui::TextDisabled("Attention");
             ImGui::SameLine(145.0f);
-            SeverityText(process->severity);
-            ImGui::TextDisabled("Chain Severity");
-            ImGui::SameLine(145.0f);
-            SeverityText(chain.chainSeverity);
+            SeverityText(authorityClassification.severity);
+            if (historicalEvidence)
+            {
+                ImGui::TextDisabled("Imported process severity metadata");
+                ImGui::SameLine(145.0f);
+                if (process->historicalSeverityCaptured)
+                {
+                    SeverityText(process->severity);
+                }
+                else
+                {
+                    ImGui::TextDisabled("Not captured");
+                }
+            }
             LabelValue("Network Connections", std::to_wstring(networkSummary.connectionCount));
             LabelValue("Listening Sockets", std::to_wstring(networkSummary.listeningCount));
             LabelValue("Public Remote", std::to_wstring(networkSummary.publicRemoteCount));
             LabelValue("Intel Matches", std::to_wstring(networkSummary.intelMatchCount));
             EndInspectorCard();
 
-            BeginInspectorCard("details_indicators", "Indicators", fonts_.bold);
-            const std::vector<std::wstring> networkIndicators = BuildNetworkIndicators(*process, networkSummary);
-            if (process->indicators.empty() && networkIndicators.empty() && fileIdentityIndicators.empty())
+            BeginInspectorCard(
+                "details_indicators",
+                historicalEvidence
+                    ? "Historical Source Evidence"
+                    : "Native Evidence Summary",
+                fonts_.bold);
+            if (historicalEvidence)
             {
-                RenderEmptyState("No process indicators are available.");
-            }
-            else
-            {
+                if (process->indicators.empty())
+                {
+                    RenderEmptyState("No historical source records are available.");
+                }
                 for (const std::wstring& indicator : process->indicators)
                 {
                     ImGui::Bullet();
                     ImGui::SameLine();
                     WrappedTextWide(indicator);
                 }
-                for (const Core::FileIdentityIndicator& indicator : fileIdentityIndicators)
+            }
+            else if (nativeEvidence.empty())
+            {
+                RenderEmptyState("No native source-evidence records are available.");
+            }
+            else
+            {
+                for (const Core::NativeSourceEvidenceRecord& record : nativeEvidence)
                 {
                     ImGui::Bullet();
                     ImGui::SameLine();
-                    SeverityText(indicator.severity);
-                    ImGui::SameLine();
-                    WrappedTextWide(indicator.message);
-                }
-                for (const std::wstring& indicator : networkIndicators)
-                {
-                    ImGui::Bullet();
-                    ImGui::SameLine();
-                    WrappedTextWide(indicator);
+                    WrappedTextColored(
+                        record.contributedToVerdict
+                            ? SeverityColor(Core::Severity::Medium)
+                            : AccentBlue(),
+                        record.title);
                 }
             }
             EndInspectorCard();
 
-            BeginInspectorCard("details_context", "Context Notes", fonts_.bold);
-            const std::vector<std::wstring> networkContextNotes = BuildNetworkContextNotes(*process, chain, networkSummary);
-            if (process->contextNotes.empty() && networkContextNotes.empty())
-            {
-                RenderEmptyState("No context notes are available.");
-            }
-            else
+            BeginInspectorCard("details_context", "Collection and Context Notes", fonts_.bold);
+            bool renderedContext = false;
+            if (historicalEvidence)
             {
                 for (const std::wstring& note : process->contextNotes)
                 {
                     ImGui::Bullet();
                     ImGui::SameLine();
                     WrappedTextWide(note);
+                    renderedContext = true;
                 }
-                for (const std::wstring& note : networkContextNotes)
+            }
+            else
+            {
+                for (const Core::NativeSourceEvidenceRecord& record : nativeEvidence)
                 {
+                    if (record.contributedToVerdict &&
+                        !record.collectionLimitation)
+                    {
+                        continue;
+                    }
                     ImGui::Bullet();
                     ImGui::SameLine();
-                    WrappedTextWide(note);
+                    WrappedTextDisabled(record.summary.empty()
+                        ? record.title
+                        : record.summary);
+                    renderedContext = true;
                 }
+            }
+            if (!renderedContext)
+            {
+                RenderEmptyState("No collection or supporting-context notes are available.");
             }
             EndInspectorCard();
         }
@@ -1141,9 +3793,6 @@
             }
 
             const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            ImGui::TextDisabled("Chain Severity");
-            ImGui::SameLine(145.0f);
-            SeverityText(chain.chainSeverity);
 
             if (ImGui::Button("Copy Chain"))
             {
@@ -1172,24 +3821,39 @@
                 const bool pushedChainPidFont = PushFontIfAvailable(fonts_.monospace);
                 ImGui::TextDisabled("PID %u", item.pid);
                 PopFontIfPushed(pushedChainPidFont);
-                ImGui::SameLine();
-                SeverityText(item.severity);
                 ImGui::PopID();
             }
 
-            ImGui::SeparatorText("Chain Indicators");
-            if (chain.chainIndicators.empty())
+            ImGui::SeparatorText(
+                UsesHistoricalSourceEvidence()
+                    ? "Historical Relationship Metadata"
+                    : "Native Relationship Evidence");
+            bool renderedRelationshipEvidence = false;
+            if (UsesHistoricalSourceEvidence())
             {
-                RenderEmptyState("No chain indicators are available.");
+                WrappedTextDisabled(
+                    "Imported relationship records are retained in Historical Source Evidence below.");
+                renderedRelationshipEvidence = true;
             }
             else
             {
-                for (const std::wstring& indicator : chain.chainIndicators)
+                const std::vector<Core::NativeSourceEvidenceRecord>& evidence =
+                    SelectedNativeSourceEvidenceForProcess(*process);
+                for (const Core::NativeSourceEvidenceRecord& record : evidence)
                 {
+                    if (record.domain != Core::EvidenceDomain::ProcessRelationship)
+                    {
+                        continue;
+                    }
                     ImGui::Bullet();
                     ImGui::SameLine();
-                    WrappedTextWide(indicator);
+                    WrappedTextWide(Utf8ToWide(record.title.c_str()));
+                    renderedRelationshipEvidence = true;
                 }
+            }
+            if (!renderedRelationshipEvidence)
+            {
+                RenderEmptyState("No relationship source-evidence records are available.");
             }
         }
 
@@ -1256,17 +3920,6 @@
                     ImVec4(0.96f, 0.52f, 0.20f, 1.0f),
                     "Module information is unavailable: " + WideToUtf8(selectedModules_.statusMessage));
                 WrappedTextDisabled("Protected, exited, or cross-architecture processes may not expose module details.");
-            }
-
-            if (!selectedModules_.indicators.empty())
-            {
-                ImGui::SeparatorText("Module Indicators");
-                for (const std::wstring& indicator : selectedModules_.indicators)
-                {
-                    ImGui::Bullet();
-                    ImGui::SameLine();
-                    WrappedTextWide(indicator);
-                }
             }
 
             if (selectedModules_.modules.empty())
@@ -1462,13 +4115,10 @@
                 else
                 {
                     const Core::FileIdentity& moduleFileIdentity = CachedFileIdentity(module.modulePath);
-                    const std::vector<Core::FileIdentityIndicator> moduleFileIdentityIndicators =
-                        Core::BuildFileIdentityIndicators(moduleFileIdentity, module.moduleName, false);
                     ImGui::SeparatorText("File Identity");
                     RenderFileIdentityFields(
                         "selected_module_file_identity",
                         moduleFileIdentity,
-                        moduleFileIdentityIndicators,
                         "selected module");
                 }
             }
@@ -1554,13 +4204,13 @@
                 TokenSummaryCell(
                     "Elevated",
                     YesNo(token.isElevated),
-                    token.isElevated ? SeverityColor(Core::Severity::Medium) : ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                    ImGui::GetStyleColorVec4(ImGuiCol_Text),
                     fonts_.bold);
                 ImGui::TableSetColumnIndex(1);
                 TokenSummaryCell(
                     "Admin",
                     YesNo(token.isAdmin),
-                    token.isAdmin ? SeverityColor(Core::Severity::Low) : ImGui::GetStyleColorVec4(ImGuiCol_Text),
+                    ImGui::GetStyleColorVec4(ImGuiCol_Text),
                     fonts_.bold);
                 ImGui::EndTable();
             }
@@ -1605,36 +4255,37 @@
             }
             EndInspectorCard();
 
-            const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            Core::FileIdentity loadedSnapshotFileIdentity;
-            const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
-                ? loadedSnapshotFileIdentity
-                : CachedFileIdentity(*process);
-            const std::vector<Core::Finding>& findings =
-                FindingsForSelectedProcess(*process, chain, fileIdentity);
-            bool hasTokenFindings = false;
-            for (const Core::Finding& finding : findings)
+            const std::vector<Core::NativeSourceEvidenceRecord>& nativeEvidence =
+                SelectedNativeSourceEvidenceForProcess(*process);
+            bool hasTokenEvidence = false;
+            for (const Core::NativeSourceEvidenceRecord& record : nativeEvidence)
             {
-                if (finding.category == L"Token")
+                if (record.domain == Core::EvidenceDomain::Token)
                 {
-                    if (!hasTokenFindings)
+                    if (!hasTokenEvidence)
                     {
                         BeginInspectorCard("token_context", "Token Context", fonts_.bold);
-                        hasTokenFindings = true;
+                        hasTokenEvidence = true;
                     }
-                    SeverityText(FindingSeverityAsCoreSeverity(finding.severity));
-                    ImGui::SameLine();
-                    WrappedTextWide(finding.title);
-                    for (const std::wstring& evidence : finding.evidence)
+                    WrappedTextColored(
+                        record.contributedToVerdict
+                            ? SeverityColor(Core::Severity::Medium)
+                            : AccentBlue(),
+                        record.title);
+                    if (!record.summary.empty())
+                    {
+                        WrappedTextDisabled(record.summary);
+                    }
+                    for (const std::string& detail : record.details)
                     {
                         ImGui::Bullet();
                         ImGui::SameLine();
-                        WrappedTextDisabled(evidence);
+                        WrappedTextDisabled(detail);
                     }
                     ImGui::Spacing();
                 }
             }
-            if (hasTokenFindings)
+            if (hasTokenEvidence)
             {
                 EndInspectorCard();
             }
@@ -1691,11 +4342,6 @@
                         {
                             const Core::PrivilegeInfo& privilege = *visiblePrivileges[static_cast<std::size_t>(rowIndex)];
                             ImGui::TableNextRow();
-                            if (privilege.enabled && !privilege.removed)
-                            {
-                                ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ColorU32(ImVec4(0.18f, 0.15f, 0.07f, 0.55f)));
-                            }
-
                             ImGui::TableSetColumnIndex(0);
                             const bool pushedPrivilegeFont = PushFontIfAvailable(fonts_.monospace);
                             ClippedTextWithTooltip(privilege.name.empty() ? L"(unknown)" : privilege.name);
@@ -1703,14 +4349,7 @@
 
                             ImGui::TableSetColumnIndex(1);
                             const std::wstring state = PrivilegeStateText(privilege);
-                            if (privilege.enabled && !privilege.removed)
-                            {
-                                ImGui::TextColored(SeverityColor(Core::Severity::Low), "%s", WideToUtf8(state).c_str());
-                            }
-                            else
-                            {
-                                TextWide(state);
-                            }
+                            TextWide(state);
 
                             ImGui::TableSetColumnIndex(2);
                             ClippedTextWithTooltip(privilege.displayName.empty() ? L"(description unavailable)" : privilege.displayName);
@@ -1722,6 +4361,72 @@
             }
             EndInspectorCard();
         }
+
+#ifdef _DEBUG
+        void RenderHandleCollectionDebugDiagnostics(
+            const Core::HandleCollectionResult& collection)
+        {
+            ImGui::SeparatorText("Collection diagnostics (Debug)");
+            LabelValue(
+                "State",
+                HandleCollectionStateDisplayText(collection.state));
+            LabelValue(
+                "System Entries",
+                std::to_wstring(collection.systemHandleCount) +
+                    L" reported / " +
+                    std::to_wstring(collection.systemEntriesScanned) +
+                    L" scanned");
+            LabelValue(
+                "Selected Handles",
+                std::to_wstring(collection.selectedProcessHandlesMatched) +
+                    L" matched / " +
+                    std::to_wstring(collection.handles.size()) +
+                    L" retained / " +
+                    std::to_wstring(collection.selectedProcessHandlesOmitted) +
+                    L" omitted");
+            LabelValue(
+                "Query Buffer",
+                FileSizeText(collection.queryBufferBytes) +
+                    L" used / " +
+                    FileSizeText(collection.queryBufferBudgetBytes) +
+                    L" budget / " +
+                    std::to_wstring(collection.queryAttemptCount) +
+                    L" attempt(s)");
+            LabelValue(
+                "Compact Records",
+                FileSizeText(collection.compactCoreRecordBytes));
+            LabelValue(
+                "Object Names",
+                std::to_wstring(collection.namesResolved) +
+                    L" resolved / " +
+                    std::to_wstring(collection.namesSkipped) +
+                    L" skipped / " +
+                    std::to_wstring(collection.namesFailed) +
+                    L" failed");
+            LabelValue(
+                "Type Metadata",
+                std::to_wstring(collection.typeResolutionsResolved) +
+                    L" resolved / " +
+                    std::to_wstring(collection.typeResolutionsSkipped) +
+                    L" skipped / " +
+                    std::to_wstring(collection.typeResolutionsFailed) +
+                    L" failed");
+            LabelValue(
+                "Target Identity",
+                std::to_wstring(collection.targetsResolved) +
+                    L" resolved / " +
+                    std::to_wstring(collection.targetsUnresolved) +
+                    L" unresolved");
+            LabelValue(
+                "Timing",
+                std::to_wstring(collection.queryDurationMicroseconds) +
+                    L" us query / " +
+                    std::to_wstring(collection.enrichmentDurationMicroseconds) +
+                    L" us enrichment / " +
+                    std::to_wstring(collection.totalDurationMicroseconds) +
+                    L" us total");
+        }
+#endif
 
         void RenderHandlesPanel()
         {
@@ -1776,21 +4481,50 @@
                 WrappedTextDisabled("Showing metadata preserved in saved snapshot.");
             }
 
-            if (!selectedHandles_.success)
+            const HandleCollectionSectionPlan handlePresentation =
+                PlanHandleCollectionSection(
+                    selectedHandles_.state,
+                    selectedHandles_.handles.size());
+
+            if (handlePresentation.showUnavailableState)
             {
                 BeginInspectorCard("handles_unavailable", "Handles", fonts_.bold);
                 const std::string handleDetail = WideToUtf8(selectedHandles_.statusMessage.empty()
                     ? L"Collection did not complete."
                     : selectedHandles_.statusMessage);
                 RenderEmptyState("Handle information is unavailable.", handleDetail.c_str());
+#ifdef _DEBUG
+                RenderHandleCollectionDebugDiagnostics(selectedHandles_);
+#endif
                 EndInspectorCard();
                 return;
             }
 
-            if (selectedHandles_.handles.empty())
+            if (handlePresentation.showLimitationBanner)
+            {
+                BeginInspectorCard(
+                    "handles_collection_limitation",
+                    "Handle Collection Limitation",
+                    fonts_.bold);
+                WrappedTextColored(
+                    SeverityColor(Core::Severity::Low),
+                    WideToUtf8(selectedHandles_.statusMessage.empty()
+                        ? L"Retained handle records are shown, but additional handles or optional metadata may not have been evaluated."
+                        : selectedHandles_.statusMessage));
+                EndInspectorCard();
+            }
+
+            if (handlePresentation.showEmptyState)
             {
                 BeginInspectorCard("handles_none", "Handles", fonts_.bold);
-                RenderEmptyState("No handle information was returned for this process.");
+                RenderEmptyState(
+                    "No handles were found for this process.",
+                    selectedHandles_.IsPartial()
+                        ? "Collection completed partially; safety limits may have prevented full evaluation."
+                        : nullptr);
+#ifdef _DEBUG
+                RenderHandleCollectionDebugDiagnostics(selectedHandles_);
+#endif
                 EndInspectorCard();
                 return;
             }
@@ -1799,7 +4533,7 @@
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (ImGui::InputTextWithHint(
                 "##HandlesPanelSearch",
-                "Search handle, type, target, access, indicator",
+                "Search handle, type, target, access, category",
                 handleSearchBuffer_.data(),
                 handleSearchBuffer_.size()))
             {
@@ -1821,12 +4555,12 @@
                     handlesTableNeedsAutoSize_ = true;
                 }
             }
-            SameLineIfChipFits("Sensitive");
-            if (ChipButton("Sensitive##HandleFilter", handleFilter_ == HandleFilter::Sensitive, SeverityColor(Core::Severity::Medium)))
+            SameLineIfChipFits("Material Access");
+            if (ChipButton("Material Access##HandleFilter", handleFilter_ == HandleFilter::MaterialAccess, AccentBlue()))
             {
-                if (handleFilter_ != HandleFilter::Sensitive)
+                if (handleFilter_ != HandleFilter::MaterialAccess)
                 {
-                    handleFilter_ = HandleFilter::Sensitive;
+                    handleFilter_ = HandleFilter::MaterialAccess;
                     visibleHandlesDirty_ = true;
                     handlesTableNeedsAutoSize_ = true;
                 }
@@ -1881,12 +4615,12 @@
                     handlesTableNeedsAutoSize_ = true;
                 }
             }
-            SameLineIfChipFits("With Indicators");
-            if (ChipButton("With Indicators##HandleFilter", handleFilter_ == HandleFilter::WithIndicators, SeverityColor(Core::Severity::Low)))
+            SameLineIfChipFits("With Access Categories");
+            if (ChipButton("With Access Categories##HandleFilter", handleFilter_ == HandleFilter::WithAccessCategories, AccentBlue()))
             {
-                if (handleFilter_ != HandleFilter::WithIndicators)
+                if (handleFilter_ != HandleFilter::WithAccessCategories)
                 {
-                    handleFilter_ = HandleFilter::WithIndicators;
+                    handleFilter_ = HandleFilter::WithAccessCategories;
                     visibleHandlesDirty_ = true;
                     handlesTableNeedsAutoSize_ = true;
                 }
@@ -1898,11 +4632,18 @@
             BeginInspectorCard("handles_summary", "Handle Summary", fonts_.bold);
             LabelValue("Total Loaded", std::to_wstring(selectedHandles_.handles.size()));
             LabelValue("Visible", std::to_wstring(visibleHandleIndexes_.size()));
-            LabelValue("Sensitive", std::to_wstring(selectedHandles_.sensitiveCount));
-            LabelValue("With Indicators", std::to_wstring(visibleHandlesWithIndicatorsCount_));
+            LabelValue("With Typed Access", std::to_wstring(visibleHandlesWithTypedAccessCount_));
             LabelValue("Name Unavail/Skipped", std::to_wstring(visibleHandlesNameStatusCount_));
-            ImGui::TextDisabled("Status");
-            WrappedTextDisabled(selectedHandles_.statusMessage.empty() ? L"(no status)" : selectedHandles_.statusMessage);
+            if (!handlePresentation.showLimitationBanner)
+            {
+                ImGui::TextDisabled("Status");
+                WrappedTextDisabled(selectedHandles_.statusMessage.empty()
+                    ? L"(no status)"
+                    : selectedHandles_.statusMessage);
+            }
+#ifdef _DEBUG
+            RenderHandleCollectionDebugDiagnostics(selectedHandles_);
+#endif
             EndInspectorCard();
 
             if (visibleHandleIndexes_.empty())
@@ -1942,9 +4683,9 @@
                     ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortAscending,
                     92.0f);
                 ImGui::TableSetupColumn(
-                    "Indicators",
+                    "Access categories",
                     ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
-                    118.0f);
+                    148.0f);
                 ImGui::TableHeadersRow();
 
                 std::vector<std::size_t> handleView = visibleHandleIndexes_;
@@ -1986,27 +4727,12 @@
                         }
                         const Core::HandleInfo& handle = selectedHandles_.handles[handleIndex];
                         ImGui::TableNextRow();
-                        if (handle.isSensitive)
-                        {
-                            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ColorU32(ImVec4(0.26f, 0.11f, 0.045f, 0.68f)));
-                        }
-                        else if (!handle.indicators.empty())
-                        {
-                            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ColorU32(ImVec4(0.15f, 0.12f, 0.05f, 0.42f)));
-                        }
                         ImGui::PushID(static_cast<int>(handleIndex));
 
                         ImGui::TableSetColumnIndex(0);
                         const std::wstring handleValue = HandleValueText(handle.handleValue);
                         const bool pushedHandleFont = PushFontIfAvailable(fonts_.monospace);
-                        if (handle.isSensitive)
-                        {
-                            ImGui::TextColored(SeverityColor(Core::Severity::Medium), "%s", WideToUtf8(handleValue).c_str());
-                        }
-                        else
-                        {
-                            ClippedTextWithTooltip(handleValue);
-                        }
+                        ClippedTextWithTooltip(handleValue);
                         const bool handleContextRequested =
                             ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
                         PopFontIfPushed(pushedHandleFont);
@@ -2067,45 +4793,44 @@
                             accessHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
 
                         ImGui::TableSetColumnIndex(4);
-                        const std::wstring indicators = HandleIndicatorText(handle);
+                        const std::wstring accessCategories =
+                            HandleAccessCategoryText(handle);
                         const std::wstring status = HandleStatusText(handle);
-                        std::wstring displayedIndicatorText;
-                        bool indicatorHovered = false;
-                        if (!indicators.empty())
+                        std::wstring displayedCategoryText;
+                        bool categoryHovered = false;
+                        if (!accessCategories.empty())
                         {
-                            displayedIndicatorText = indicators;
-                            ImGui::TextColored(
-                                handle.isSensitive ? SeverityColor(Core::Severity::Medium) : SeverityColor(Core::Severity::Low),
-                                "%s",
-                                WideToUtf8(indicators).c_str());
-                            indicatorHovered = ImGui::IsItemHovered();
-                            if (indicatorHovered)
+                            displayedCategoryText = accessCategories;
+                            ImGui::TextUnformatted(
+                                WideToUtf8(accessCategories).c_str());
+                            categoryHovered = ImGui::IsItemHovered();
+                            if (categoryHovered)
                             {
-                                RenderWrappedTooltip(indicators, 560.0f);
+                                RenderWrappedTooltip(accessCategories, 560.0f);
                             }
                         }
                         else if (!status.empty())
                         {
-                            displayedIndicatorText = status;
+                            displayedCategoryText = status;
                             ImGui::TextDisabled("%s", WideToUtf8(status).c_str());
-                            indicatorHovered = ImGui::IsItemHovered();
-                            if (indicatorHovered && !handle.errorMessage.empty())
+                            categoryHovered = ImGui::IsItemHovered();
+                            if (categoryHovered && !handle.errorMessage.empty())
                             {
                                 RenderWrappedTooltip(handle.errorMessage, 560.0f);
                             }
                         }
                         else
                         {
-                            displayedIndicatorText = L"None";
+                            displayedCategoryText = L"None";
                             ImGui::TextDisabled("None");
-                            indicatorHovered = ImGui::IsItemHovered();
+                            categoryHovered = ImGui::IsItemHovered();
                         }
-                        const bool indicatorContextRequested =
-                            indicatorHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
+                        const bool categoryContextRequested =
+                            categoryHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right);
                         RenderInspectorValueContextMenu(
-                            "HandleIndicatorValueContext",
-                            displayedIndicatorText,
-                            indicatorContextRequested);
+                            "HandleAccessCategoryValueContext",
+                            displayedCategoryText,
+                            categoryContextRequested);
 
                         ImGui::PopID();
                     }
@@ -2501,17 +5226,12 @@
                 EndInspectorCard();
             }
 
-            const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            Core::FileIdentity loadedSnapshotFileIdentity;
-            const Core::FileIdentity& fileIdentity = loadedSnapshotActive_
-                ? loadedSnapshotFileIdentity
-                : CachedFileIdentity(*process);
-            const std::vector<Core::Finding>& findings =
-                FindingsForSelectedProcess(*process, chain, fileIdentity);
+            const std::vector<Core::NativeSourceEvidenceRecord>& nativeEvidence =
+                SelectedNativeSourceEvidenceForProcess(*process);
             bool hasRuntimeContext = !runtime.contextNotes.empty();
-            for (const Core::Finding& finding : findings)
+            for (const Core::NativeSourceEvidenceRecord& record : nativeEvidence)
             {
-                if (finding.category == L"Runtime")
+                if (record.domain == Core::EvidenceDomain::Runtime)
                 {
                     hasRuntimeContext = true;
                     break;
@@ -2527,21 +5247,27 @@
                     ImGui::SameLine();
                     WrappedTextDisabled(note);
                 }
-                for (const Core::Finding& finding : findings)
+                for (const Core::NativeSourceEvidenceRecord& record : nativeEvidence)
                 {
-                    if (finding.category != L"Runtime")
+                    if (record.domain != Core::EvidenceDomain::Runtime)
                     {
                         continue;
                     }
 
-                    SeverityText(FindingSeverityAsCoreSeverity(finding.severity));
-                    ImGui::SameLine();
-                    WrappedTextWide(finding.title);
-                    for (const std::wstring& evidence : finding.evidence)
+                    WrappedTextColored(
+                        record.contributedToVerdict
+                            ? SeverityColor(Core::Severity::Medium)
+                            : AccentBlue(),
+                        record.title);
+                    if (!record.summary.empty())
+                    {
+                        WrappedTextDisabled(record.summary);
+                    }
+                    for (const std::string& detail : record.details)
                     {
                         ImGui::Bullet();
                         ImGui::SameLine();
-                        WrappedTextDisabled(evidence);
+                        WrappedTextDisabled(detail);
                     }
                     ImGui::Spacing();
                 }
@@ -2757,7 +5483,6 @@
             LabelValue("Executable", std::to_wstring(memory.executableRegions));
             LabelValue("Private Executable", std::to_wstring(memory.privateExecutableRegions));
             LabelValue("RWX", std::to_wstring(memory.rwxRegions));
-            LabelValue("Suspicious", std::to_wstring(memory.suspiciousRegions));
             LabelValue("Guard Pages", std::to_wstring(memory.guardRegions));
             if (!memory.statusMessage.empty())
             {
@@ -2770,7 +5495,7 @@
             ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
             if (ImGui::InputTextWithHint(
                 "##MemoryPanelSearch",
-                "Search address, protection, type, mapped file, indicator",
+                "Search address, protection, type, mapped file, metadata",
                 memorySearchBuffer_.data(),
                 memorySearchBuffer_.size()))
             {
@@ -2832,12 +5557,12 @@
                     memoryTableNeedsAutoSize_ = true;
                 }
             }
-            SameLineIfChipFits("Suspicious");
-            if (ChipButton("Suspicious##MemoryFilter", memoryFilter_ == MemoryFilter::Suspicious, SeverityColor(Core::Severity::Medium)))
+            SameLineIfChipFits("Executable Context");
+            if (ChipButton("Executable Context##MemoryFilter", memoryFilter_ == MemoryFilter::ExecutableContext, AccentBlue()))
             {
-                if (memoryFilter_ != MemoryFilter::Suspicious)
+                if (memoryFilter_ != MemoryFilter::ExecutableContext)
                 {
-                    memoryFilter_ = MemoryFilter::Suspicious;
+                    memoryFilter_ = MemoryFilter::ExecutableContext;
                     visibleMemoryRegionsDirty_ = true;
                     memoryTableNeedsAutoSize_ = true;
                 }
@@ -2902,9 +5627,9 @@
                     "Mapped file",
                     ImGuiTableColumnFlags_WidthStretch | ImGuiTableColumnFlags_PreferSortAscending);
                 ImGui::TableSetupColumn(
-                    "Indicators",
+                    "Metadata",
                     ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort,
-                    140.0f);
+                    170.0f);
                 ImGui::TableHeadersRow();
 
                 std::vector<std::size_t> regionView = visibleMemoryRegionIndexes_;
@@ -2946,11 +5671,7 @@
                         }
                         const Core::MemoryRegionInfo& region = memory.regions[regionIndex];
                         ImGui::TableNextRow();
-                        if (region.isSuspicious)
-                        {
-                            ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ColorU32(ImVec4(0.24f, 0.10f, 0.05f, 0.55f)));
-                        }
-                        else if (region.isGuard)
+                        if (region.isGuard)
                         {
                             ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, ColorU32(ImVec4(0.12f, 0.14f, 0.18f, 0.48f)));
                         }
@@ -2995,30 +5716,28 @@
                             region.mappedFilePath.empty() ? nullptr : &region.mappedFilePath);
 
                         ImGui::TableSetColumnIndex(6);
-                        const std::wstring indicators = MemoryIndicatorText(region);
-                        const std::wstring displayedIndicators = indicators.empty() ? L"None" : indicators;
-                        bool indicatorsHovered = false;
-                        if (indicators.empty())
+                        const std::wstring attributes = MemoryAttributeText(region);
+                        const std::wstring displayedAttributes =
+                            attributes.empty() ? L"None" : attributes;
+                        bool attributesHovered = false;
+                        if (attributes.empty())
                         {
                             ImGui::TextDisabled("None");
-                            indicatorsHovered = ImGui::IsItemHovered();
+                            attributesHovered = ImGui::IsItemHovered();
                         }
                         else
                         {
-                            ImGui::TextColored(
-                                region.isSuspicious ? SeverityColor(Core::Severity::Medium) : SeverityColor(Core::Severity::Info),
-                                "%s",
-                                WideToUtf8(indicators).c_str());
-                            indicatorsHovered = ImGui::IsItemHovered();
-                            if (indicatorsHovered)
+                            ImGui::TextUnformatted(WideToUtf8(attributes).c_str());
+                            attributesHovered = ImGui::IsItemHovered();
+                            if (attributesHovered)
                             {
-                                RenderWrappedTooltip(indicators, 600.0f);
+                                RenderWrappedTooltip(attributes, 600.0f);
                             }
                         }
                         RenderInspectorValueContextMenu(
-                            "MemoryIndicatorsValueContext",
-                            displayedIndicators,
-                            indicatorsHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
+                            "MemoryMetadataValueContext",
+                            displayedAttributes,
+                            attributesHovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right));
                         ImGui::PopID();
                     }
                 }

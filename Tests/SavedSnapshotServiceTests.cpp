@@ -241,7 +241,7 @@ namespace GlassPane::Tests
             context.serviceContext = &serviceContext;
             context.networkLoaded = network != nullptr;
             context.network = network;
-            context.glassPaneVersion = L"V0.7.0-Debug";
+            context.glassPaneVersion = L"V0.8.0-Debug";
             context.capturedAt = L"2026-07-10 12:00:00";
             context.hostname = L"TEST-HOST";
             context.currentUser = L"TEST\\User";
@@ -347,6 +347,9 @@ namespace GlassPane::Tests
                 "}\n";
         }
 
+        std::string ServiceContextWithServicesLiteral(
+            const std::string& servicesLiteral);
+
         SavedSnapshotDocument MakeSentinelDocument()
         {
             SavedSnapshotDocument sentinel;
@@ -445,6 +448,10 @@ namespace GlassPane::Tests
                 Check(
                     loaded.serviceContext.serviceIndexesByPid.empty(),
                     L"legacy service correlation index empty");
+                Check(
+                    loaded.triageContext.processRecords.empty() &&
+                        !loaded.triageContext.selectedRecord.has_value(),
+                    L"legacy snapshot has no captured authoritative triage");
 
                 const std::filesystem::path upgradedPath = temporary.File(
                     schemaVersion == 1
@@ -474,10 +481,50 @@ namespace GlassPane::Tests
                 CheckEqual(
                     upgraded.metadata.schemaVersion,
                     GlassPaneSnapshotSchemaVersion,
-                    L"legacy resave writes schema3");
+                    L"legacy resave writes current schema");
                 Check(!upgraded.serviceContext.attempted, L"legacy resave does not fabricate attempt");
                 Check(upgraded.serviceContext.services.empty(), L"legacy resave does not fabricate rows");
+                CheckEqual(
+                    upgraded.triageContext.processRecords.size(),
+                    upgraded.snapshot.processes.size(),
+                    L"legacy resave writes one explicit triage record per process");
+                Check(
+                    std::all_of(
+                        upgraded.triageContext.processRecords.begin(),
+                        upgraded.triageContext.processRecords.end(),
+                        [](const PersistedProcessTriageRecord& record)
+                        {
+                            return !record.summary.captured &&
+                                record.summary.analysisLevel ==
+                                    PersistedTriageAnalysisLevel::NotCaptured;
+                        }),
+                    L"legacy resave does not fabricate authoritative verdicts");
             }
+
+            const std::filesystem::path schema3Path =
+                temporary.File(L"schema3-compatibility.json");
+            Check(
+                WriteTextFile(
+                    schema3Path,
+                    MinimalSchema3Snapshot(
+                        ServiceContextWithServicesLiteral("[]"))),
+                L"schema3 compatibility fixture write");
+            SavedSnapshotDocument schema3;
+            std::wstring schema3Error;
+            Check(
+                LoadGlassPaneSnapshot(
+                    schema3Path.wstring(),
+                    schema3,
+                    &schema3Error),
+                L"schema3 compatibility snapshot loads");
+            CheckEqual(
+                schema3.metadata.schemaVersion,
+                3,
+                L"schema3 compatibility version preserved");
+            Check(
+                schema3.triageContext.processRecords.empty() &&
+                    !schema3.triageContext.selectedRecord.has_value(),
+                L"schema3 does not fabricate authoritative triage");
         }
 
         void TestSchema3RoundTripAndManifest(const OwnedTempDirectory& temporary)

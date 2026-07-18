@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <initializer_list>
 #include <sstream>
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 namespace GlassPane::Core
 {
@@ -20,50 +22,82 @@ namespace GlassPane::Core
             return value;
         }
 
-        bool InSet(const std::unordered_set<std::wstring>& values, const std::wstring& value)
+        bool IsEncodedCommandSwitch(const std::wstring& token)
         {
-            return values.find(ToLower(value)) != values.end();
+            const std::wstring lowered = ToLower(token);
+            return lowered == L"-encodedcommand" ||
+                lowered == L"/encodedcommand" ||
+                lowered == L"--encoded-command";
         }
 
-        bool Contains(const std::wstring& haystack, const std::wstring& needle)
+        bool HasEncodedCommandSwitch(const std::wstring& commandLine)
         {
-            return haystack.find(needle) != std::wstring::npos;
-        }
-
-        bool IsPowerShell(const std::wstring& loweredName)
-        {
-            return loweredName == L"powershell.exe" || loweredName == L"pwsh.exe";
-        }
-
-        bool HasEncodedCommandSwitch(const std::wstring& loweredCommandLine)
-        {
-            return Contains(loweredCommandLine, L"-enc") ||
-                Contains(loweredCommandLine, L"-encodedcommand");
-        }
-
-        bool HasIndicator(const std::vector<std::wstring>& indicators, const std::wstring& indicator)
-        {
-            return std::find(indicators.begin(), indicators.end(), indicator) != indicators.end();
-        }
-
-        void Escalate(Severity& target, Severity severity)
-        {
-            if (SeverityRank(severity) > SeverityRank(target))
+            std::wstring token;
+            bool quoted = false;
+            for (std::size_t index = 0; index <= commandLine.size(); ++index)
             {
-                target = severity;
+                const wchar_t character = index < commandLine.size()
+                    ? commandLine[index]
+                    : L' ';
+                if (character == L'"')
+                {
+                    quoted = !quoted;
+                    continue;
+                }
+                if (!quoted && std::iswspace(character) != 0)
+                {
+                    if (IsEncodedCommandSwitch(token))
+                    {
+                        return true;
+                    }
+                    token.clear();
+                    continue;
+                }
+                token.push_back(character);
             }
+            return false;
         }
 
-        void AddChainIndicator(
+        std::wstring BoundedChainFactValue(std::wstring value, bool& truncated)
+        {
+            if (value.size() > ChainIndicatorFactValueMaxCharacters)
+            {
+                value.resize(ChainIndicatorFactValueMaxCharacters);
+                truncated = true;
+            }
+            return value;
+        }
+
+        void AddChainFacts(
             ChainAnalysisResult& analysis,
-            Severity severity,
-            const std::wstring& indicator)
+            std::initializer_list<ChainIndicatorFact> facts)
         {
-            if (!HasIndicator(analysis.chainIndicators, indicator))
+            for (ChainIndicatorFact fact : facts)
             {
-                analysis.chainIndicators.push_back(indicator);
+                if (analysis.chainIndicatorFacts.size() >=
+                    ChainIndicatorFactMaxCount)
+                {
+                    analysis.chainIndicatorFactsTruncated = true;
+                    break;
+                }
+                if (fact.sourceRuleId.size() >
+                    ChainIndicatorFactRuleIdMaxCharacters)
+                {
+                    fact.sourceRuleId.resize(
+                        ChainIndicatorFactRuleIdMaxCharacters);
+                    analysis.chainIndicatorFactsTruncated = true;
+                }
+                // Retained only for historical sidecar shape compatibility.
+                // Native chain facts are not derived from a legacy indicator.
+                fact.sourceIndicatorOrdinal = 0;
+                fact.rawValue = BoundedChainFactValue(
+                    std::move(fact.rawValue),
+                    analysis.chainIndicatorFactsTruncated);
+                fact.normalizedValue = BoundedChainFactValue(
+                    std::move(fact.normalizedValue),
+                    analysis.chainIndicatorFactsTruncated);
+                analysis.chainIndicatorFacts.push_back(std::move(fact));
             }
-            Escalate(analysis.chainSeverity, severity);
         }
     }
 
@@ -141,10 +175,6 @@ namespace GlassPane::Core
             }
 
             formatted << (process->name.empty() ? L"(unknown)" : process->name);
-            if (SeverityRank(process->severity) >= SeverityRank(Severity::Low))
-            {
-                formatted << L" [" << SeverityToString(process->severity) << L"]";
-            }
         }
 
         return formatted.str();
@@ -152,53 +182,6 @@ namespace GlassPane::Core
 
     ChainAnalysisResult AnalyzeChain(const ProcessSnapshot& snapshot, std::uint32_t pid)
     {
-        static const std::unordered_set<std::wstring> officeProcesses = {
-            L"winword.exe",
-            L"excel.exe",
-            L"powerpnt.exe",
-            L"outlook.exe",
-            L"msaccess.exe",
-            L"onenote.exe",
-            L"mspub.exe",
-            L"visio.exe"
-        };
-
-        static const std::unordered_set<std::wstring> browsers = {
-            L"chrome.exe",
-            L"msedge.exe",
-            L"firefox.exe"
-        };
-
-        static const std::unordered_set<std::wstring> scriptInterpreters = {
-            L"powershell.exe",
-            L"pwsh.exe",
-            L"cmd.exe",
-            L"wscript.exe",
-            L"cscript.exe",
-            L"mshta.exe",
-            L"python.exe",
-            L"pythonw.exe",
-            L"node.exe"
-        };
-
-        static const std::unordered_set<std::wstring> scriptHosts = {
-            L"wscript.exe",
-            L"cscript.exe",
-            L"mshta.exe"
-        };
-
-        static const std::unordered_set<std::wstring> lolbins = {
-            L"rundll32.exe",
-            L"regsvr32.exe",
-            L"mshta.exe",
-            L"certutil.exe",
-            L"bitsadmin.exe",
-            L"wmic.exe",
-            L"msiexec.exe",
-            L"powershell.exe",
-            L"pwsh.exe"
-        };
-
         ChainAnalysisResult analysis;
         analysis.pid = pid;
         const std::vector<const ProcessInfo*> chain = GetParentChain(snapshot, pid);
@@ -208,24 +191,22 @@ namespace GlassPane::Core
         {
             analysis.parentChain.push_back({
                 process->pid,
-                process->name,
-                process->severity
+                process->name
             });
 
-            Escalate(analysis.chainSeverity, process->severity);
-
-            const std::wstring loweredName = ToLower(process->name);
-            const std::wstring loweredCommandLine = ToLower(process->commandLine);
-            if (IsPowerShell(loweredName) && HasEncodedCommandSwitch(loweredCommandLine))
+            if (process->commandLineAccessible &&
+                HasEncodedCommandSwitch(process->commandLine))
             {
-                const Severity encodedSeverity =
-                    SeverityRank(process->severity) >= SeverityRank(Severity::Low)
-                        ? process->severity
-                        : Severity::Medium;
-                AddChainIndicator(
+                AddChainFacts(
                     analysis,
-                    encodedSeverity,
-                    L"Encoded PowerShell appears in process ancestry");
+                    {{
+                        ChainIndicatorFactKind::EncodedCommand,
+                        "native.chain.command.encoded-switch",
+                        process->pid,
+                        0,
+                        process->commandLine,
+                        L"encoded-command-switch"
+                    }});
             }
         }
 
@@ -233,33 +214,21 @@ namespace GlassPane::Core
         {
             const ProcessInfo* parent = chain[index - 1];
             const ProcessInfo* child = chain[index];
-            const std::wstring parentName = ToLower(parent->name);
-            const std::wstring childName = ToLower(child->name);
-            const std::wstring childCommandLine = ToLower(child->commandLine);
-
-            if (InSet(officeProcesses, parentName) && InSet(scriptInterpreters, childName))
+            if (child->commandLineAccessible &&
+                HasEncodedCommandSwitch(child->commandLine))
             {
-                AddChainIndicator(analysis, Severity::High, L"Office application spawned a shell");
-            }
-
-            if (InSet(browsers, parentName) && InSet(scriptInterpreters, childName))
-            {
-                AddChainIndicator(analysis, Severity::High, L"Browser spawned script interpreter");
-            }
-
-            if (InSet(scriptHosts, parentName) && InSet(lolbins, childName))
-            {
-                AddChainIndicator(analysis, Severity::High, L"Script host launched LOLBin");
-            }
-
-            if (InSet(officeProcesses, parentName) &&
-                IsPowerShell(childName) &&
-                HasEncodedCommandSwitch(childCommandLine))
-            {
-                AddChainIndicator(
+                AddChainFacts(
                     analysis,
-                    Severity::High,
-                    L"Office application spawned encoded PowerShell");
+                    {{
+                        ChainIndicatorFactKind::ProcessRelationship,
+                        "native.chain.relationship.encoded-command-parent",
+                        parent->pid,
+                        child->pid,
+                        L"PID " + std::to_wstring(parent->pid) +
+                            L" -> PID " + std::to_wstring(child->pid),
+                        L"pid:" + std::to_wstring(parent->pid) +
+                            L"->pid:" + std::to_wstring(child->pid)
+                    }});
             }
         }
 

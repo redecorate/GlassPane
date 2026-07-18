@@ -226,41 +226,6 @@ namespace GlassPane::Core
             return std::wstring(buffer, length);
         }
 
-        void AddRegionIndicators(MemoryRegionInfo& region)
-        {
-            if (region.stateRaw != MEM_COMMIT)
-            {
-                return;
-            }
-
-            if (region.isGuard)
-            {
-                region.indicators.push_back(L"Guard page.");
-            }
-
-            if (region.isExecutable && region.isWritable)
-            {
-                region.indicators.push_back(L"RWX memory region.");
-            }
-
-            if (region.isPrivate && region.isExecutable)
-            {
-                region.indicators.push_back(L"Private executable memory region.");
-                constexpr std::uint64_t LargeExecutableRegion = 16ULL * 1024ULL * 1024ULL;
-                if (region.regionSize >= LargeExecutableRegion)
-                {
-                    region.indicators.push_back(L"Large private executable memory region.");
-                }
-            }
-
-            if (region.isExecutable && !region.isImage && !region.isMapped && region.mappedFilePath.empty())
-            {
-                region.indicators.push_back(L"Executable region is not backed by an image or mapped file.");
-            }
-
-            region.isSuspicious = region.isExecutable &&
-                (region.isWritable || region.isPrivate || (!region.isImage && !region.isMapped && region.mappedFilePath.empty()));
-        }
     }
 
     MemoryCollectionResult CollectMemoryRegionsForPid(std::uint32_t pid)
@@ -333,8 +298,6 @@ namespace GlassPane::Core
             {
                 region.mappedFilePath = QueryMappedFilePath(process, info.BaseAddress);
             }
-            AddRegionIndicators(region);
-
             result.regions.push_back(std::move(region));
 
             const std::uintptr_t nextAddress =
@@ -362,10 +325,6 @@ namespace GlassPane::Core
             if (region.isExecutable && region.isWritable)
             {
                 ++result.rwxRegions;
-            }
-            if (region.isSuspicious)
-            {
-                ++result.suspiciousRegions;
             }
             if (region.isGuard)
             {

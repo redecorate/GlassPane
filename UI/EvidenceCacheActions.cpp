@@ -182,11 +182,14 @@
             visibleHandlesPid_ = InvalidPid;
             visibleHandlesCreationTime_ = 0;
             visibleHandlesSourceSize_ = 0;
-            visibleHandlesWithIndicatorsCount_ = 0;
+            visibleHandlesWithTypedAccessCount_ = 0;
             visibleHandlesNameStatusCount_ = 0;
             visibleHandlesSearchText_.clear();
 
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence(
+                Core::SelectedProcessEnrichedRebuildReason::
+                    SelectionChanged,
+                false);
         }
 
         void MarkSelectedEvidenceTablesNeedAutoSize()
@@ -351,6 +354,36 @@
             {
                 selectedHandles_ = evidence.handles;
                 selectedHandles_.pid = process.pid;
+                if (evidence.handlesStatus.status == L"partial" &&
+                    (selectedHandles_.success ||
+                        !selectedHandles_.handles.empty()))
+                {
+                    selectedHandles_.state =
+                        Core::HandleCollectionState::Partial;
+                    selectedHandles_.success = true;
+                }
+                else if (selectedHandles_.state ==
+                    Core::HandleCollectionState::NotAttempted)
+                {
+                    if (evidence.handlesStatus.status == L"ok")
+                    {
+                        selectedHandles_.state =
+                            Core::HandleCollectionState::Success;
+                        selectedHandles_.success = true;
+                    }
+                    else if (evidence.handlesStatus.status == L"unavailable" ||
+                        evidence.handlesStatus.status == L"access_denied" ||
+                        evidence.handlesStatus.status == L"process_exited")
+                    {
+                        selectedHandles_.state =
+                            Core::HandleCollectionState::Unavailable;
+                    }
+                    else if (evidence.handlesStatus.status == L"failed")
+                    {
+                        selectedHandles_.state =
+                            Core::HandleCollectionState::Failed;
+                    }
+                }
                 ApplyLoadedStatusNote(selectedHandles_.statusMessage, L"Handle", evidence.handlesStatus);
                 if (!selectedHandles_.success && selectedHandles_.statusMessage.empty())
                 {
@@ -363,7 +396,7 @@
             }
 
             MarkSelectedEvidenceTablesNeedAutoSize();
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence();
             return true;
         }
 
@@ -381,8 +414,7 @@
             std::string message =
                 "Handles refreshed for selected PID " + std::to_string(process.pid) +
                 ": " + std::to_string(selectedHandles_.handles.size()) +
-                " handle(s), " + std::to_string(selectedHandles_.sensitiveCount) +
-                " sensitive, " + std::to_string(elapsedMs) + " ms.";
+                " handle(s), " + std::to_string(elapsedMs) + " ms.";
             if (!selectedHandles_.success && !selectedHandles_.statusMessage.empty())
             {
                 message += " " + WideToUtf8(selectedHandles_.statusMessage);
@@ -415,7 +447,9 @@
             AddLog(selectedRuntime_.success ? LogLevel::Info : LogLevel::Warning, message);
         }
 
-        void EnsureSelectedProcessEvidenceLoaded(const Core::ProcessInfo& process)
+        void EnsureSelectedProcessEvidenceLoaded(
+            const Core::ProcessInfo& process,
+            bool forceRefresh = false)
         {
             if (loadedSnapshotActive_)
             {
@@ -426,35 +460,49 @@
             std::vector<std::string> refreshed;
             bool hasFailure = false;
 
-            if (!ModulesLoadedForProcess(process) && !RestoreModulesFromCache(process))
+            // These existing selected-process collectors are part of the same
+            // coordinated lifecycle even when their Inspector tabs were never
+            // opened.
+            CachedChainAnalysis(process);
+            if (!IsSyntheticSystemProcessEntry(process))
+            {
+                CachedFileIdentity(process);
+            }
+
+            if (!ModulesLoadedForProcess(process) &&
+                (forceRefresh || !RestoreModulesFromCache(process)))
             {
                 RefreshModules(false);
                 refreshed.push_back("modules");
                 hasFailure = hasFailure || !selectedModules_.success;
             }
 
-            if (!TokenLoadedForProcess(process) && !RestoreTokenFromCache(process))
+            if (!TokenLoadedForProcess(process) &&
+                (forceRefresh || !RestoreTokenFromCache(process)))
             {
                 RefreshToken(false);
                 refreshed.push_back("token");
                 hasFailure = hasFailure || !selectedToken_.success;
             }
 
-            if (!RuntimeLoadedForProcess(process) && !RestoreRuntimeFromCache(process))
+            if (!RuntimeLoadedForProcess(process) &&
+                (forceRefresh || !RestoreRuntimeFromCache(process)))
             {
                 RefreshRuntime(false);
                 refreshed.push_back("runtime");
                 hasFailure = hasFailure || !selectedRuntime_.success;
             }
 
-            if (!MemoryLoadedForProcess(process) && !RestoreMemoryFromCache(process))
+            if (!MemoryLoadedForProcess(process) &&
+                (forceRefresh || !RestoreMemoryFromCache(process)))
             {
                 RefreshMemory(false);
                 refreshed.push_back("memory");
                 hasFailure = hasFailure || !selectedMemory_.success;
             }
 
-            if (!HandlesLoadedForProcess(process) && !RestoreHandlesFromCache(process))
+            if (!HandlesLoadedForProcess(process) &&
+                (forceRefresh || !RestoreHandlesFromCache(process)))
             {
                 RefreshHandles(false);
                 refreshed.push_back("handles");
@@ -525,7 +573,8 @@
             selectedModuleIndex_ = 0;
             moduleEvidenceCache_[EvidenceCacheKey(*process)] = selectedModules_;
             TrimEvidenceCache(moduleEvidenceCache_);
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence(
+                Core::SelectedProcessEnrichedRebuildReason::ModulesChanged);
             if (logActivity)
             {
                 AddLog(
@@ -554,7 +603,8 @@
                 selectedTokenLoaded_ = false;
                 selectedTokenPid_ = InvalidPid;
                 selectedTokenCreationTime_ = 0;
-                InvalidateFindingsCache();
+                InvalidateSelectedNativeEvidence(
+                    Core::SelectedProcessEnrichedRebuildReason::TokenChanged);
                 if (logActivity)
                 {
                     AddLog(LogLevel::Warning, "No selected process for token refresh.");
@@ -571,7 +621,8 @@
             selectedTokenCreationTime_ = ProcessCacheStamp(*process);
             tokenEvidenceCache_[EvidenceCacheKey(*process)] = selectedToken_;
             TrimEvidenceCache(tokenEvidenceCache_);
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence(
+                Core::SelectedProcessEnrichedRebuildReason::TokenChanged);
 
             if (logActivity)
             {
@@ -601,7 +652,8 @@
                 selectedRuntimeLoaded_ = false;
                 selectedRuntimePid_ = InvalidPid;
                 selectedRuntimeCreationTime_ = 0;
-                InvalidateFindingsCache();
+                InvalidateSelectedNativeEvidence(
+                    Core::SelectedProcessEnrichedRebuildReason::RuntimeChanged);
                 if (logActivity)
                 {
                     AddLog(LogLevel::Warning, "No selected process for runtime refresh.");
@@ -618,7 +670,8 @@
             selectedRuntimeCreationTime_ = ProcessCacheStamp(*process);
             runtimeEvidenceCache_[EvidenceCacheKey(*process)] = selectedRuntime_;
             TrimEvidenceCache(runtimeEvidenceCache_);
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence(
+                Core::SelectedProcessEnrichedRebuildReason::RuntimeChanged);
 
             if (logActivity)
             {
@@ -656,7 +709,8 @@
                 visibleMemoryCreationTime_ = 0;
                 visibleMemorySourceSize_ = 0;
                 visibleMemorySearchText_.clear();
-                InvalidateFindingsCache();
+                InvalidateSelectedNativeEvidence(
+                    Core::SelectedProcessEnrichedRebuildReason::MemoryChanged);
                 if (logActivity)
                 {
                     AddLog(LogLevel::Warning, "No selected process for memory refresh.");
@@ -674,7 +728,8 @@
             visibleMemoryRegionsDirty_ = true;
             memoryEvidenceCache_[EvidenceCacheKey(*process)] = selectedMemory_;
             TrimEvidenceCache(memoryEvidenceCache_);
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence(
+                Core::SelectedProcessEnrichedRebuildReason::MemoryChanged);
 
             if (logActivity)
             {
@@ -683,8 +738,10 @@
                     "Memory refresh for PID " + std::to_string(process->pid) + ": " +
                         std::to_string(selectedMemory_.regions.size()) +
                         " region(s), " +
-                        std::to_string(selectedMemory_.suspiciousRegions) +
-                        " suspicious in " + std::to_string(timings_.memoryMs) + " ms.");
+                        std::to_string(selectedMemory_.executableRegions) +
+                        " executable, " +
+                        std::to_string(selectedMemory_.guardRegions) +
+                        " guarded in " + std::to_string(timings_.memoryMs) + " ms.");
             }
         }
 
@@ -711,10 +768,11 @@
                 visibleHandlesPid_ = InvalidPid;
                 visibleHandlesCreationTime_ = 0;
                 visibleHandlesSourceSize_ = 0;
-                visibleHandlesWithIndicatorsCount_ = 0;
+                visibleHandlesWithTypedAccessCount_ = 0;
                 visibleHandlesNameStatusCount_ = 0;
                 visibleHandlesSearchText_.clear();
-                InvalidateFindingsCache();
+                InvalidateSelectedNativeEvidence(
+                    Core::SelectedProcessEnrichedRebuildReason::HandlesChanged);
                 if (logActivity)
                 {
                     AddLog(LogLevel::Warning, "No selected process for handle refresh.");
@@ -732,7 +790,8 @@
             visibleHandlesDirty_ = true;
             handleEvidenceCache_[EvidenceCacheKey(*process)] = selectedHandles_;
             TrimEvidenceCache(handleEvidenceCache_);
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence(
+                Core::SelectedProcessEnrichedRebuildReason::HandlesChanged);
 
             if (logActivity)
             {
@@ -741,7 +800,6 @@
                     "Handle refresh for PID " + std::to_string(process->pid) + ": " +
                         std::to_string(selectedHandles_.handles.size()) +
                         " handle(s), " +
-                        std::to_string(selectedHandles_.sensitiveCount) +
-                        " sensitive in " + std::to_string(timings_.handlesMs) + " ms.");
+                        " collected in " + std::to_string(timings_.handlesMs) + " ms.");
             }
         }

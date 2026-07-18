@@ -10,8 +10,6 @@
 #include <Windows.h>
 #include <Psapi.h>
 
-#include <algorithm>
-#include <cwctype>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -20,19 +18,6 @@ namespace GlassPane::Core
 {
     namespace
     {
-        std::wstring ToLower(std::wstring value)
-        {
-            std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
-                return static_cast<wchar_t>(std::towlower(ch));
-            });
-            return value;
-        }
-
-        bool Contains(const std::wstring& haystack, const std::wstring& needle)
-        {
-            return haystack.find(needle) != std::wstring::npos;
-        }
-
         std::wstring LastPathPart(const std::wstring& path)
         {
             const std::size_t slash = path.find_last_of(L"\\/");
@@ -76,68 +61,6 @@ namespace GlassPane::Core
             return message;
         }
 
-        bool IsSystemProcess(const ProcessInfo& process)
-        {
-            const std::wstring loweredPath = ToLower(process.executablePath);
-            const std::wstring loweredName = ToLower(process.name);
-            if (process.sessionId.has_value() && process.sessionId.value() == 0)
-            {
-                return true;
-            }
-
-            if (Contains(loweredPath, L"\\windows\\system32\\") ||
-                Contains(loweredPath, L"\\windows\\syswow64\\"))
-            {
-                return true;
-            }
-
-            return loweredName == L"services.exe" ||
-                loweredName == L"lsass.exe" ||
-                loweredName == L"winlogon.exe" ||
-                loweredName == L"svchost.exe" ||
-                loweredName == L"csrss.exe" ||
-                loweredName == L"smss.exe";
-        }
-
-        bool IsCommonInstallPath(const std::wstring& loweredPath)
-        {
-            return Contains(loweredPath, L"\\windows\\") ||
-                Contains(loweredPath, L"\\program files\\") ||
-                Contains(loweredPath, L"\\program files (x86)\\");
-        }
-
-        void AddIndicator(ModuleCollectionResult& result, ModuleInfo& module, const std::wstring& indicator)
-        {
-            module.indicators.push_back(indicator);
-            result.indicators.push_back(module.moduleName.empty()
-                ? indicator
-                : module.moduleName + L": " + indicator);
-        }
-
-        void AnalyzeModule(ModuleCollectionResult& result, ModuleInfo& module, const ProcessInfo& process)
-        {
-            const std::wstring loweredPath = ToLower(module.modulePath);
-            if (module.modulePath.empty())
-            {
-                AddIndicator(result, module, L"Module path missing");
-                return;
-            }
-
-            if (Contains(loweredPath, L"\\temp\\"))
-            {
-                AddIndicator(result, module, L"Module loaded from Temp");
-            }
-
-            if (Contains(loweredPath, L"\\appdata\\"))
-            {
-                AddIndicator(result, module, L"Module loaded from AppData");
-            }
-
-            if (IsSystemProcess(process) && !IsCommonInstallPath(loweredPath))
-            {
-                AddIndicator(result, module, L"System process loaded module outside Windows or Program Files");
-            }
-        }
     }
 
     ModuleCollectionResult CollectProcessModules(const ProcessInfo& process)
@@ -229,7 +152,6 @@ namespace GlassPane::Core
                     : L"(unknown)";
             }
 
-            AnalyzeModule(result, module, process);
             result.modules.push_back(std::move(module));
         }
 

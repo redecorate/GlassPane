@@ -112,21 +112,6 @@ namespace GlassPane::UI
             }
         }
 
-        void RenderIndicatorList(const std::vector<std::wstring>& indicators)
-        {
-            if (indicators.empty())
-            {
-                ImGui::TextUnformatted("None");
-                return;
-            }
-
-            for (const std::wstring& indicator : indicators)
-            {
-                ImGui::Bullet();
-                ImGui::SameLine();
-                RenderWrappedLogWide(indicator);
-            }
-        }
     }
 
     void RenderLogsPanelContent(const LogsPanelContext& context)
@@ -252,43 +237,50 @@ namespace GlassPane::UI
         ImGui::PopStyleColor(2);
     }
 
-    void RenderIndicatorsPanelContent(const IndicatorsPanelContext& context)
+    void RenderSourceEvidencePanelContent(const SourceEvidencePanelContext& context)
     {
         if (!context.hasSelectedProcess)
         {
-            RenderEmptyState("No process is selected.", "Select a process to review indicators.");
+            RenderEmptyState("No process is selected.", "Select a process to review source evidence.");
             return;
         }
 
-        ImGui::TextDisabled("Process Indicators");
-        if (context.processIndicators.empty())
+        ImGui::TextDisabled(
+            context.historical ? "Historical Source Evidence" : "Native Source Evidence");
+        if (context.records.empty())
         {
-            ImGui::TextUnformatted("None");
+            RenderEmptyState(
+                context.historical
+                    ? "No historical source records are available."
+                    : "No native source-evidence records are available.");
         }
         else
         {
-            for (const IndicatorItemView& indicator : context.processIndicators)
+            for (const SourceEvidenceItemView& record : context.records)
             {
                 ImGui::Bullet();
                 ImGui::SameLine();
-                if (indicator.hasSeverity)
+                RenderWrappedLogWide(record.title);
+                if (!record.metadata.empty() || !record.role.empty())
                 {
-                    ImGui::TextColored(indicator.severityColor, "%s", indicator.severityLabel.c_str());
-                    ImGui::SameLine();
+                    ImGui::Indent();
+                    if (!record.metadata.empty())
+                    {
+                        RenderWrappedLogDisabled(record.metadata);
+                    }
+                    if (!record.role.empty())
+                    {
+                        RenderWrappedLogDisabled(record.role);
+                    }
+                    ImGui::Unindent();
                 }
-                RenderWrappedLogWide(indicator.text);
+                if (!record.summary.empty() && record.summary != record.title)
+                {
+                    ImGui::Indent();
+                    RenderWrappedLogWide(record.summary);
+                    ImGui::Unindent();
+                }
             }
-        }
-
-        ImGui::Separator();
-        ImGui::TextDisabled("Chain Indicators");
-        RenderIndicatorList(context.chainIndicators);
-
-        if (!context.moduleIndicators.empty())
-        {
-            ImGui::Separator();
-            ImGui::TextDisabled("Module Indicators");
-            RenderIndicatorList(context.moduleIndicators);
         }
 
         if (!context.compareSummary.empty())
@@ -299,7 +291,7 @@ namespace GlassPane::UI
         }
     }
 
-    void RenderLogsAndIndicatorsPanel(const LogsAndIndicatorsPanelContext& context)
+    void RenderLogsAndEvidencePanel(const LogsAndEvidencePanelContext& context)
     {
         if (ImGui::BeginTabBar(
                 "bottom_tabs",
@@ -312,9 +304,9 @@ namespace GlassPane::UI
                 RenderLogsPanelContent(context.logs);
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Indicators"))
+            if (ImGui::BeginTabItem("Source Evidence"))
             {
-                RenderIndicatorsPanelContent(context.indicators);
+                RenderSourceEvidencePanelContent(context.evidence);
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();

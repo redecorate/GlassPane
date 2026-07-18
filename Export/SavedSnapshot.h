@@ -5,26 +5,37 @@
 #include "../Core/ModuleInfo.h"
 #include "../Core/NetworkConnection.h"
 #include "../Core/NetworkIndicatorFeed.h"
+#include "../Core/NativeSourceEvidence.h"
+#include "../Core/PersistedTriage.h"
 #include "../Core/ProcessInfo.h"
 #include "../Core/RuntimeInfo.h"
 #include "../Core/ServiceInfo.h"
 #include "../Core/TokenInfo.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace GlassPane::Export
 {
-    constexpr int GlassPaneSnapshotSchemaVersion = 3;
-    constexpr int GlassPaneSnapshotPreviousSchemaVersion = 2;
+    // Schema 4 introduced captured TriageEngine summaries while retaining
+    // finding-shaped source metadata. Schema 5 is the first native-evidence
+    // schema and must not reinterpret schema-4 fields in place.
+    constexpr int GlassPaneSnapshotSchemaVersion = 5;
+    constexpr int GlassPaneSnapshotPreviousSchemaVersion = 4;
+    constexpr int GlassPaneSnapshotNativeEvidenceSchemaVersion = 5;
+    constexpr int GlassPaneSnapshotTriageSchemaVersion = 4;
+    constexpr int GlassPaneSnapshotLegacyAggregateMaxSchemaVersion = 3;
+    constexpr int GlassPaneSnapshotServiceContextSchemaVersion = 3;
+    constexpr int GlassPaneSnapshotPreServiceSchemaVersion = 2;
     constexpr int GlassPaneSnapshotLegacySchemaVersion = 1;
     constexpr const wchar_t* GlassPaneSnapshotFormat = L"glasspane_snapshot";
 
     constexpr std::size_t SnapshotMaxStringLength = 4096;
-
-    constexpr std::size_t SnapshotDefaultMaxIndicatorModulesPerProcess = 64;
+    constexpr std::size_t SnapshotMaxProcesses =
+        Core::PersistedTriageMaxProcessRecords;
 
     constexpr std::size_t SnapshotDeepMaxModulesPerProcess = 256;
     constexpr std::size_t SnapshotDeepMaxHandlesPerProcess = 256;
@@ -33,6 +44,8 @@ namespace GlassPane::Export
     constexpr std::size_t SnapshotDeepMaxPrivilegesPerProcess = 256;
     constexpr std::size_t SnapshotDeepMaxTotalHandles = 25000;
     constexpr std::size_t SnapshotDeepMaxTotalMemoryRegions = 50000;
+    constexpr std::uint32_t SnapshotHistoricalEvidenceModelVersion = 1;
+    constexpr std::size_t SnapshotHistoricalMaxRecordsPerProcess = 512;
 
     enum class SavedSnapshotEvidenceMode
     {
@@ -110,6 +123,22 @@ namespace GlassPane::Export
         std::uint32_t selectedPid = 0;
     };
 
+    struct SavedNativeSourceEvidenceRecord
+    {
+        Core::ProcessIdentityKey identity;
+        std::vector<Core::NativeSourceEvidenceRecord> records;
+    };
+
+    struct SavedNativeSourceEvidenceContext
+    {
+        std::uint32_t modelVersion =
+            Core::NativeSourceEvidenceModelVersion;
+        // No record means no selected native evidence was captured. An
+        // engaged record with an empty vector is an explicit successful empty
+        // evidence capture, including for PID zero.
+        std::optional<SavedNativeSourceEvidenceRecord> selectedRecord;
+    };
+
     struct SavedSnapshotDocument
     {
         SavedSnapshotMetadata metadata;
@@ -120,6 +149,9 @@ namespace GlassPane::Export
         NetworkIntelligenceSnapshotMetadata networkIntel;
         std::vector<Core::NetworkIndicatorMatch> networkIndicatorMatches;
         std::vector<ProcessEvidenceSnapshot> processEvidence;
+        Core::PersistedTriageContext triageContext;
+        bool nativeSourceEvidenceCaptured = false;
+        SavedNativeSourceEvidenceContext nativeSourceEvidence;
     };
 
     struct SavedSnapshotExportContext
@@ -138,6 +170,14 @@ namespace GlassPane::Export
         std::wstring evidenceMode = L"default";
         std::uint32_t selectedPid = 0;
         const std::vector<ProcessEvidenceSnapshot>* processEvidence = nullptr;
+        const Core::PersistedTriageContext* triageContext = nullptr;
+        // Value-owned so snapshot and package workers never retain pointers to
+        // observation/refinement state.
+        SavedNativeSourceEvidenceContext nativeSourceEvidence;
+        // Set only while resaving an imported historical snapshot. Current
+        // live/schema-5-native capture must never infer this sidecar merely
+        // from compatibility-shaped ProcessInfo fields.
+        bool preserveHistoricalLegacyEvidence = false;
     };
 
     bool SaveGlassPaneSnapshot(

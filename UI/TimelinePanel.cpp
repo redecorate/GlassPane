@@ -181,15 +181,14 @@ namespace GlassPane::UI
         }
 
         AcknowledgeTableAutoSizeRequest(context.timelineTableNeedsAutoSize);
-        if (ImGui::BeginTable("TimelineTable##TimelinePanel", 6, flags))
+        if (ImGui::BeginTable("TimelineTable##TimelinePanel", 5, flags))
         {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn("Timestamp", ImGuiTableColumnFlags_WidthFixed, 150.0f);
             ImGui::TableSetupColumn("Process", ImGuiTableColumnFlags_WidthFixed, 190.0f);
             ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
             ImGui::TableSetupColumn("Parent", ImGuiTableColumnFlags_WidthFixed, 210.0f);
-            ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-            ImGui::TableSetupColumn("Indicator", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Triage", ImGuiTableColumnFlags_WidthFixed, 110.0f);
             ImGui::TableHeadersRow();
 
             ImGuiListClipper clipper;
@@ -223,6 +222,19 @@ namespace GlassPane::UI
                     PopFontIfPushed(pushedTimelineTimeFont);
 
                     ImGui::TableSetColumnIndex(1);
+                    if (context.snapshot != nullptr &&
+                        row.sourceProcessIndex < context.snapshot->processes.size() &&
+                        context.resolveProcessIcon)
+                    {
+                        const Core::ProcessInfo& process =
+                            context.snapshot->processes[row.sourceProcessIndex];
+                        const ImTextureID processIcon = context.resolveProcessIcon(process);
+                        if (processIcon != ImTextureID{})
+                        {
+                            ImGui::Image(processIcon, ImVec2(16.0f, 16.0f));
+                            ImGui::SameLine(0.0f, 6.0f);
+                        }
+                    }
                     TextWide(row.processName.empty() ? L"(unknown)" : row.processName);
                     ImGui::TableSetColumnIndex(2);
                     const bool pushedTimelinePidFont = PushFontIfAvailable(context.monospaceFont);
@@ -241,9 +253,21 @@ namespace GlassPane::UI
                     }
                     TextWide(parentText);
                     ImGui::TableSetColumnIndex(4);
-                    SeverityText(row.severity);
-                    ImGui::TableSetColumnIndex(5);
-                    TextWide(row.firstIndicator);
+                    if (row.authorityAvailable)
+                    {
+                        if (row.severity == Core::Severity::None)
+                        {
+                            ImGui::TextDisabled("Informational");
+                        }
+                        else
+                        {
+                            SeverityText(row.severity);
+                        }
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("Unavailable");
+                    }
 
                     ImGui::PopID();
                 }

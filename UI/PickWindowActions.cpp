@@ -335,7 +335,8 @@
 
             SelectProcess(pid, true, false);
             AddLog(
-                Core::SeverityRank(selectedProcess->severity) >= Core::SeverityRank(Core::Severity::High)
+                Core::SeverityRank(ProcessAuthoritySeverity(*selectedProcess)) >=
+                    Core::SeverityRank(Core::Severity::High)
                     ? LogLevel::High
                     : LogLevel::Info,
                 "Picked HWND " + FormatWindowHandle(pickedWindow) +

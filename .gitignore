@@ -1,4 +1,6 @@
-﻿.vs/
+.vs/
+/Build/
+/Tests/Build/
 x64/
 Debug/
 Release/

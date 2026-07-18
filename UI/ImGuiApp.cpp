@@ -3,6 +3,7 @@
 #include "Fonts.h"
 #include "ComparePanel.h"
 #include "HeaderPanel.h"
+#include "InspectorPresentation.h"
 #include "LogsPanel.h"
 #include "Modals.h"
 #include "ProcessPanel.h"
@@ -11,7 +12,7 @@
 #include "TimelinePanel.h"
 
 #include "../Core/ChainAnalysis.h"
-#include "../Core/CorrelationEngine.h"
+#include "../Core/AuthoritativeTriage.h"
 #include "../Core/FileIdentity.h"
 #include "../Core/GraphModel.h"
 #include "../Core/HandleCollector.h"
@@ -20,9 +21,16 @@
 #include "../Core/NetworkCollector.h"
 #include "../Core/NetworkIndicatorMatcher.h"
 #include "../Core/NetworkIndicatorUpdater.h"
+#include "../Core/NativeHandleObservationBuilder.h"
+#include "../Core/NativeSourceEvidence.h"
+#include "../Core/ObservationShadow.h"
 #include "../Core/ProcessCollector.h"
+#include "../Core/ProcessIconPolicy.h"
+#include "../Core/ProductVersion.h"
 #include "../Core/ProcessTree.h"
+#include "../Core/ProcessTriageCache.h"
 #include "../Core/RuntimeCollector.h"
+#include "../Core/SelectedProcessEnrichedLifecycle.h"
 #include "../Core/ServiceCollector.h"
 #include "../Core/SnapshotCompare.h"
 #include "../Core/TimelineModel.h"
@@ -53,6 +61,7 @@
 #include <algorithm>
 #include <atomic>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -66,6 +75,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -89,12 +99,6 @@ namespace GlassPane::UI
         constexpr UINT WindowWidth = 1440;
         constexpr UINT WindowHeight = 900;
         constexpr std::uint32_t InvalidPid = 0;
-        constexpr const char* GlassPaneBaseVersion = "V0.7.0";
-#ifdef _DEBUG
-        constexpr const char* GlassPaneBuildSuffix = "-Debug";
-#else
-        constexpr const char* GlassPaneBuildSuffix = "-Release";
-#endif
         constexpr const char* GlassPaneGithubUrl = "https://github.com/redecorate/GlassPane";
 
         HICON LoadGlassPaneIcon(HINSTANCE instance, int width, int height)
@@ -167,7 +171,6 @@ namespace GlassPane::UI
             std::uint64_t runtimeMs = 0;
             std::uint64_t memoryMs = 0;
             std::uint64_t fileIdentityMs = 0;
-            std::uint64_t findingsMs = 0;
             std::uint64_t jsonExportMs = 0;
             std::uint64_t markdownReportMs = 0;
             std::uint64_t snapshotCompareMs = 0;
@@ -194,29 +197,28 @@ namespace GlassPane::UI
             Writable,
             Private,
             Image,
-            Suspicious,
+            ExecutableContext,
             Rwx
         };
 
         enum class TriageFilter
         {
             All,
-            Info,
-            Low,
-            Medium,
-            High
+            Contributing,
+            Context,
+            Limitations
         };
 
         enum class HandleFilter
         {
             All,
-            Sensitive,
+            MaterialAccess,
             Process,
             Token,
             File,
             Registry,
             NamedObjects,
-            WithIndicators
+            WithAccessCategories
         };
 
         enum class LongRunningOperationKind
@@ -371,7 +373,10 @@ namespace GlassPane::UI
         struct CachedIconTexture
         {
             ID3D11ShaderResourceView* texture = nullptr;
-            bool ownsTexture = false;
+            Core::ProcessIconState state = Core::ProcessIconState::Unavailable;
+            Core::ProcessIconTextureOwnership ownership =
+                Core::ProcessIconTextureOwnership::None;
+            std::string diagnostic;
         };
 
         template <typename TValue>
@@ -408,7 +413,7 @@ namespace GlassPane::UI
 
         std::string GlassPaneVersion()
         {
-            return std::string(GlassPaneBaseVersion) + GlassPaneBuildSuffix;
+            return Core::ProductVersion::CurrentDisplayVersion;
         }
 
         ImVec4 AccentBlue()
@@ -767,51 +772,40 @@ namespace GlassPane::UI
                 IsNamedObjectType(handle.objectType);
         }
 
-        std::wstring NormalizeHandleIndicator(const std::wstring& indicator)
+        Core::NativeHandleAccessCategories HandleAccessCategories(
+            const Core::HandleInfo& handle)
         {
-            const std::wstring lowered = ToLower(indicator);
-            if (lowered.find(L"lsass.exe") != std::wstring::npos ||
-                lowered.find(L"winlogon.exe") != std::wstring::npos)
-            {
-                return L"Sensitive process handle";
-            }
-            if (lowered.find(L"vm write") != std::wstring::npos ||
-                lowered.find(L"create-thread") != std::wstring::npos ||
-                lowered.find(L"duplicate-handle") != std::wstring::npos)
-            {
-                return L"Suspicious access rights";
-            }
-            if (lowered.find(L"token handle") != std::wstring::npos)
-            {
-                return L"Token handle";
-            }
-            if (lowered.find(L"registry key") != std::wstring::npos)
-            {
-                return L"Sensitive registry key";
-            }
-            if (lowered.find(L"user-writable") != std::wstring::npos)
-            {
-                return L"User-writable file handle";
-            }
-            return indicator;
+            return Core::CategorizeNativeHandleAccess(
+                Core::ClassifyNativeHandleObjectKind(handle),
+                handle.grantedAccessRaw);
         }
 
-        std::wstring HandleIndicatorText(const Core::HandleInfo& handle)
+        bool HandleHasMaterialAccess(const Core::HandleInfo& handle)
         {
-            if (handle.indicators.empty())
-            {
-                return {};
-            }
+            const Core::NativeHandleAccessCategories access =
+                HandleAccessCategories(handle);
+            return access.HasSensitiveProcessAccess() ||
+                access.HasSensitiveThreadAccess() ||
+                access.HasTokenManipulationAccess();
+        }
 
+        std::wstring HandleAccessCategoryText(const Core::HandleInfo& handle)
+        {
+            const Core::NativeHandleAccessCategories access =
+                HandleAccessCategories(handle);
             std::vector<std::wstring> labels;
-            for (const std::wstring& indicator : handle.indicators)
-            {
-                const std::wstring label = NormalizeHandleIndicator(indicator);
-                if (std::find(labels.begin(), labels.end(), label) == labels.end())
-                {
-                    labels.push_back(label);
-                }
-            }
+            if (access.synchronize) labels.push_back(L"Synchronize");
+            if (access.query) labels.push_back(L"Query");
+            if (access.vmRead) labels.push_back(L"VM read");
+            if (access.vmWrite) labels.push_back(L"VM write");
+            if (access.vmOperation) labels.push_back(L"VM operation");
+            if (access.createThread) labels.push_back(L"Create thread");
+            if (access.duplicateHandle) labels.push_back(L"Duplicate handle");
+            if (access.createProcess) labels.push_back(L"Create process");
+            if (access.threadSetContext) labels.push_back(L"Set thread context");
+            if (access.threadImpersonate) labels.push_back(L"Thread impersonation");
+            if (access.tokenDuplicate) labels.push_back(L"Duplicate token");
+            if (access.tokenAssignPrimary) labels.push_back(L"Assign primary token");
             return JoinWide(labels, L"; ");
         }
 
@@ -893,8 +887,8 @@ namespace GlassPane::UI
             const std::wstring loweredType = ToLower(handle.objectType);
             switch (filter)
             {
-            case HandleFilter::Sensitive:
-                return handle.isSensitive;
+            case HandleFilter::MaterialAccess:
+                return HandleHasMaterialAccess(handle);
             case HandleFilter::Process:
                 return loweredType == L"process";
             case HandleFilter::Token:
@@ -905,8 +899,8 @@ namespace GlassPane::UI
                 return loweredType == L"key";
             case HandleFilter::NamedObjects:
                 return !handle.objectName.empty() || IsNamedObjectType(handle.objectType);
-            case HandleFilter::WithIndicators:
-                return !handle.indicators.empty();
+            case HandleFilter::WithAccessCategories:
+                return !HandleAccessCategoryText(handle).empty();
             case HandleFilter::All:
             default:
                 return true;
@@ -934,19 +928,43 @@ namespace GlassPane::UI
             searchable += L" ";
             searchable += ToLower(handle.grantedAccess);
             searchable += L" ";
-            searchable += ToLower(HandleIndicatorText(handle));
+            searchable += ToLower(HandleAccessCategoryText(handle));
             searchable += L" ";
             searchable += ToLower(HandleStatusText(handle));
             return searchable.find(loweredSearch) != std::wstring::npos;
         }
 
-        std::wstring MemoryIndicatorText(const Core::MemoryRegionInfo& region)
+        bool HasExecutableMemoryContext(const Core::MemoryRegionInfo& region)
         {
-            if (region.indicators.empty())
+            return region.isExecutable &&
+                (region.isWritable || region.isPrivate ||
+                    (!region.isImage && !region.isMapped) || region.isGuard);
+        }
+
+        std::wstring MemoryAttributeText(const Core::MemoryRegionInfo& region)
+        {
+            std::vector<std::wstring> attributes;
+            if (region.isExecutable && region.isWritable)
             {
-                return {};
+                attributes.push_back(L"Writable executable");
             }
-            return JoinWide(region.indicators, L"; ");
+            if (region.isExecutable && region.isPrivate)
+            {
+                attributes.push_back(L"Private executable");
+            }
+            if (region.isExecutable && !region.isImage && !region.isMapped)
+            {
+                attributes.push_back(L"Executable without image/mapped backing");
+            }
+            if (region.isGuard)
+            {
+                attributes.push_back(L"Guard-page protection");
+            }
+            if (attributes.empty() && region.isExecutable)
+            {
+                attributes.push_back(L"Executable");
+            }
+            return JoinWide(attributes, L"; ");
         }
 
         bool MemoryMatchesFilter(const Core::MemoryRegionInfo& region, MemoryFilter filter)
@@ -961,8 +979,8 @@ namespace GlassPane::UI
                 return region.isPrivate;
             case MemoryFilter::Image:
                 return region.isImage;
-            case MemoryFilter::Suspicious:
-                return region.isSuspicious;
+            case MemoryFilter::ExecutableContext:
+                return HasExecutableMemoryContext(region);
             case MemoryFilter::Rwx:
                 return region.isExecutable && region.isWritable;
             case MemoryFilter::All:
@@ -996,11 +1014,12 @@ namespace GlassPane::UI
             searchable += L" ";
             searchable += ToLower(region.mappedFilePath);
             searchable += L" ";
-            searchable += ToLower(MemoryIndicatorText(region));
+            searchable += ToLower(MemoryAttributeText(region));
             return searchable.find(loweredSearch) != std::wstring::npos;
         }
 
-        Core::Severity FindingSeverityAsCoreSeverity(Core::FindingSeverity severity)
+        Core::Severity HistoricalFindingSeverityAsCoreSeverity(
+            Core::FindingSeverity severity)
         {
             switch (severity)
             {
@@ -1016,123 +1035,43 @@ namespace GlassPane::UI
             }
         }
 
-        ImVec4 FindingSeverityColor(Core::FindingSeverity severity)
-        {
-            return SeverityColor(FindingSeverityAsCoreSeverity(severity));
-        }
-
-        ImVec4 FindingCardBg(Core::FindingSeverity severity)
-        {
-            switch (severity)
-            {
-            case Core::FindingSeverity::High:
-                return ImVec4(0.090f, 0.041f, 0.049f, 1.0f);
-            case Core::FindingSeverity::Medium:
-                return ImVec4(0.090f, 0.061f, 0.035f, 1.0f);
-            case Core::FindingSeverity::Low:
-                return ImVec4(0.072f, 0.066f, 0.038f, 1.0f);
-            case Core::FindingSeverity::Info:
-            default:
-                return ImVec4(0.044f, 0.055f, 0.073f, 1.0f);
-            }
-        }
-
         std::wstring TriageFilterLabel(TriageFilter filter)
         {
             switch (filter)
             {
-            case TriageFilter::High:
-                return L"High";
-            case TriageFilter::Medium:
-                return L"Medium";
-            case TriageFilter::Low:
-                return L"Low";
-            case TriageFilter::Info:
-                return L"Info";
+            case TriageFilter::Contributing:
+                return L"Contributing";
+            case TriageFilter::Context:
+                return L"Context";
+            case TriageFilter::Limitations:
+                return L"Limitations";
             case TriageFilter::All:
             default:
                 return L"All";
             }
         }
 
-        bool FindingMatchesFilter(const Core::Finding& finding, TriageFilter filter)
+        bool NativeEvidenceMatchesFilter(
+            const Core::NativeSourceEvidenceRecord& evidence,
+            TriageFilter filter)
         {
             switch (filter)
             {
-            case TriageFilter::Info:
-                return finding.severity == Core::FindingSeverity::Info;
-            case TriageFilter::Low:
-                return finding.severity == Core::FindingSeverity::Low;
-            case TriageFilter::Medium:
-                return finding.severity == Core::FindingSeverity::Medium;
-            case TriageFilter::High:
-                return finding.severity == Core::FindingSeverity::High;
+            case TriageFilter::Contributing:
+                return evidence.contributedToVerdict;
+            case TriageFilter::Context:
+                return !evidence.contributedToVerdict &&
+                    !evidence.collectionLimitation;
+            case TriageFilter::Limitations:
+                return evidence.collectionLimitation ||
+                    evidence.disposition ==
+                        Core::ObservationDisposition::CollectionNote ||
+                    evidence.disposition ==
+                        Core::ObservationDisposition::EvidenceIntegrityNote;
             case TriageFilter::All:
             default:
                 return true;
             }
-        }
-
-        std::wstring FormatFindingForClipboard(const Core::Finding& finding)
-        {
-            std::wstringstream text;
-            text << L"[" << Core::FindingSeverityToString(finding.severity) << L"] "
-                << (finding.title.empty() ? L"(untitled finding)" : finding.title) << L"\r\n";
-            if (!finding.category.empty())
-            {
-                text << L"Category: " << finding.category << L"\r\n";
-            }
-            if (!finding.description.empty())
-            {
-                text << L"Description: " << finding.description << L"\r\n";
-            }
-            if (!finding.evidence.empty())
-            {
-                text << L"Evidence:\r\n";
-                for (const std::wstring& evidence : finding.evidence)
-                {
-                    text << L"- " << evidence << L"\r\n";
-                }
-            }
-            return text.str();
-        }
-
-        std::wstring FormatTriageSummaryForClipboard(
-            const Core::ProcessInfo& process,
-            const std::vector<Core::Finding>& findings)
-        {
-            std::wstringstream text;
-            text << L"Triage: " << Core::TriageSummary(findings) << L"\r\n";
-            text << L"Process: " << (process.name.empty() ? L"(unknown)" : process.name)
-                << L" (PID " << process.pid << L")\r\n";
-            text << L"Finding count: " << findings.size() << L"\r\n";
-            text << L"Highest severity: "
-                << (findings.empty()
-                    ? L"None"
-                    : Core::FindingSeverityToString(Core::HighestFindingSeverity(findings)))
-                << L"\r\n";
-            return text.str();
-        }
-
-        std::wstring FormatFindingsForClipboard(
-            const Core::ProcessInfo& process,
-            const std::vector<Core::Finding>& findings)
-        {
-            std::wstringstream text;
-            text << FormatTriageSummaryForClipboard(process, findings);
-            if (!findings.empty())
-            {
-                text << L"\r\nFindings\r\n";
-                for (std::size_t index = 0; index < findings.size(); ++index)
-                {
-                    if (index > 0)
-                    {
-                        text << L"\r\n";
-                    }
-                    text << FormatFindingForClipboard(findings[index]);
-                }
-            }
-            return text.str();
         }
 
         bool ChipButton(const char* label, bool active, const ImVec4& accent)
@@ -1350,6 +1289,10 @@ namespace GlassPane::UI
                 {
                     break;
                 }
+
+                // Selected-process lifecycle work is driven before ImGui starts
+                // the frame. Rendering only reads the last atomic publication.
+                ProcessSelectedProcessEnrichedLifecycle();
 
                 ImGui_ImplDX11_NewFrame();
                 ImGui_ImplWin32_NewFrame();
@@ -1611,7 +1554,10 @@ namespace GlassPane::UI
                     networkIndicatorLoadResult_ = result.networkUpdateResult.loadResult;
                     networkIndicatorFeed_ = networkIndicatorLoadResult_.feed;
                     RefreshNetworkIntelMatches(true);
-                    InvalidateFindingsCache();
+                    RebuildProcessTriageCacheAfterEvidenceMutation();
+                    InvalidateSelectedNativeEvidence(
+                        Core::SelectedProcessEnrichedRebuildReason::
+                            ExactIndicatorMatchesChanged);
                 }
                 break;
             case LongRunningOperationKind::LoadIntelFeed:
@@ -1624,7 +1570,10 @@ namespace GlassPane::UI
                     ? networkIndicatorLoadResult_.feed
                     : Core::NetworkIndicatorFeed{};
                 RefreshNetworkIntelMatches(false);
-                InvalidateFindingsCache();
+                RebuildProcessTriageCacheAfterEvidenceMutation();
+                InvalidateSelectedNativeEvidence(
+                    Core::SelectedProcessEnrichedRebuildReason::
+                        ExactIndicatorMatchesChanged);
                 break;
             case LongRunningOperationKind::LoadSnapshot:
                 if (result.success && result.hasLoadedSnapshot)
@@ -2047,6 +1996,528 @@ namespace GlassPane::UI
             return process.hasCreationTime ? process.creationTimeFileTime : 0;
         }
 
+        Core::ProcessTriageCacheSourceStamp CurrentProcessTriageCacheStamp() const
+        {
+            Core::ProcessTriageCacheSourceStamp stamp;
+            stamp.processGeneration = snapshotGeneration_;
+            stamp.evidenceGeneration = baselineEvidenceGeneration_;
+            stamp.scopeGeneration = baselineScopeGeneration_;
+            stamp.loadedSnapshot = loadedSnapshotActive_;
+            return stamp;
+        }
+
+        Core::PersistedTriageContext CaptureAuthoritativeTriageContext() const
+        {
+            std::vector<Core::PersistedProcessTriageRecord> records;
+            records.reserve((std::min)(
+                snapshot_.processes.size(),
+                Core::PersistedTriageMaxProcessRecords));
+            std::optional<Core::PersistedProcessTriageRecord> selectedRecord;
+            const Core::ProcessInfo* selectedProcess =
+                Core::FindProcessByPid(snapshot_, selectedPid_);
+
+            if (loadedSnapshotActive_ &&
+                loadedSnapshotMetadata_.schemaVersion >=
+                    Export::GlassPaneSnapshotTriageSchemaVersion)
+            {
+                records = loadedSnapshotTriage_.processRecords;
+                // Schema 5 has no legacy runtime authority. Preserve captured
+                // TriageEngine summaries, but downgrade a schema-4 captured
+                // legacy-fallback record to the honest NotCaptured state.
+                for (Core::PersistedProcessTriageRecord& record : records)
+                {
+                    if (record.summary.analysisLevel ==
+                        Core::PersistedTriageAnalysisLevel::LegacyFallback)
+                    {
+                        record.summary =
+                            Core::MakeNotCapturedPersistedTriageSummary();
+                    }
+                }
+                if (selectedProcess != nullptr)
+                {
+                    const Core::ProcessIdentityKey selectedIdentity =
+                        Core::MakeProcessIdentityKey(*selectedProcess);
+                    if (loadedSnapshotTriage_.selectedRecord.has_value() &&
+                        loadedSnapshotTriage_.selectedRecord->identity ==
+                            selectedIdentity)
+                    {
+                        selectedRecord = loadedSnapshotTriage_.selectedRecord;
+                        if (selectedRecord->summary.analysisLevel ==
+                            Core::PersistedTriageAnalysisLevel::LegacyFallback)
+                        {
+                            selectedRecord->summary =
+                                Core::MakeNotCapturedPersistedTriageSummary();
+                        }
+                    }
+                }
+                return Core::MakePersistedTriageContext(
+                    std::move(records),
+                    std::move(selectedRecord));
+            }
+
+            const Core::ProcessTriageCacheSourceStamp expectedStamp =
+                CurrentProcessTriageCacheStamp();
+            for (const Core::ProcessInfo& process : snapshot_.processes)
+            {
+                Core::PersistedProcessTriageRecord record;
+                record.identity = Core::MakeProcessIdentityKey(process);
+                if (loadedSnapshotActive_)
+                {
+                    record.summary =
+                        Core::MakeNotCapturedPersistedTriageSummary();
+                }
+                else
+                {
+                    const Core::ProcessTriageAuthority authority =
+                        Core::SelectNativeProcessTriageAuthority(
+                            processTriageCache_,
+                            process,
+                            expectedStamp);
+                    Core::PersistedTriageProjectionResult projection;
+                    if (authority.UsesBaselineTriage())
+                    {
+                        const std::size_t baselineSourceCount = (std::min)(
+                            authority.baseline->baseline.nativeFactCount,
+                            Core::PersistedTriageMaxSourceEvidenceCount);
+                        projection = Core::ProjectPersistedTriageSummary(
+                            authority.baseline->triage,
+                            Core::PersistedTriageAnalysisLevel::Baseline,
+                            baselineSourceCount);
+                    }
+                    else
+                    {
+                        record.summary =
+                            Core::MakeNotCapturedPersistedTriageSummary();
+                    }
+                    if (projection.success)
+                    {
+                        record.summary = std::move(projection.summary);
+                    }
+                    else
+                    {
+                        record.summary =
+                            Core::MakeNotCapturedPersistedTriageSummary();
+                    }
+                }
+                records.push_back(std::move(record));
+            }
+
+            if (selectedProcess != nullptr)
+            {
+                const Core::ProcessIdentityKey selectedIdentity =
+                    Core::MakeProcessIdentityKey(*selectedProcess);
+                if (!loadedSnapshotActive_ &&
+                    SelectedProcessEnrichedPublicationMatchesCurrent() &&
+                    Core::ObservationShadowMatches(
+                        selectedObservationShadow_,
+                        true,
+                        selectedProcess->pid,
+                        ProcessCacheStamp(*selectedProcess),
+                        selectedEvidenceGeneration_))
+                {
+                    const Core::SelectedProcessTriageAuthority authority =
+                        Core::SelectNativeSelectedProcessTriageAuthority(
+                            selectedObservationShadow_,
+                            true,
+                            *selectedProcess,
+                            selectedEvidenceGeneration_,
+                            ObservationShadowEntityScope(
+                                *selectedProcess,
+                                false),
+                            processTriageCache_,
+                            expectedStamp);
+                    const std::size_t sourceCount = (std::min)(
+                        selectedObservationShadow_.inventory.records.size(),
+                        Core::PersistedTriageMaxSourceEvidenceCount);
+                    Core::PersistedTriageProjectionResult projection;
+                    if (authority.UsesEnrichedTriage() &&
+                        authority.triageResult != nullptr &&
+                        authority.baselineTriageResult != nullptr)
+                    {
+                        projection = Core::ProjectPersistedTriageSummary(
+                            *authority.triageResult,
+                            Core::PersistedTriageAnalysisLevel::Enriched,
+                            sourceCount,
+                            authority.baselineTriageResult);
+                    }
+                    if (projection.success)
+                    {
+                        Core::PersistedProcessTriageRecord enriched;
+                        enriched.identity = selectedIdentity;
+                        enriched.summary = std::move(projection.summary);
+                        selectedRecord = std::move(enriched);
+                    }
+                }
+            }
+
+            return Core::MakePersistedTriageContext(
+                std::move(records),
+                std::move(selectedRecord));
+        }
+
+        Core::PersistedTriageSummary CaptureSelectedAuthoritativeTriageSummary() const
+        {
+            const Core::PersistedTriageContext context =
+                CaptureAuthoritativeTriageContext();
+            if (context.selectedRecord.has_value())
+            {
+                return context.selectedRecord->summary;
+            }
+            if (const Core::ProcessInfo* selectedProcess =
+                    Core::FindProcessByPid(snapshot_, selectedPid_);
+                selectedProcess != nullptr)
+            {
+                if (const Core::PersistedProcessTriageRecord* baseline =
+                        context.FindProcess(
+                            Core::MakeProcessIdentityKey(*selectedProcess));
+                    baseline != nullptr)
+                {
+                    return baseline->summary;
+                }
+            }
+            return Core::MakeNotCapturedPersistedTriageSummary();
+        }
+
+        Export::SavedNativeSourceEvidenceContext
+        CaptureNativeSourceEvidenceContext() const
+        {
+            if (loadedSnapshotActive_)
+            {
+                return loadedSnapshotMetadata_.schemaVersion >=
+                        Export::GlassPaneSnapshotNativeEvidenceSchemaVersion
+                    ? loadedSnapshotNativeSourceEvidence_
+                    : Export::SavedNativeSourceEvidenceContext{};
+            }
+
+            Export::SavedNativeSourceEvidenceContext context;
+            const Core::ProcessInfo* process =
+                Core::FindProcessByPid(snapshot_, selectedPid_);
+            if (process == nullptr ||
+                !SelectedProcessEnrichedPublicationMatchesCurrent() ||
+                !selectedNativeSourceEvidence_.success ||
+                !Core::ObservationShadowMatches(
+                    selectedObservationShadow_,
+                    true,
+                    process->pid,
+                    ProcessCacheStamp(*process),
+                    selectedEvidenceGeneration_))
+            {
+                return context;
+            }
+
+            Export::SavedNativeSourceEvidenceRecord selected;
+            selected.identity = Core::MakeProcessIdentityKey(*process);
+            selected.records = selectedNativeSourceEvidence_.records;
+            context.selectedRecord = std::move(selected);
+            return context;
+        }
+
+        bool ProcessAuthorityProjectionMatchesCurrent() const
+        {
+            return processAuthorityProjectionValid_ &&
+                processAuthorityProjectionStamp_ == CurrentProcessTriageCacheStamp() &&
+                processAuthoritySeverities_.size() == snapshot_.processes.size() &&
+                processAuthoritySuspicious_.size() == snapshot_.processes.size() &&
+                processAuthorityAvailable_.size() == snapshot_.processes.size() &&
+                processAuthorityUnavailableKinds_.size() == snapshot_.processes.size();
+        }
+
+        Core::Severity ProcessAuthoritySeverityAt(std::size_t processIndex) const
+        {
+            if (ProcessAuthorityProjectionMatchesCurrent() &&
+                processIndex < processAuthoritySeverities_.size())
+            {
+                return processAuthoritySeverities_[processIndex];
+            }
+            return Core::Severity::None;
+        }
+
+        bool ProcessAuthorityUnavailableAt(std::size_t processIndex) const
+        {
+            return !ProcessAuthorityProjectionMatchesCurrent() ||
+                processIndex >= processAuthorityUnavailableKinds_.size() ||
+                processAuthorityUnavailableKinds_[processIndex] !=
+                    Core::ProcessTriageUnavailableKind::None;
+        }
+
+        bool ProcessAuthorityIsSuspiciousAt(std::size_t processIndex) const
+        {
+            if (ProcessAuthorityProjectionMatchesCurrent() &&
+                processIndex < processAuthoritySuspicious_.size())
+            {
+                return processAuthoritySuspicious_[processIndex] != 0;
+            }
+            return false;
+        }
+
+        std::size_t ProcessIndexForAuthority(const Core::ProcessInfo& process) const
+        {
+            const auto indexed = snapshot_.indexByPid.find(process.pid);
+            if (indexed == snapshot_.indexByPid.end() ||
+                indexed->second >= snapshot_.processes.size())
+            {
+                return snapshot_.processes.size();
+            }
+
+            const Core::ProcessInfo& indexedProcess = snapshot_.processes[indexed->second];
+            if (&indexedProcess == &process)
+            {
+                return indexed->second;
+            }
+
+            // Duplicate PID rows are a bounded exceptional case. Resolve the
+            // exact snapshot object before considering an identity-equivalent
+            // external value; never project one creation identity onto another.
+            for (std::size_t processIndex = 0;
+                processIndex < snapshot_.processes.size();
+                ++processIndex)
+            {
+                if (&snapshot_.processes[processIndex] == &process)
+                {
+                    return processIndex;
+                }
+            }
+
+            return Core::MakeProcessIdentityKey(indexedProcess) ==
+                    Core::MakeProcessIdentityKey(process)
+                ? indexed->second
+                : snapshot_.processes.size();
+        }
+
+        Core::Severity ProcessAuthoritySeverity(const Core::ProcessInfo& process) const
+        {
+            const std::size_t processIndex = ProcessIndexForAuthority(process);
+            return processIndex < snapshot_.processes.size()
+                ? ProcessAuthoritySeverityAt(processIndex)
+                : Core::Severity::None;
+        }
+
+        bool ProcessAuthorityIsSuspicious(const Core::ProcessInfo& process) const
+        {
+            const std::size_t processIndex = ProcessIndexForAuthority(process);
+            return processIndex < snapshot_.processes.size()
+                ? ProcessAuthorityIsSuspiciousAt(processIndex)
+                : false;
+        }
+
+        void RebuildProcessAuthorityProjection()
+        {
+            const auto started = std::chrono::steady_clock::now();
+            const Core::ProcessTriageCacheSourceStamp expectedStamp =
+                CurrentProcessTriageCacheStamp();
+
+            std::vector<Core::Severity> nextSeverities;
+            std::vector<std::uint8_t> nextSuspicious;
+            std::vector<std::uint8_t> nextAvailable;
+            std::vector<Core::ProcessTriageUnavailableKind> nextUnavailableKinds;
+            nextSeverities.reserve(snapshot_.processes.size());
+            nextSuspicious.reserve(snapshot_.processes.size());
+            nextAvailable.reserve(snapshot_.processes.size());
+            nextUnavailableKinds.reserve(snapshot_.processes.size());
+
+            std::size_t nextSuspiciousCount = 0;
+            std::size_t nextUnavailableCount = 0;
+            std::array<
+                std::size_t,
+                static_cast<std::size_t>(
+                    Core::ProcessTriageUnavailableKind::InvalidVerdict) + 1>
+                nextUnavailableCountsByKind{};
+            std::array<
+                std::string,
+                static_cast<std::size_t>(
+                    Core::ProcessTriageUnavailableKind::InvalidVerdict) + 1>
+                nextUnavailableFirstIdentityByKind{};
+            std::array<
+                std::string,
+                static_cast<std::size_t>(
+                    Core::ProcessTriageUnavailableKind::InvalidVerdict) + 1>
+                nextUnavailableFirstDiagnosticByKind{};
+            for (const Core::ProcessInfo& process : snapshot_.processes)
+            {
+                Core::TriageVerdict projectedVerdict =
+                    Core::TriageVerdict::Informational;
+                Core::ProcessTriageUnavailableKind unavailableKind =
+                    Core::ProcessTriageUnavailableKind::CacheNotAttempted;
+                bool unavailable = true;
+                std::string unavailableDiagnostic;
+
+                if (loadedSnapshotActive_)
+                {
+                    const Core::PersistedProcessTriageRecord* record =
+                        loadedSnapshotTriage_.FindProcess(
+                            Core::MakeProcessIdentityKey(process));
+                    if (record != nullptr && record->summary.captured &&
+                        record->summary.evaluationSucceeded &&
+                        !record->summary.usingFallback)
+                    {
+                        projectedVerdict = record->summary.authoritativeVerdict;
+                        unavailable = false;
+                        unavailableKind =
+                            Core::ProcessTriageUnavailableKind::None;
+                    }
+                    else
+                    {
+                        projectedVerdict =
+                            Core::TriageVerdict::Informational;
+                        unavailable = true;
+                        unavailableKind =
+                            Core::ProcessTriageUnavailableKind::BaselineEntryMissing;
+                        unavailableDiagnostic =
+                            "No successful captured TriageEngine result matched the process identity.";
+                    }
+                }
+                else
+                {
+                    const Core::ProcessTriageAuthority authority =
+                        Core::SelectNativeProcessTriageAuthority(
+                            processTriageCache_,
+                            process,
+                            expectedStamp);
+                    projectedVerdict = authority.verdict;
+                    unavailable = authority.unavailable;
+                    unavailableKind = authority.unavailableKind;
+                    unavailableDiagnostic = authority.unavailableReason;
+                }
+
+                const Core::TriageSurfaceClassification classification =
+                    Core::ClassifyTriageVerdictForSurfaces(projectedVerdict);
+                nextSeverities.push_back(classification.severity);
+                nextSuspicious.push_back(classification.suspicious ? 1U : 0U);
+                nextAvailable.push_back(
+                    unavailableKind == Core::ProcessTriageUnavailableKind::None
+                        ? 1U
+                        : 0U);
+                nextUnavailableKinds.push_back(unavailableKind);
+                if (classification.suspicious)
+                {
+                    ++nextSuspiciousCount;
+                }
+                if (unavailable)
+                {
+                    ++nextUnavailableCount;
+                    const std::size_t unavailableIndex =
+                        static_cast<std::size_t>(unavailableKind);
+                    if (unavailableIndex < nextUnavailableCountsByKind.size())
+                    {
+                        ++nextUnavailableCountsByKind[unavailableIndex];
+                        if (nextUnavailableFirstIdentityByKind[
+                                unavailableIndex].empty())
+                        {
+                            nextUnavailableFirstIdentityByKind[unavailableIndex] =
+                                "PID " + std::to_string(process.pid) +
+                                (process.hasCreationTime
+                                    ? ", creation " + std::to_string(
+                                        process.creationTimeFileTime)
+                                    : ", creation unavailable");
+                            nextUnavailableFirstDiagnosticByKind[
+                                unavailableIndex] = unavailableDiagnostic;
+                        }
+                    }
+                }
+            }
+
+            processAuthoritySeverities_ = std::move(nextSeverities);
+            processAuthoritySuspicious_ = std::move(nextSuspicious);
+            processAuthorityAvailable_ = std::move(nextAvailable);
+            processAuthorityUnavailableKinds_ = std::move(nextUnavailableKinds);
+            processAuthorityProjectionStamp_ = expectedStamp;
+            processAuthorityProjectionValid_ = true;
+            processAuthorityUnavailableCount_ = nextUnavailableCount;
+            processAuthorityUnavailableCountsByKind_ =
+                nextUnavailableCountsByKind;
+            processAuthorityUnavailableFirstIdentityByKind_ =
+                std::move(nextUnavailableFirstIdentityByKind);
+            processAuthorityUnavailableFirstDiagnosticByKind_ =
+                std::move(nextUnavailableFirstDiagnosticByKind);
+            suspiciousCount_ = nextSuspiciousCount;
+            processAuthorityProjectionBuildMicroseconds_ =
+                ObservationShadowElapsedMicroseconds(started);
+
+            visibleProcessRowsDirty_ = true;
+            timelineRowsDirty_ = true;
+            if (selectedPid_ != InvalidPid)
+            {
+                RebuildFocusedGraph("authority-projection");
+            }
+        }
+
+        void RebuildProcessTriageCache()
+        {
+            const Core::ProcessTriageCacheSourceStamp expectedStamp =
+                CurrentProcessTriageCacheStamp();
+            if (loadedSnapshotActive_)
+            {
+                // Offline review uses captured authority exactly. Older
+                // schemas remain explicitly not captured; current policy is
+                // never run implicitly against historical evidence.
+                processTriageCache_ = {};
+                if (!ProcessAuthorityProjectionMatchesCurrent())
+                {
+                    RebuildProcessAuthorityProjection();
+                }
+                return;
+            }
+            if (processTriageCache_.MatchesStamp(expectedStamp))
+            {
+                if (!ProcessAuthorityProjectionMatchesCurrent())
+                {
+                    RebuildProcessAuthorityProjection();
+                }
+                return;
+            }
+
+            ++baselineCacheBuildInvocationCount_;
+            Core::ProcessTriageCache next;
+            try
+            {
+                Core::ProcessTriageCacheBuildOptions options;
+                options.sourceStamp = expectedStamp;
+                options.sourceKind = loadedSnapshotActive_
+                    ? Core::ObservationSourceKind::Imported
+                    : Core::ObservationSourceKind::Direct;
+                options.collectionTimestamp = WideToUtf8(lastRefreshTime_);
+                options.networkContextCaptured = networkLoaded_;
+                options.networkCollectionAttempted = networkLoaded_;
+                options.serviceContextCaptured = serviceSnapshot_.attempted;
+                if (loadedSnapshotActive_ && !networkLoaded_)
+                {
+                    options.limitations.push_back(
+                        "Network context was not captured in this saved snapshot.");
+                }
+                if (loadedSnapshotActive_ && !serviceSnapshot_.attempted)
+                {
+                    options.limitations.push_back(
+                        "Service context was not captured in this saved snapshot.");
+                }
+
+                next = Core::BuildProcessTriageCache(
+                    snapshot_,
+                    networkSnapshot_,
+                    networkIndicatorMatches_,
+                    serviceSnapshot_,
+                    options);
+            }
+            catch (...)
+            {
+                next.attempted = true;
+                next.success = false;
+                next.status = Core::ProcessTriageCacheStatus::InternalFailure;
+                next.sourceStamp = expectedStamp;
+                next.summary.sourceProcessCount = snapshot_.processes.size();
+                next.summary.failedEntryCount = snapshot_.processes.size();
+                next.statusMessage =
+                    "Baseline process triage cache construction failed; no partial candidate was installed.";
+            }
+            processTriageCache_ = std::move(next);
+            RebuildProcessAuthorityProjection();
+        }
+
+        void RebuildProcessTriageCacheAfterEvidenceMutation()
+        {
+            ++baselineEvidenceGeneration_;
+            RebuildProcessTriageCache();
+        }
+
         #include "EvidenceCacheActions.cpp"
 
 
@@ -2088,7 +2559,9 @@ namespace GlassPane::UI
                 }
             }
             RefreshNetworkIntelMatches(logActivity);
-            InvalidateFindingsCache();
+            RebuildProcessTriageCacheAfterEvidenceMutation();
+            InvalidateSelectedNativeEvidence(
+                Core::SelectedProcessEnrichedRebuildReason::NetworkChanged);
 
             if (logActivity)
             {
@@ -2121,7 +2594,7 @@ namespace GlassPane::UI
             return ExecutableDirectory() / L"Indicators";
         }
 
-        std::filesystem::path DevelopmentNetworkIndicatorFeedPath() const
+        std::filesystem::path AlternateLocalNetworkIndicatorFeedPath() const
         {
             return std::filesystem::current_path() / L"Indicators" / L"network-indicators.json";
         }
@@ -2146,7 +2619,7 @@ namespace GlassPane::UI
 
             if (!FileExists(loadPath))
             {
-                const std::filesystem::path fallbackPath = DevelopmentNetworkIndicatorFeedPath();
+                const std::filesystem::path fallbackPath = AlternateLocalNetworkIndicatorFeedPath();
                 if (fallbackPath != portablePath && FileExists(fallbackPath))
                 {
                     loadPath = fallbackPath;
@@ -2174,7 +2647,7 @@ namespace GlassPane::UI
                     {
                         result.logs.push_back({
                             LogLevel::Warning,
-                            "Intel feed portable path missing; using development fallback: " +
+                            "Intel feed portable path missing; using alternate local Indicators path: " +
                                 WideToUtf8(loadPathText)
                         });
                     }
@@ -2183,7 +2656,7 @@ namespace GlassPane::UI
                     {
                         result.status =
                             std::string("Intel feed loaded ") +
-                            (usedFallback ? "from development fallback: " : "from portable Indicators folder: ") +
+                            (usedFallback ? "from alternate local Indicators path: " : "from portable Indicators folder: ") +
                             std::to_string(result.networkLoadResult.feed.indicators.size()) +
                             " indicator(s).";
                         result.logs.push_back({
@@ -2439,7 +2912,7 @@ namespace GlassPane::UI
                     : networkIndicatorFeed_.metadata.feedName;
                 status += L", " + std::to_wstring(networkIndicatorFeed_.indicators.size()) + L" indicator";
                 status += networkIndicatorFeed_.indicators.size() == 1 ? L"" : L"s";
-                status += networkIndicatorUsedFallback_ ? L", loaded from development fallback" : L", loaded from portable Indicators folder";
+                status += networkIndicatorUsedFallback_ ? L", loaded from alternate local Indicators path" : L", loaded from portable Indicators folder";
                 if (!networkIndicatorFeed_.metadata.generatedAt.empty())
                 {
                     status += L", generated " + networkIndicatorFeed_.metadata.generatedAt;
@@ -2599,7 +3072,7 @@ namespace GlassPane::UI
 
             if (networkIndicatorUsedFallback_)
             {
-                return L"Source: development fallback";
+                return L"Source: alternate local Indicators path";
             }
 
             return networkIndicatorUpdateAttempted_ && networkIndicatorUpdateResult_.success
@@ -2928,51 +3401,6 @@ namespace GlassPane::UI
             return L"Local/unspecified";
         }
 
-        std::vector<std::wstring> BuildNetworkIndicators(
-            const Core::ProcessInfo& process,
-            const NetworkSummary& summary) const
-        {
-            std::vector<std::wstring> indicators;
-            if (summary.listeningCount > 0)
-            {
-                indicators.push_back(L"Network: process has listening socket.");
-            }
-            if (summary.publicRemoteCount > 0)
-            {
-                indicators.push_back(L"Network: process has public remote connection.");
-            }
-            if (process.IsSuspicious() && summary.publicRemoteCount > 0)
-            {
-                indicators.push_back(L"Network: suspicious process has outbound public connection.");
-            }
-            if (summary.intelMatchCount > 0)
-            {
-                indicators.push_back(
-                    L"Network intelligence: " +
-                    std::to_wstring(summary.intelMatchCount) +
-                    L" remote endpoint matched local indicator feed.");
-            }
-            return indicators;
-        }
-
-        std::vector<std::wstring> BuildNetworkContextNotes(
-            const Core::ProcessInfo& process,
-            const Core::ChainAnalysisResult& chain,
-            const NetworkSummary& summary) const
-        {
-            std::vector<std::wstring> notes;
-            const Core::Severity effectiveSeverity =
-                Core::SeverityRank(chain.chainSeverity) > Core::SeverityRank(process.severity)
-                    ? chain.chainSeverity
-                    : process.severity;
-            if (summary.publicRemoteCount > 0 &&
-                Core::SeverityRank(effectiveSeverity) >= Core::SeverityRank(Core::Severity::Medium))
-            {
-                notes.push_back(L"Network context: elevated process or chain severity with public outbound connection. No severity escalation applied.");
-            }
-            return notes;
-        }
-
         static bool IsSyntheticSystemProcessEntry(const Core::ProcessInfo& process)
         {
             return process.pid == 0 && process.executablePath.empty();
@@ -3023,22 +3451,9 @@ namespace GlassPane::UI
             return CachedFileIdentity(process.executablePath);
         }
 
-        std::vector<Core::FileIdentityIndicator> BuildProcessFileIdentityIndicators(
-            const Core::ProcessInfo& process,
-            const Core::FileIdentity& fileIdentity) const
-        {
-            if (IsSyntheticSystemProcessEntry(process))
-            {
-                return {};
-            }
-
-            return Core::BuildFileIdentityIndicators(fileIdentity, process.name, true);
-        }
-
         void RenderFileIdentityFields(
             const char* id,
             const Core::FileIdentity& identity,
-            const std::vector<Core::FileIdentityIndicator>& indicators,
             const char* logSubject)
         {
             ImGui::PushID(id);
@@ -3076,74 +3491,31 @@ namespace GlassPane::UI
                 WrappedTextDisabled(identity.errorMessage);
             }
 
-            if (!indicators.empty())
-            {
-                ImGui::SeparatorText("Identity Indicators");
-                for (const Core::FileIdentityIndicator& indicator : indicators)
-                {
-                    ImGui::Bullet();
-                    ImGui::SameLine();
-                    SeverityText(indicator.severity);
-                    ImGui::SameLine();
-                    WrappedTextWide(indicator.message);
-                }
-            }
             ImGui::PopID();
         }
 
-        std::vector<Core::Finding> BuildFindingsForSelectedProcess(
-            const Core::ProcessInfo& process,
-            const Core::ChainAnalysisResult& chain,
-            const Core::FileIdentity& fileIdentity) const
+        void InvalidateSelectedNativeEvidence(
+            Core::SelectedProcessEnrichedRebuildReason reason =
+                Core::SelectedProcessEnrichedRebuildReason::
+                    CollectionStateChanged,
+            bool requestRebuild = true)
         {
-            const std::vector<Core::NetworkConnection> selectedNetworkConnections = SelectedNetworkConnectionsForExport();
-            const std::vector<Core::NetworkIndicatorMatch> selectedNetworkIndicatorMatches =
-                SelectedNetworkIndicatorMatchesForProcess(process.pid);
-            const Core::ModuleCollectionResult* modules =
-                ModulesLoadedForProcess(process)
-                    ? &selectedModules_
-                    : nullptr;
-            const Core::TokenInfo* token =
-                TokenLoadedForProcess(process)
-                    ? &selectedToken_
-                    : nullptr;
-            const Core::RuntimeInfo* runtime =
-                RuntimeLoadedForProcess(process)
-                    ? &selectedRuntime_
-                    : nullptr;
-            const Core::MemoryCollectionResult* memory =
-                MemoryLoadedForProcess(process)
-                    ? &selectedMemory_
-                    : nullptr;
-            const Core::HandleCollectionResult* handles =
-                HandlesLoadedForProcess(process)
-                    ? &selectedHandles_
-                    : nullptr;
-
-            Core::CorrelationContext context;
-            context.process = &process;
-            context.chain = &chain;
-            context.modules = modules;
-            context.networkConnections = &selectedNetworkConnections;
-            context.networkIndicatorMatches = &selectedNetworkIndicatorMatches;
-            context.fileIdentity = IsSyntheticSystemProcessEntry(process) ? nullptr : &fileIdentity;
-            context.token = token;
-            context.runtime = runtime;
-            context.memory = memory;
-            context.handles = handles;
-            return Core::CorrelateFindings(context);
-        }
-
-        void InvalidateFindingsCache()
-        {
-            findingsCacheValid_ = false;
-            findingsCachePid_ = InvalidPid;
-            findingsCacheCreationTime_ = 0;
-            selectedFindingsCache_.clear();
-            selectedHighTriageCacheValid_ = false;
-            selectedHighTriagePid_ = InvalidPid;
-            selectedHighTriageCreationTime_ = 0;
-            selectedHighTriage_ = false;
+            // This generation now identifies already-collected selected
+            // evidence, not a legacy Finding recomputation.
+            ++selectedEvidenceGeneration_;
+            selectedNativeSourceEvidence_ = {};
+            Core::ClearObservationShadowState(selectedObservationShadow_);
+            const Core::SelectedProcessEnrichedSourceStamp currentSource =
+                CurrentSelectedProcessEnrichedSourceStamp();
+            Core::UpdateSelectedProcessEnrichedSelection(
+                selectedEnrichedLifecycle_,
+                currentSource);
+            selectedEnrichedLifecycle_.publicationAccepted = false;
+            selectedEnrichedLifecycle_.storedSource = {};
+            if (requestRebuild)
+            {
+                RequestSelectedProcessEnrichedRebuild(reason);
+            }
         }
 
         void InvalidateChainCache()
@@ -3178,6 +3550,7 @@ namespace GlassPane::UI
         void MarkSnapshotDependentCachesDirty()
         {
             ++snapshotGeneration_;
+            ClearProcessIconAssignments(Core::ProcessIconRefreshKind::ProcessGenerationChanged);
             visibleProcessRowsDirty_ = true;
             timelineRowsDirty_ = true;
             graphLayoutDirty_ = true;
@@ -3224,44 +3597,930 @@ namespace GlassPane::UI
         }
 
 
-        const std::vector<Core::Finding>& FindingsForSelectedProcess(
+        static std::string ObservationShadowEntityScope(
             const Core::ProcessInfo& process,
-            const Core::ChainAnalysisResult& chain,
-            const Core::FileIdentity& fileIdentity)
+            bool loadedSnapshotActive)
         {
-            if (findingsCacheValid_ &&
-                CacheMatchesProcess(findingsCachePid_, findingsCacheCreationTime_, process))
+            std::string scope = loadedSnapshotActive
+                ? "selected-process/snapshot/pid:"
+                : "selected-process/live/pid:";
+            scope += std::to_string(process.pid);
+            scope += process.hasCreationTime
+                ? "/created:" + std::to_string(process.creationTimeFileTime)
+                : "/creation:unavailable";
+            return scope;
+        }
+
+        Core::SelectedProcessEnrichedSourceStamp
+        CurrentSelectedProcessEnrichedSourceStamp() const
+        {
+            Core::SelectedProcessEnrichedSourceStamp stamp;
+            stamp.scope = loadedSnapshotActive_
+                ? Core::SelectedProcessAnalysisScope::LoadedSnapshot
+                : Core::SelectedProcessAnalysisScope::Live;
+            stamp.processGeneration = snapshotGeneration_;
+            stamp.evidenceGeneration = selectedEvidenceGeneration_;
+            stamp.scopeGeneration = baselineScopeGeneration_;
+
+            const Core::ProcessInfo* process =
+                Core::FindProcessByPid(snapshot_, selectedPid_);
+            if (process != nullptr)
             {
-                return selectedFindingsCache_;
+                stamp.hasEntity = true;
+                stamp.identity = Core::MakeProcessIdentityKey(*process);
+                stamp.entityScope = ObservationShadowEntityScope(
+                    *process,
+                    loadedSnapshotActive_);
+            }
+            return stamp;
+        }
+
+        bool RequestSelectedProcessEnrichedRebuild(
+            Core::SelectedProcessEnrichedRebuildReason reason)
+        {
+            return Core::RequestSelectedProcessEnrichedRebuild(
+                selectedEnrichedLifecycle_,
+                CurrentSelectedProcessEnrichedSourceStamp(),
+                reason);
+        }
+
+        bool SelectedProcessEnrichedPublicationMatchesCurrent() const
+        {
+            return Core::SelectedProcessEnrichedPublicationMatches(
+                selectedEnrichedLifecycle_,
+                CurrentSelectedProcessEnrichedSourceStamp());
+        }
+
+        const Core::ObservationShadowState&
+        AuthoritativeSelectedObservationShadow() const
+        {
+            static const Core::ObservationShadowState unavailable;
+            return SelectedProcessEnrichedPublicationMatchesCurrent()
+                ? selectedObservationShadow_
+                : unavailable;
+        }
+
+        Core::ObservationShadowSourceContext BuildObservationShadowSourceContext(
+            const Core::ProcessInfo& process) const
+        {
+            Core::ObservationShadowSourceContext context;
+            context.entityScope = ObservationShadowEntityScope(process, loadedSnapshotActive_);
+            context.sourceKind = loadedSnapshotActive_
+                ? Core::ObservationSourceKind::Imported
+                : Core::ObservationSourceKind::Derived;
+            context.producerIdentifier = "core.native-observation-builder";
+            context.collectionMethod = loadedSnapshotActive_
+                ? "persisted-selected-process-native-evidence"
+                : "live-selected-process-native-evidence";
+            context.sourceAvailable = true;
+            context.rawSourceReference = context.entityScope;
+
+            const std::uint64_t creationTime = ProcessCacheStamp(process);
+
+            // Native selected-process producers consume only values already
+            // collected for this exact evidence generation. No collection or
+            // policy parsing is performed from render code.
+            context.nativeInputSupplied = true;
+            Core::NativeSelectedProcessObservationInput& native =
+                context.nativeInput;
+            native.identity = Core::MakeProcessIdentityKey(process);
+            native.entityScope = context.entityScope;
+
+            native.commandLine.identity = native.identity;
+            native.commandLine.supplied = true;
+            native.commandLine.collectionAttempted = true;
+            native.commandLine.available = process.commandLineAccessible;
+            native.commandLine.commandLine = process.commandLineAccessible
+                ? WideToUtf8(process.commandLine)
+                : std::string{};
+            native.commandLine.source.sourceKind = process.commandLineAccessible
+                ? Core::ObservationSourceKind::Direct
+                : Core::ObservationSourceKind::Unavailable;
+            native.commandLine.source.completeness =
+                process.commandLineAccessible
+                    ? Core::ObservationSourceCompleteness::Complete
+                    : Core::ObservationSourceCompleteness::Unavailable;
+            native.commandLine.source.sourceIdentifier =
+                "core.process-snapshot.command-line";
+            native.commandLine.source.collectionMethod =
+                "selected-process-snapshot";
+            native.commandLine.source.rawSourceReference = context.entityScope;
+
+            if (process.parentPid != 0 &&
+                process.parentRelationshipVerified)
+            {
+                const Core::ProcessInfo* parent =
+                    Core::FindProcessByPid(snapshot_, process.parentPid);
+                if (parent != nullptr)
+                {
+                    bool correlationRelationship = false;
+                    std::string relationshipRule =
+                        "native.relationship.verified-parent-context";
+                    if (selectedChainCacheValid_ &&
+                        selectedChainCachePid_ == process.pid &&
+                        selectedChainCacheCreationTime_ == creationTime &&
+                        selectedChainCacheSnapshotGeneration_ ==
+                            snapshotGeneration_)
+                    {
+                        const auto typedRelationship = std::find_if(
+                            selectedChainCache_.chainIndicatorFacts.begin(),
+                            selectedChainCache_.chainIndicatorFacts.end(),
+                            [&](const Core::ChainIndicatorFact& fact)
+                            {
+                                return fact.kind ==
+                                        Core::ChainIndicatorFactKind::ProcessRelationship &&
+                                    fact.sourcePid == parent->pid &&
+                                    fact.targetPid == process.pid &&
+                                    !fact.sourceRuleId.empty();
+                            });
+                        if (typedRelationship !=
+                            selectedChainCache_.chainIndicatorFacts.end())
+                        {
+                            correlationRelationship = true;
+                            relationshipRule =
+                                typedRelationship->sourceRuleId;
+                        }
+                    }
+
+                    Core::NativeRelationshipFact relationship;
+                    relationship.subjectIdentity = native.identity;
+                    relationship.relatedIdentity =
+                        Core::MakeProcessIdentityKey(*parent);
+                    relationship.kind =
+                        Core::NativeRelationshipKind::DirectParent;
+                    relationship.semantics = correlationRelationship
+                        ? Core::NativeRelationshipSemantics::ExecutionCorrelation
+                        : Core::NativeRelationshipSemantics::Context;
+                    relationship.verified = true;
+                    relationship.semanticFactKey =
+                        "relationship.parent|pid:" +
+                        std::to_string(parent->pid) + "->pid:" +
+                        std::to_string(process.pid);
+                    relationship.sourceRuleId = relationshipRule;
+                    relationship.rawValue =
+                        "PID " + std::to_string(parent->pid) +
+                        " -> PID " + std::to_string(process.pid);
+                    relationship.normalizedValue =
+                        "pid:" + std::to_string(parent->pid) +
+                        "->pid:" + std::to_string(process.pid);
+                    relationship.evidence.push_back(
+                        "The process snapshot retained a verified parent identity link.");
+                    relationship.source.sourceKind =
+                        Core::ObservationSourceKind::Direct;
+                    relationship.source.completeness =
+                        Core::ObservationSourceCompleteness::Complete;
+                    relationship.source.sourceIdentifier =
+                        "core.process-tree";
+                    relationship.source.collectionMethod =
+                        "selected-process-chain-analysis";
+                    relationship.source.rawSourceReference =
+                        context.entityScope;
+                    native.relationships.push_back(std::move(relationship));
+                }
             }
 
-            const ULONGLONG started = GetTickCount64();
-            selectedFindingsCache_ = BuildFindingsForSelectedProcess(process, chain, fileIdentity);
-            timings_.findingsMs = ElapsedMs(started);
-            findingsCachePid_ = process.pid;
-            findingsCacheCreationTime_ = ProcessCacheStamp(process);
-            findingsCacheValid_ = true;
+            // Preserve the remainder of the already-verified process ancestry
+            // as typed relationship context. These records are identity-keyed
+            // and non-contributing; process names remain display data only.
+            const std::vector<const Core::ProcessInfo*> parentChain =
+                Core::GetParentChain(snapshot_, process.pid);
+            const std::size_t ancestorEnd = parentChain.size() > 2
+                ? parentChain.size() - 2
+                : 0;
+            std::size_t emittedAncestorCount = 0;
+            for (std::size_t index = 0;
+                index < ancestorEnd &&
+                    native.relationships.size() <
+                        Core::NativeObservationMaxRelationshipFacts;
+                ++index)
+            {
+                const Core::ProcessInfo* ancestor = parentChain[index];
+                if (ancestor == nullptr || ancestor->pid == process.pid)
+                {
+                    continue;
+                }
+
+                Core::NativeRelationshipFact relationship;
+                relationship.subjectIdentity = native.identity;
+                relationship.relatedIdentity =
+                    Core::MakeProcessIdentityKey(*ancestor);
+                relationship.kind = Core::NativeRelationshipKind::Ancestor;
+                relationship.semantics =
+                    Core::NativeRelationshipSemantics::Context;
+                relationship.verified = true;
+                relationship.semanticFactKey =
+                    "relationship.ancestor|pid:" +
+                    std::to_string(ancestor->pid) + "->pid:" +
+                    std::to_string(process.pid);
+                relationship.sourceRuleId =
+                    "native.relationship.verified-ancestor-context";
+                relationship.rawValue =
+                    "Ancestor PID " + std::to_string(ancestor->pid) +
+                    " -> selected PID " + std::to_string(process.pid);
+                relationship.normalizedValue =
+                    "ancestor-pid:" + std::to_string(ancestor->pid) +
+                    "->pid:" + std::to_string(process.pid);
+                relationship.evidence.push_back(
+                    "The process snapshot retained a verified ancestry link.");
+                relationship.source.sourceKind =
+                    Core::ObservationSourceKind::Direct;
+                relationship.source.completeness =
+                    Core::ObservationSourceCompleteness::Complete;
+                relationship.source.sourceIdentifier = "core.process-tree";
+                relationship.source.collectionMethod =
+                    "selected-process-chain-analysis";
+                relationship.source.rawSourceReference = context.entityScope;
+                native.relationships.push_back(std::move(relationship));
+                ++emittedAncestorCount;
+            }
+            if (emittedAncestorCount < ancestorEnd)
+            {
+                native.limitations.push_back(
+                    "Additional verified ancestry context was omitted by the bounded native relationship cap.");
+            }
 
             if (!IsSyntheticSystemProcessEntry(process))
             {
-                const std::string logMessage =
-                    "Triage findings recomputed for PID " + std::to_string(process.pid) +
-                    ": " + std::to_string(selectedFindingsCache_.size()) +
-                    " finding(s) in " + std::to_string(timings_.findingsMs) + " ms.";
-                const ULONGLONG now = GetTickCount64();
-                constexpr ULONGLONG DuplicateTriageLogWindowMs = 100;
-                const bool duplicateFromSameAction =
-                    logMessage == lastTriageRecomputeLogMessage_ &&
-                    now >= lastTriageRecomputeLogTick_ &&
-                    now - lastTriageRecomputeLogTick_ <= DuplicateTriageLogWindowMs;
-                if (!duplicateFromSameAction)
+                const auto identity = fileIdentityCache_.find(
+                    ToLower(process.executablePath));
+                if (identity != fileIdentityCache_.end())
                 {
-                    AddLog(LogLevel::Info, logMessage);
+                    const Core::FileIdentity& file = identity->second;
+                    native.fileIdentity.identity = native.identity;
+                    native.fileIdentity.supplied = true;
+                    native.fileIdentity.artifactKey =
+                        "selected-process-executable";
+                    native.fileIdentity.rawPath =
+                        WideToUtf8(file.path);
+                    native.fileIdentity.normalizedPath =
+                        WideToUtf8(ToLower(file.path));
+                    native.fileIdentity.pathContext =
+                        Core::ClassifyNativeFilePathContext(
+                            native.fileIdentity.normalizedPath);
+                    if (!file.exists)
+                    {
+                        native.fileIdentity.signatureState =
+                            Core::NativeFileSignatureState::Unavailable;
+                    }
+                    else if (!file.signaturePresent)
+                    {
+                        native.fileIdentity.signatureState =
+                            Core::NativeFileSignatureState::SignatureAbsent;
+                    }
+                    else
+                    {
+                        native.fileIdentity.signatureState =
+                            file.signatureValid
+                                ? Core::NativeFileSignatureState::AuthenticatedValid
+                                : Core::NativeFileSignatureState::AuthenticatedInvalid;
+                    }
+                    native.fileIdentity.signerSubject =
+                        WideToUtf8(file.signerName);
+                    native.fileIdentity.source.sourceKind = file.exists
+                        ? Core::ObservationSourceKind::Direct
+                        : Core::ObservationSourceKind::Unavailable;
+                    native.fileIdentity.source.completeness = file.exists
+                        ? Core::ObservationSourceCompleteness::Complete
+                        : Core::ObservationSourceCompleteness::Unavailable;
+                    native.fileIdentity.source.sourceIdentifier =
+                        "core.file-identity";
+                    native.fileIdentity.source.collectionMethod =
+                        "selected-process-file-identity";
+                    native.fileIdentity.source.rawSourceReference =
+                        context.entityScope;
+                    if (!file.errorMessage.empty())
+                    {
+                        native.fileIdentity.source.limitations.push_back(
+                            WideToUtf8(file.errorMessage));
+                    }
                 }
-                lastTriageRecomputeLogMessage_ = logMessage;
-                lastTriageRecomputeLogTick_ = now;
             }
-            return selectedFindingsCache_;
+
+            if (networkLoaded_)
+            {
+                Core::NativeNetworkObservationInput& network =
+                    native.network;
+                network.identity = native.identity;
+                network.supplied = true;
+                network.collectionAttempted = true;
+                network.available = networkSnapshot_.success;
+                network.connections =
+                    SelectedNetworkConnectionsForExport();
+                if (network.connections.size() >
+                    Core::NativeObservationMaxNetworkConnections)
+                {
+                    network.truncated = true;
+                    network.omittedContextFactCount +=
+                        network.connections.size() -
+                        Core::NativeObservationMaxNetworkConnections;
+                    network.connections.resize(
+                        Core::NativeObservationMaxNetworkConnections);
+                }
+                network.exactIndicatorMatches =
+                    SelectedNetworkIndicatorMatchesForProcess(process.pid);
+                if (network.exactIndicatorMatches.size() >
+                    Core::NativeObservationMaxNetworkIndicators)
+                {
+                    network.truncated = true;
+                    network.omittedMaterialFactCount +=
+                        network.exactIndicatorMatches.size() -
+                        Core::NativeObservationMaxNetworkIndicators;
+                    network.exactIndicatorMatches.resize(
+                        Core::NativeObservationMaxNetworkIndicators);
+                }
+                network.source.sourceKind = networkSnapshot_.success
+                    ? Core::ObservationSourceKind::Direct
+                    : Core::ObservationSourceKind::Unavailable;
+                network.source.completeness = networkSnapshot_.success
+                    ? Core::ObservationSourceCompleteness::Complete
+                    : Core::ObservationSourceCompleteness::Unavailable;
+                network.source.sourceIdentifier =
+                    "core.network-snapshot";
+                network.source.collectionMethod =
+                    "selected-process-network-context";
+                network.source.rawSourceReference = context.entityScope;
+                if (!networkSnapshot_.statusMessage.empty())
+                {
+                    network.source.limitations.push_back(
+                        WideToUtf8(networkSnapshot_.statusMessage));
+                }
+            }
+
+            if (ModulesLoadedForProcess(process))
+            {
+                Core::NativeModuleObservationInput& modules =
+                    native.modules;
+                modules.identity = native.identity;
+                modules.supplied = true;
+                modules.collectionAttempted = true;
+                modules.available = selectedModules_.success;
+                modules.collection = selectedModules_;
+                if (modules.collection.modules.size() >
+                    Core::NativeObservationMaxModules)
+                {
+                    modules.truncated = true;
+                    modules.omittedContextFactCount =
+                        modules.collection.modules.size() -
+                        Core::NativeObservationMaxModules;
+                    modules.collection.modules.resize(
+                        Core::NativeObservationMaxModules);
+                }
+                modules.source.sourceKind = selectedModules_.success
+                    ? Core::ObservationSourceKind::Direct
+                    : Core::ObservationSourceKind::Unavailable;
+                modules.source.completeness = selectedModules_.success
+                    ? Core::ObservationSourceCompleteness::Complete
+                    : Core::ObservationSourceCompleteness::Unavailable;
+                modules.source.sourceIdentifier = "core.module-collector";
+                modules.source.collectionMethod =
+                    "selected-process-module-metadata";
+                modules.source.rawSourceReference = context.entityScope;
+                if (!selectedModules_.statusMessage.empty())
+                {
+                    modules.source.limitations.push_back(
+                        WideToUtf8(selectedModules_.statusMessage));
+                }
+            }
+
+            if (MemoryLoadedForProcess(process))
+            {
+                Core::NativeMemoryObservationInput& memory = native.memory;
+                memory.identity = native.identity;
+                memory.supplied = true;
+                memory.collectionAttempted = true;
+                memory.available = selectedMemory_.success;
+                memory.collection = selectedMemory_;
+                if (memory.collection.regions.size() >
+                    Core::NativeObservationMaxMemoryRegions)
+                {
+                    memory.truncated = true;
+                    memory.omittedContextFactCount =
+                        memory.collection.regions.size() -
+                        Core::NativeObservationMaxMemoryRegions;
+                    memory.collection.regions.resize(
+                        Core::NativeObservationMaxMemoryRegions);
+                }
+                memory.source.sourceKind = selectedMemory_.success
+                    ? Core::ObservationSourceKind::Direct
+                    : Core::ObservationSourceKind::Unavailable;
+                memory.source.completeness = selectedMemory_.success
+                    ? Core::ObservationSourceCompleteness::Complete
+                    : Core::ObservationSourceCompleteness::Unavailable;
+                memory.source.sourceIdentifier = "core.memory-collector";
+                memory.source.collectionMethod =
+                    "selected-process-static-memory-metadata";
+                memory.source.rawSourceReference = context.entityScope;
+                if (!selectedMemory_.statusMessage.empty())
+                {
+                    memory.source.limitations.push_back(
+                        WideToUtf8(selectedMemory_.statusMessage));
+                }
+            }
+
+            if (TokenLoadedForProcess(process))
+            {
+                Core::NativeTokenObservationInput& token = native.token;
+                token.identity = native.identity;
+                token.entityScope = context.entityScope;
+                token.supplied = true;
+                token.collectionAttempted = true;
+                token.token = selectedToken_;
+                if (token.token.privileges.size() >
+                    Core::NativeTokenObservationMaxPrivileges)
+                {
+                    token.privilegesTruncated = true;
+                    token.omittedPrivilegeCount =
+                        token.token.privileges.size() -
+                        Core::NativeTokenObservationMaxPrivileges;
+                    token.token.privileges.resize(
+                        Core::NativeTokenObservationMaxPrivileges);
+                }
+                token.source.sourceKind = selectedToken_.success
+                    ? Core::ObservationSourceKind::Direct
+                    : Core::ObservationSourceKind::Unavailable;
+                token.source.completeness = selectedToken_.success
+                    ? Core::NativeTokenSourceCompleteness::Complete
+                    : Core::NativeTokenSourceCompleteness::Unavailable;
+                token.source.sourceIdentifier = "core.token-collector";
+                token.source.collectionMethod =
+                    "selected-process-token-metadata";
+                token.source.rawSourceReference = context.entityScope;
+                if (!selectedToken_.errorMessage.empty())
+                {
+                    token.source.limitations.push_back(
+                        WideToUtf8(selectedToken_.errorMessage));
+                }
+            }
+
+            if (HandlesLoadedForProcess(process))
+            {
+                Core::NativeHandleObservationInput& handles =
+                    native.handles;
+                handles.sourceIdentity = native.identity;
+                handles.entityScope = context.entityScope;
+                handles.supplied = true;
+                handles.collectionAttempted = true;
+                handles.collection = selectedHandles_;
+                handles.omittedHandleCount =
+                    selectedHandles_.selectedProcessHandlesOmitted;
+                handles.sourceTruncated =
+                    selectedHandles_.queryBufferTruncated ||
+                    selectedHandles_.retentionCapReached ||
+                    handles.omittedHandleCount != 0;
+                if (selectedHandles_.queryBufferTruncated &&
+                    handles.omittedHandleCount == 0)
+                {
+                    // A successful native response that reports more rows than
+                    // fit in its returned buffer leaves an unknown material
+                    // tail. Represent the conservative lower bound explicitly.
+                    handles.omittedHandleCount = 1;
+                }
+                if (handles.collection.handles.size() >
+                    Core::NativeHandleObservationMaxRows)
+                {
+                    handles.sourceTruncated = true;
+                    handles.omittedHandleCount +=
+                        handles.collection.handles.size() -
+                        Core::NativeHandleObservationMaxRows;
+                    handles.collection.handles.resize(
+                        Core::NativeHandleObservationMaxRows);
+                }
+                handles.source.sourceKind = selectedHandles_.success
+                    ? Core::ObservationSourceKind::Direct
+                    : Core::ObservationSourceKind::Unavailable;
+                handles.source.sourceIdentifier = "core.handle-collector";
+                handles.source.collectionMethod =
+                    "selected-process-handle-metadata";
+                handles.source.rawSourceReference = context.entityScope;
+                if (!selectedHandles_.statusMessage.empty())
+                {
+                    handles.source.limitations.push_back(
+                        WideToUtf8(selectedHandles_.statusMessage));
+                }
+                handles.targetIdentities.reserve((std::min)(
+                    handles.collection.handles.size(),
+                    Core::NativeHandleObservationMaxTargetIdentities));
+                for (const Core::HandleInfo& handle :
+                    handles.collection.handles)
+                {
+                    if (!handle.targetPid.has_value() ||
+                        handles.targetIdentities.size() >=
+                            Core::NativeHandleObservationMaxTargetIdentities)
+                    {
+                        continue;
+                    }
+                    Core::NativeHandleTargetIdentity binding;
+                    binding.handleValue = handle.handleValue;
+                    binding.objectKind =
+                        Core::ClassifyNativeHandleObjectKind(handle);
+                    binding.targetPid = handle.targetPid.value();
+                    const Core::ProcessInfo* target =
+                        Core::FindProcessByPid(snapshot_, binding.targetPid);
+                    if (target != nullptr && target->hasCreationTime)
+                    {
+                        binding.identityResolved = true;
+                        binding.identity =
+                            Core::MakeProcessIdentityKey(*target);
+                    }
+                    else if (target != nullptr &&
+                        binding.targetPid != process.pid)
+                    {
+                        // A PID-only target cannot exclude reuse and therefore
+                        // remains non-contributing context in the native policy.
+                        binding.pidReuseAmbiguous = true;
+                    }
+                    handles.targetIdentities.push_back(std::move(binding));
+                }
+            }
+
+            if (RuntimeLoadedForProcess(process))
+            {
+                Core::NativeRuntimeObservationInput& runtime =
+                    native.runtime;
+                runtime.identity = native.identity;
+                runtime.entityScope = context.entityScope;
+                runtime.supplied = true;
+                runtime.collectionAttempted = true;
+                runtime.available = selectedRuntime_.success;
+                runtime.declaredThreadCount =
+                    selectedRuntime_.threadCount;
+                runtime.declaredHandleCount =
+                    selectedRuntime_.handleCount;
+                runtime.processBasePriorityAvailable = true;
+                runtime.processBasePriority =
+                    selectedRuntime_.basePriority;
+                runtime.source.sourceKind = selectedRuntime_.success
+                    ? Core::ObservationSourceKind::Direct
+                    : Core::ObservationSourceKind::Unavailable;
+                runtime.source.completeness = selectedRuntime_.success
+                    ? Core::NativeRuntimeSourceCompleteness::Complete
+                    : Core::NativeRuntimeSourceCompleteness::Unavailable;
+                runtime.source.sourceIdentifier = "core.runtime-collector";
+                runtime.source.collectionMethod =
+                    "selected-process-runtime-metadata";
+                runtime.source.rawSourceReference = context.entityScope;
+                if (!selectedRuntime_.errorMessage.empty())
+                {
+                    runtime.limitations.push_back(
+                        WideToUtf8(selectedRuntime_.errorMessage));
+                }
+
+                const std::size_t threadLimit = (std::min)(
+                    selectedRuntime_.threads.size(),
+                    Core::NativeRuntimeObservationMaxThreads);
+                runtime.sourceFactsTruncated =
+                    selectedRuntime_.threads.size() > threadLimit ||
+                    selectedRuntime_.threadCount > threadLimit;
+                runtime.threads.reserve(threadLimit);
+                for (std::size_t index = 0; index < threadLimit; ++index)
+                {
+                    const Core::ThreadInfo& sourceThread =
+                        selectedRuntime_.threads[index];
+                    if (sourceThread.threadId == 0)
+                    {
+                        // RuntimeCollector uses a zero-ID sentinel when thread
+                        // enumeration itself fails. It is collection coverage,
+                        // not a thread artifact and must not invalidate otherwise
+                        // usable selected-process evidence.
+                        runtime.sourceFactsTruncated = true;
+                        std::string limitation = sourceThread.errorMessage.empty()
+                            ? std::string(
+                                "Thread enumeration did not return a stable thread identity.")
+                            : WideToUtf8(sourceThread.errorMessage);
+                        if (limitation.size() >
+                            Core::ObservationLimitationItemMaxCharacters)
+                        {
+                            limitation.resize(
+                                Core::ObservationLimitationItemMaxCharacters);
+                        }
+                        if (runtime.limitations.size() <
+                            Core::NativeRuntimeObservationMaxLimitations)
+                        {
+                            runtime.limitations.push_back(
+                                std::move(limitation));
+                        }
+                        continue;
+                    }
+                    Core::NativeRuntimeThreadInput thread;
+                    thread.threadId = sourceThread.threadId;
+                    thread.ownerProcessId = sourceThread.ownerProcessId;
+                    thread.ownerIdentityKnown =
+                        sourceThread.ownerProcessId != 0;
+                    thread.ownerMatchesSelectedProcess =
+                        sourceThread.ownerProcessId == process.pid;
+                    thread.basePriorityAvailable = true;
+                    thread.basePriority = sourceThread.basePriority;
+                    thread.currentPriorityAvailable =
+                        sourceThread.hasCurrentPriority;
+                    thread.currentPriority =
+                        sourceThread.currentPriority;
+                    thread.source = runtime.source;
+
+                    if (!sourceThread.startAddress.empty())
+                    {
+                        std::wistringstream addressStream(
+                            sourceThread.startAddress);
+                        addressStream >> std::hex >> thread.startAddress;
+                        thread.startAddressAvailable =
+                            !addressStream.fail();
+                    }
+                    if (!sourceThread.startAddressResolvedModule.empty())
+                    {
+                        thread.startKind =
+                            Core::NativeRuntimeThreadStartKind::ImageBacked;
+                        thread.resolvedModuleIdentity = WideToUtf8(
+                            sourceThread.startAddressResolvedModule);
+                    }
+                    else if (thread.startAddressAvailable)
+                    {
+                        thread.startKind =
+                            Core::NativeRuntimeThreadStartKind::Unresolved;
+                        if (MemoryLoadedForProcess(process))
+                        {
+                            for (const Core::MemoryRegionInfo& region :
+                                selectedMemory_.regions)
+                            {
+                                if (thread.startAddress < region.baseAddress ||
+                                    thread.startAddress - region.baseAddress >=
+                                        region.regionSize)
+                                {
+                                    continue;
+                                }
+                                if (region.isPrivate && region.isExecutable)
+                                {
+                                    thread.startKind = Core::
+                                        NativeRuntimeThreadStartKind::
+                                            PrivateExecutableMetadata;
+                                }
+                                else if (region.isImage || region.isMapped ||
+                                    !region.mappedFilePath.empty())
+                                {
+                                    thread.startKind = Core::
+                                        NativeRuntimeThreadStartKind::ImageBacked;
+                                }
+                                else
+                                {
+                                    thread.startKind = Core::
+                                        NativeRuntimeThreadStartKind::
+                                            OutsideKnownModule;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if (!sourceThread.state.empty())
+                    {
+                        thread.evidence.push_back(
+                            "Captured thread state: " +
+                            WideToUtf8(sourceThread.state) + ".");
+                    }
+                    if (!sourceThread.errorMessage.empty())
+                    {
+                        thread.limitations.push_back(
+                            WideToUtf8(sourceThread.errorMessage));
+                    }
+                    runtime.threads.push_back(std::move(thread));
+                }
+
+                if (selectedRuntime_.success)
+                {
+                    Core::NativeAffinityObservationInput& affinity =
+                        native.affinity;
+                    affinity.identity = native.identity;
+                    affinity.supplied = true;
+                    affinity.collectionAttempted = true;
+                    affinity.available =
+                        selectedRuntime_.processAffinityMask != 0 &&
+                        selectedRuntime_.systemAffinityMask != 0;
+                    affinity.processAffinityMask =
+                        selectedRuntime_.processAffinityMask;
+                    affinity.systemAffinityMask =
+                        selectedRuntime_.systemAffinityMask;
+                    affinity.source.sourceKind = affinity.available
+                        ? Core::ObservationSourceKind::Direct
+                        : Core::ObservationSourceKind::Unavailable;
+                    affinity.source.completeness = affinity.available
+                        ? Core::ObservationSourceCompleteness::Complete
+                        : Core::ObservationSourceCompleteness::Unavailable;
+                    affinity.source.sourceIdentifier =
+                        "core.runtime-collector";
+                    affinity.source.collectionMethod =
+                        "selected-process-affinity-metadata";
+                    affinity.source.rawSourceReference = context.entityScope;
+                    if (!affinity.available &&
+                        !selectedRuntime_.errorMessage.empty())
+                    {
+                        affinity.source.limitations.push_back(
+                            WideToUtf8(selectedRuntime_.errorMessage));
+                    }
+
+                    Core::NativePriorityObservationInput& priority =
+                        native.priority;
+                    priority.identity = native.identity;
+                    priority.entityScope = context.entityScope;
+                    priority.supplied = true;
+                    priority.collectionAttempted = true;
+                    priority.available =
+                        selectedRuntime_.priorityClassRaw != 0;
+                    priority.rawPriorityClass =
+                        selectedRuntime_.priorityClassRaw;
+                    priority.priorityClass =
+                        Core::ClassifyNativeProcessPriorityClass(
+                            selectedRuntime_.priorityClassRaw);
+                    priority.basePriorityAvailable = true;
+                    priority.basePriority = selectedRuntime_.basePriority;
+                    priority.limitations = runtime.limitations;
+                    priority.source = runtime.source;
+                }
+            }
+
+            return context;
+        }
+
+        static std::uint64_t ObservationShadowElapsedMicroseconds(
+            const std::chrono::steady_clock::time_point started)
+        {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            return elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0;
+        }
+
+        void ProcessSelectedProcessEnrichedLifecycle() noexcept
+        {
+            // Saved-snapshot review consumes captured schema-4/5 authority.
+            // Older schemas explicitly have no captured TriageEngine result;
+            // no saved scope is implicitly re-evaluated under current policy.
+            if (loadedSnapshotActive_)
+            {
+                return;
+            }
+
+            Core::SelectedProcessEnrichedSourceStamp capturedSource;
+            if (!Core::TryBeginSelectedProcessEnrichedBuild(
+                    selectedEnrichedLifecycle_,
+                    capturedSource))
+            {
+                return;
+            }
+
+            const auto started = std::chrono::steady_clock::now();
+            ++observationShadowNativeBuildInvocationCount_;
+
+            Core::ObservationShadowState nextState;
+            const Core::ProcessInfo* process =
+                Core::FindProcessByPid(snapshot_, capturedSource.identity.pid);
+            try
+            {
+                if (process == nullptr ||
+                    Core::MakeProcessIdentityKey(*process) !=
+                        capturedSource.identity)
+                {
+                    throw std::runtime_error(
+                        "Selected process identity changed before the enriched build started.");
+                }
+                const Core::ObservationShadowSourceContext sourceContext =
+                    BuildObservationShadowSourceContext(*process);
+                nextState = Core::BuildNativeObservationShadowState(
+                    sourceContext,
+                    true,
+                    process->pid,
+                    ProcessCacheStamp(*process),
+                    capturedSource.evidenceGeneration);
+            }
+            catch (...)
+            {
+                try
+                {
+                    Core::ObservationShadowSourceContext failureContext;
+                    failureContext.entityScope = capturedSource.entityScope;
+                    failureContext.sourceKind =
+                        Core::ObservationSourceKind::Derived;
+                    nextState = Core::MakeFailedObservationShadowState(
+                        failureContext,
+                        capturedSource.hasEntity,
+                        capturedSource.identity.pid,
+                        capturedSource.identity.hasCreationTime
+                            ? capturedSource.identity.creationTimeFileTime
+                            : 0,
+                        capturedSource.evidenceGeneration,
+                        "Native observation production failed; enriched triage is unavailable for this generation.",
+                        ObservationShadowElapsedMicroseconds(started));
+                }
+                catch (...)
+                {
+                    const Core::SelectedProcessEnrichedSourceStamp currentSource =
+                        CurrentSelectedProcessEnrichedSourceStamp();
+                    Core::CompleteSelectedProcessEnrichedBuild(
+                        selectedEnrichedLifecycle_,
+                        capturedSource,
+                        currentSource,
+                        nextState,
+                        static_cast<std::uint64_t>(GetTickCount64()),
+                        ObservationShadowElapsedMicroseconds(started));
+                    selectedNativeSourceEvidence_ = {};
+                    Core::ClearObservationShadowState(selectedObservationShadow_);
+                    return;
+                }
+            }
+
+            if (Core::TryRefineObservationShadowState(nextState))
+            {
+                ++observationShadowRefinementInvocationCount_;
+            }
+            if (Core::TryActivateObservationShadowCorrelations(nextState))
+            {
+                ++observationShadowCorrelationInvocationCount_;
+            }
+            if (Core::TryBuildObservationShadowTriage(nextState))
+            {
+                ++observationShadowTriageInvocationCount_;
+            }
+
+            Core::NativeSourceEvidenceProjectionResult nextSourceEvidence;
+            if (nextState.refinement.Succeeded())
+            {
+                const Core::TriageResult* triage =
+                    nextState.triage.Succeeded()
+                        ? &nextState.triage
+                        : nullptr;
+                nextSourceEvidence =
+                    Core::ProjectNativeSourceEvidence(
+                        nextState.refinement,
+                        triage);
+            }
+
+            const Core::SelectedProcessEnrichedSourceStamp currentSource =
+                CurrentSelectedProcessEnrichedSourceStamp();
+            const std::uint64_t completionDurationMicroseconds =
+                ObservationShadowElapsedMicroseconds(started);
+            const bool publicationAccepted =
+                Core::CompleteSelectedProcessEnrichedBuild(
+                    selectedEnrichedLifecycle_,
+                    capturedSource,
+                    currentSource,
+                    nextState,
+                    static_cast<std::uint64_t>(GetTickCount64()),
+                    completionDurationMicroseconds);
+
+            const bool completedForCurrentSource =
+                capturedSource == currentSource;
+            if (publicationAccepted || completedForCurrentSource)
+            {
+                selectedObservationShadow_ = std::move(nextState);
+            }
+            else
+            {
+                Core::ClearObservationShadowState(selectedObservationShadow_);
+            }
+            selectedNativeSourceEvidence_ = publicationAccepted
+                ? std::move(nextSourceEvidence)
+                : Core::NativeSourceEvidenceProjectionResult{};
+            try
+            {
+                const std::uint64_t durationMs =
+                    completionDurationMicroseconds / 1000;
+                std::string message;
+                LogLevel level = LogLevel::Info;
+                if (publicationAccepted)
+                {
+                    message = selectedObservationShadow_.diagnosticMessage;
+                    if (message.empty())
+                    {
+                        message =
+                            "Native enriched TriageEngine result built for PID " +
+                            std::to_string(capturedSource.identity.pid) +
+                            " (" + std::to_string(durationMs) + " ms).";
+                    }
+                }
+                else
+                {
+                    level = LogLevel::Warning;
+                    message =
+                        "Native enriched TriageEngine analysis could not be completed for PID " +
+                        std::to_string(capturedSource.identity.pid) +
+                        "; current baseline authority remains available when present (" +
+                        std::to_string(durationMs) + " ms).";
+                }
+                if (message.size() > Core::ObservationShadowDiagnosticMaxCharacters)
+                {
+                    message.resize(Core::ObservationShadowDiagnosticMaxCharacters);
+                }
+                AddLog(level, message);
+            }
+            catch (...)
+            {
+                // Diagnostic logging is subordinate to the value-owned shadow.
+            }
+        }
+
+        // Capture/export actions may ensure a request exists, but they never
+        // run the pipeline from an ImGui callback. The next pre-frame lifecycle
+        // pass processes the coalesced request.
+        void SynchronizeNativeObservationEngineForCurrentEvidence() noexcept
+        {
+            RequestSelectedProcessEnrichedRebuild(
+                Core::SelectedProcessEnrichedRebuildReason::
+                    AllSelectedEvidenceChanged);
         }
 
         const Core::ChainAnalysisResult& CachedChainAnalysis(const Core::ProcessInfo& process)
@@ -3283,40 +4542,19 @@ namespace GlassPane::UI
             return selectedChainCache_;
         }
 
-        bool SelectedProcessHasHighTriageFinding()
-        {
-            const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
-            if (process == nullptr)
-            {
-                return false;
-            }
-
-            if (selectedHighTriageCacheValid_ &&
-                CacheMatchesProcess(selectedHighTriagePid_, selectedHighTriageCreationTime_, *process))
-            {
-                return selectedHighTriage_;
-            }
-
-            const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(*process);
-            const std::vector<Core::Finding>& findings =
-                FindingsForSelectedProcess(*process, chain, fileIdentity);
-            selectedHighTriage_ = !findings.empty() &&
-                Core::HighestFindingSeverity(findings) == Core::FindingSeverity::High;
-            selectedHighTriagePid_ = process->pid;
-            selectedHighTriageCreationTime_ = ProcessCacheStamp(*process);
-            selectedHighTriageCacheValid_ = true;
-            return selectedHighTriage_;
-        }
-
         std::size_t CountSuspiciousProcesses() const
         {
-            return static_cast<std::size_t>(std::count_if(
-                snapshot_.processes.begin(),
-                snapshot_.processes.end(),
-                [](const Core::ProcessInfo& process) {
-                    return Core::SeverityRank(process.severity) >= Core::SeverityRank(Core::Severity::Low);
-                }));
+            std::size_t count = 0;
+            for (std::size_t processIndex = 0;
+                processIndex < snapshot_.processes.size();
+                ++processIndex)
+            {
+                if (ProcessAuthorityIsSuspiciousAt(processIndex))
+                {
+                    ++count;
+                }
+            }
+            return count;
         }
 
         std::size_t CountVisibleProcesses() const
@@ -3347,7 +4585,12 @@ namespace GlassPane::UI
                 const Core::ProcessInfo& process = snapshot_.processes[row.processIndex];
                 if (ProcessMatchesFilters(process))
                 {
-                    visibleProcessRows_.push_back({ row.processIndex, row.depth, process.severity });
+                    visibleProcessRows_.push_back({
+                        row.processIndex,
+                        row.depth,
+                        ProcessAuthoritySeverityAt(row.processIndex),
+                        ProcessAuthorityUnavailableAt(row.processIndex)
+                    });
                 }
             }
 
@@ -3368,14 +4611,42 @@ namespace GlassPane::UI
             }
 
             cachedTimelineRows_.clear();
-            const std::vector<Core::TimelineRow> rows = Core::BuildTimelineRows(snapshot_, timelineFilter_);
+            const std::vector<Core::Severity> emptySeverities;
+            const std::vector<std::uint8_t> emptySuspicious;
+            const std::vector<std::uint8_t> emptyAvailable;
+            const bool authorityCurrent =
+                ProcessAuthorityProjectionMatchesCurrent();
+            const std::vector<Core::TimelineRow> rows =
+                Core::BuildTimelineRows(
+                    snapshot_,
+                    timelineFilter_,
+                    authorityCurrent
+                        ? processAuthoritySeverities_
+                        : emptySeverities,
+                    authorityCurrent
+                        ? processAuthoritySuspicious_
+                        : emptySuspicious,
+                    authorityCurrent
+                        ? processAuthorityAvailable_
+                        : emptyAvailable);
             cachedTimelineRows_.reserve(rows.size());
-            for (const Core::TimelineRow& row : rows)
+            for (Core::TimelineRow row : rows)
             {
-                const Core::ProcessInfo* timelineProcess = Core::FindProcessByPid(snapshot_, row.pid);
-                if (timelineProcess != nullptr && ProcessMatchesFilters(*timelineProcess))
+                if (row.sourceProcessIndex >= snapshot_.processes.size())
                 {
-                    cachedTimelineRows_.push_back(row);
+                    continue;
+                }
+
+                const Core::ProcessInfo& timelineProcess =
+                    snapshot_.processes[row.sourceProcessIndex];
+                if (timelineProcess.pid != row.pid)
+                {
+                    continue;
+                }
+
+                if (ProcessMatchesFilters(timelineProcess))
+                {
+                    cachedTimelineRows_.push_back(std::move(row));
                 }
             }
 
@@ -3401,14 +4672,14 @@ namespace GlassPane::UI
 
             visibleHandleIndexes_.clear();
             visibleHandleIndexes_.reserve(selectedHandles_.handles.size());
-            visibleHandlesWithIndicatorsCount_ = 0;
+            visibleHandlesWithTypedAccessCount_ = 0;
             visibleHandlesNameStatusCount_ = 0;
             for (std::size_t index = 0; index < selectedHandles_.handles.size(); ++index)
             {
                 const Core::HandleInfo& handle = selectedHandles_.handles[index];
-                if (!handle.indicators.empty())
+                if (!HandleAccessCategoryText(handle).empty())
                 {
-                    ++visibleHandlesWithIndicatorsCount_;
+                    ++visibleHandlesWithTypedAccessCount_;
                 }
                 if (!HandleStatusText(handle).empty())
                 {
@@ -3573,7 +4844,7 @@ namespace GlassPane::UI
             const std::uint64_t previousSelectedCreationTime =
                 previousSelectedProcess != nullptr ? ProcessCacheStamp(*previousSelectedProcess) : 0;
             fileIdentityCache_.clear();
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence();
             MarkAllTablesNeedAutoSize();
             const ULONGLONG started = GetTickCount64();
             snapshot_ = Core::CollectProcessSnapshot();
@@ -3621,21 +4892,24 @@ namespace GlassPane::UI
                 }
             }
 
-            RefreshToken(false);
-            RefreshRuntime(false);
-            if (refreshSelectedEvidence)
+            const Core::ProcessInfo* selectedProcess =
+                Core::FindProcessByPid(snapshot_, selectedPid_);
+            if (selectedProcess != nullptr)
             {
-                const Core::ProcessInfo* selectedProcess = Core::FindProcessByPid(snapshot_, selectedPid_);
-                if (selectedProcess != nullptr)
-                {
-                    EnsureSelectedProcessEvidenceLoaded(*selectedProcess);
-                }
+                Core::UpdateSelectedProcessEnrichedSelection(
+                    selectedEnrichedLifecycle_,
+                    CurrentSelectedProcessEnrichedSourceStamp());
+                EnsureSelectedProcessEvidenceLoaded(
+                    *selectedProcess,
+                    refreshSelectedEvidence);
             }
             RebuildFocusedGraph("snapshot-refresh");
             RequestGraphFit();
             RebuildVisibleProcessRowsIfNeeded();
             RebuildGraphWorldLayoutIfNeeded();
-            InvalidateFindingsCache();
+            InvalidateSelectedNativeEvidence(
+                Core::SelectedProcessEnrichedRebuildReason::
+                    ProcessSnapshotChanged);
             AddLog(
                 snapshot_.processes.empty() ? LogLevel::Warning : LogLevel::Info,
                 "Snapshot loaded: " + std::to_string(snapshot_.processes.size()) +
@@ -3674,15 +4948,30 @@ namespace GlassPane::UI
                 return;
             }
 
-            const bool changed = selectedPid_ != pid;
-            if (selectedPid_ != pid)
+            const Core::SelectedProcessEnrichedSourceStamp previousSource =
+                CurrentSelectedProcessEnrichedSourceStamp();
+            const Core::ProcessIdentityKey selectedIdentity =
+                Core::MakeProcessIdentityKey(*selectedProcess);
+            const bool changed = !previousSource.hasEntity ||
+                previousSource.identity != selectedIdentity ||
+                previousSource.scope != Core::SelectedProcessAnalysisScope::Live;
+            if (changed)
             {
                 ClearSelectedProcessEvidence();
                 MarkSelectedEvidenceTablesNeedAutoSize();
             }
 
             selectedPid_ = pid;
+            Core::UpdateSelectedProcessEnrichedSelection(
+                selectedEnrichedLifecycle_,
+                CurrentSelectedProcessEnrichedSourceStamp());
             EnsureSelectedProcessEvidenceLoaded(*selectedProcess);
+            if (changed)
+            {
+                RequestSelectedProcessEnrichedRebuild(
+                    Core::SelectedProcessEnrichedRebuildReason::
+                        SelectionChanged);
+            }
             if (changed && inspectorTab_ == InspectorTab::Network)
             {
                 RequestNetworkTableAutoFit(selectedPid_);
@@ -3699,7 +4988,8 @@ namespace GlassPane::UI
             if (changed && logSelection)
             {
                 AddLog(
-                    Core::SeverityRank(selectedProcess->severity) >= Core::SeverityRank(Core::Severity::High)
+                    Core::SeverityRank(ProcessAuthoritySeverity(*selectedProcess)) >=
+                        Core::SeverityRank(Core::Severity::High)
                         ? LogLevel::High
                         : LogLevel::Info,
                     "Selected " + DisplayName(selectedProcess->name) + " (PID " + std::to_string(selectedProcess->pid) + ").");
@@ -3720,7 +5010,8 @@ namespace GlassPane::UI
             if (changed)
             {
                 AddLog(
-                    Core::SeverityRank(selectedProcess->severity) >= Core::SeverityRank(Core::Severity::High)
+                    Core::SeverityRank(ProcessAuthoritySeverity(*selectedProcess)) >=
+                        Core::SeverityRank(Core::Severity::High)
                         ? LogLevel::High
                         : LogLevel::Info,
                         "Selected graph node " + DisplayName(selectedProcess->name) +
@@ -4031,7 +5322,7 @@ namespace GlassPane::UI
             ImGui::DockBuilderDockWindow("Inspector", rightDockId_);
             ImGui::DockBuilderDockWindow("Compare", rightDockId_);
 
-            ImGui::DockBuilderDockWindow("Indicators", bottomDockId_);
+            ImGui::DockBuilderDockWindow("Source Evidence", bottomDockId_);
             ImGui::DockBuilderDockWindow("Logs", bottomDockId_);
             ApplyDockNodeChromeFlags(dockspaceId_);
 
@@ -4107,7 +5398,7 @@ namespace GlassPane::UI
             rightDockLayoutFocusRequested_ = false;
             RenderInspectorDockViews();
 
-            RenderDockedContentPanel("Indicators", [this]() { RenderSelectedIndicators(); });
+            RenderDockedContentPanel("Source Evidence", [this]() { RenderSelectedSourceEvidence(); });
             RenderDockedContentPanel("Logs", [this]() { RenderLogsPanelContent(); });
 
             ApplyDockNodeChromeFlags(dockspaceId_);
@@ -4277,6 +5568,7 @@ namespace GlassPane::UI
             context.visibleRows = &visibleProcessRows_;
             context.selectedPid = selectedPid_;
             context.suspiciousCount = suspiciousCount_;
+            context.unavailableCount = processAuthorityUnavailableCount_;
             context.activeFilter = processFilterMode_;
             context.searchActive = !searchText_.empty();
             context.processTableNeedsAutoSize = &processTableNeedsAutoSize_;
@@ -4287,6 +5579,9 @@ namespace GlassPane::UI
             context.accentColor = AccentBlue();
             context.mutedTextColor = MutedText();
             context.selectedRowColor = TableSelectedRow();
+            context.resolveProcessIcon = [this](const Core::ProcessInfo& process) {
+                return reinterpret_cast<ImTextureID>(GetProcessIconTexture(process));
+            };
             context.onFilterModeChanged = [this](ProcessFilterMode mode) {
                 if (SetProcessFilterMode(mode))
                 {
@@ -4377,6 +5672,60 @@ namespace GlassPane::UI
                 {
                     ImGui::TextDisabled("N/A");
                 }
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextDisabled("Baseline captured triage");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text(
+                    "%zu",
+                    compareResultValid_
+                        ? compareResult_.baselineTriageCapturedProcessCount
+                        : 0);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("Current captured triage");
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text(
+                    "%zu",
+                    compareResultValid_
+                        ? compareResult_.currentTriageCapturedProcessCount
+                        : 0);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextDisabled("Comparable triage");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text(
+                    "%zu",
+                    compareResultValid_
+                        ? compareResult_.comparableTriageProcessCount
+                        : 0);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("Triage availability changes");
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text(
+                    "%zu",
+                    compareResultValid_
+                        ? compareResult_.triageAvailabilityMismatchCount
+                        : 0);
+
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextDisabled("Triage identities unavailable");
+                ImGui::TableSetColumnIndex(1);
+                ImGui::Text(
+                    "%zu",
+                    compareResultValid_
+                        ? compareResult_.triageIdentityUnavailableCount
+                        : 0);
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextDisabled("Selected triage changes");
+                ImGui::TableSetColumnIndex(3);
+                ImGui::Text(
+                    "%zu",
+                    compareResultValid_
+                        ? compareResult_.selectedTriage.fields.size()
+                        : 0);
                 ImGui::EndTable();
             }
         }
@@ -4409,7 +5758,8 @@ namespace GlassPane::UI
         void RenderCompareProcessTable(
             const char* tableId,
             const std::vector<Core::SnapshotProcessRecord>& processes,
-            bool selectableRows)
+            bool selectableRows,
+            bool showHistoricalSeverity)
         {
             constexpr ImGuiTableFlags flags =
                 ImGuiTableFlags_BordersInnerV |
@@ -4418,7 +5768,12 @@ namespace GlassPane::UI
                 ImGuiTableFlags_ScrollY |
                 ImGuiTableFlags_SizingStretchProp;
             const float tableHeight = std::min(260.0f, std::max(118.0f, ImGui::GetTextLineHeightWithSpacing() * (static_cast<float>(processes.size()) + 2.0f)));
-            if (!ImGui::BeginTable(tableId, 5, flags, ImVec2(0.0f, tableHeight)))
+            const int columnCount = showHistoricalSeverity ? 6 : 5;
+            if (!ImGui::BeginTable(
+                    tableId,
+                    columnCount,
+                    flags,
+                    ImVec2(0.0f, tableHeight)))
             {
                 return;
             }
@@ -4426,7 +5781,14 @@ namespace GlassPane::UI
             ImGui::TableSetupColumn("Process", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 72.0f);
             ImGui::TableSetupColumn("PPID", ImGuiTableColumnFlags_WidthFixed, 72.0f);
-            ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 92.0f);
+            ImGui::TableSetupColumn("Authoritative triage", ImGuiTableColumnFlags_WidthFixed, 132.0f);
+            if (showHistoricalSeverity)
+            {
+                ImGui::TableSetupColumn(
+                    "Historical source severity",
+                    ImGuiTableColumnFlags_WidthFixed,
+                    126.0f);
+            }
             ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableHeadersRow();
 
@@ -4471,8 +5833,34 @@ namespace GlassPane::UI
                     ImGui::TableSetColumnIndex(2);
                     ImGui::Text("%u", process.parentPid);
                     ImGui::TableSetColumnIndex(3);
-                    SeverityText(process.severity);
-                    ImGui::TableSetColumnIndex(4);
+                    if (process.authoritativeTriage.captured)
+                    {
+                        const std::string verdict =
+                            Core::TriageVerdictDisplayText(
+                                process.authoritativeTriage.authoritativeVerdict) +
+                            " - " +
+                            Core::PersistedTriageAnalysisLevelDisplayText(
+                                process.authoritativeTriage.analysisLevel);
+                        ImGui::TextUnformatted(verdict.c_str());
+                        if (process.authoritativeTriage.usingFallback &&
+                            ImGui::IsItemHovered() &&
+                            !process.authoritativeTriage.fallbackReason.empty())
+                        {
+                            ImGui::SetTooltip(
+                                "%s",
+                                process.authoritativeTriage.fallbackReason.c_str());
+                        }
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("Not captured");
+                    }
+                    if (showHistoricalSeverity)
+                    {
+                        ImGui::TableSetColumnIndex(4);
+                        SeverityText(process.severity);
+                    }
+                    ImGui::TableSetColumnIndex(showHistoricalSeverity ? 5 : 4);
                     ClippedTextWithTooltip(process.executablePath.empty() ? L"(path unavailable)" : process.executablePath);
                     ImGui::PopID();
                 }
@@ -4628,10 +6016,10 @@ namespace GlassPane::UI
             }
 
             ImGui::TableSetupColumn("Change", ImGuiTableColumnFlags_WidthFixed, 86.0f);
-            ImGui::TableSetupColumn("Severity", ImGuiTableColumnFlags_WidthFixed, 86.0f);
+            ImGui::TableSetupColumn("Legacy source severity", ImGuiTableColumnFlags_WidthFixed, 126.0f);
             ImGui::TableSetupColumn("Process", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("PID", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-            ImGui::TableSetupColumn("Finding", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("Source finding", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 104.0f);
             ImGui::TableHeadersRow();
 
@@ -4673,7 +6061,16 @@ namespace GlassPane::UI
                     ImGui::TableSetColumnIndex(0);
                     ImGui::TextUnformatted(changeLabel);
                     ImGui::TableSetColumnIndex(1);
-                    SeverityText(FindingSeverityAsCoreSeverity(finding->severity));
+                    if (finding->severityCaptured)
+                    {
+                        SeverityText(
+                            HistoricalFindingSeverityAsCoreSeverity(
+                                finding->severity));
+                    }
+                    else
+                    {
+                        ImGui::TextDisabled("Not captured");
+                    }
                     ImGui::TableSetColumnIndex(2);
                     ImGui::TextUnformatted(DisplayName(finding->processName).c_str());
                     ImGui::TableSetColumnIndex(3);
@@ -4696,7 +6093,8 @@ namespace GlassPane::UI
             state.currentCaptured = currentCompareSnapshot_.captured;
             state.resultValid = compareResultValid_;
             state.noDifferences = CompareHasNoDifferences();
-            state.hasNotes = !compareResult_.notes.empty();
+            state.hasNotes = !compareResult_.notes.empty() ||
+                !compareResult_.selectedTriage.fields.empty();
             state.newProcessesEmpty = compareResult_.newProcesses.empty();
             state.exitedProcessesEmpty = compareResult_.exitedProcesses.empty();
             state.changedProcessesEmpty = compareResult_.changedProcesses.empty();
@@ -4728,18 +6126,36 @@ namespace GlassPane::UI
                     ImGui::SameLine();
                     WrappedTextDisabled(note);
                 }
+                if (!compareResult_.selectedTriage.fields.empty())
+                {
+                    ImGui::TextUnformatted(
+                        "Selected-process authoritative triage changes:");
+                    for (const Core::SnapshotChangedField& field :
+                        compareResult_.selectedTriage.fields)
+                    {
+                        ImGui::Bullet();
+                        ImGui::SameLine();
+                        WrappedTextDisabled(
+                            field.field + L": " + field.baselineValue +
+                            L" -> " + field.currentValue);
+                    }
+                }
             };
             callbacks.renderNewProcesses = [this]() {
                 RenderCompareProcessTable(
                     "CompareNewProcessesTable##SnapshotCompare",
                     compareResult_.newProcesses,
-                    true);
+                    true,
+                    compareResult_.currentSourceEvidenceModelKind ==
+                        Core::SnapshotSourceEvidenceModelKind::HistoricalLegacy);
             };
             callbacks.renderExitedProcesses = [this]() {
                 RenderCompareProcessTable(
                     "CompareExitedProcessesTable##SnapshotCompare",
                     compareResult_.exitedProcesses,
-                    false);
+                    false,
+                    compareResult_.baselineSourceEvidenceModelKind ==
+                        Core::SnapshotSourceEvidenceModelKind::HistoricalLegacy);
             };
             callbacks.renderChangedProcesses = [this]() { RenderCompareChangedProcessTable(); };
             callbacks.renderNetworkChanges = [this]() { RenderCompareNetworkTable(); };
@@ -5200,12 +6616,16 @@ namespace GlassPane::UI
             const std::vector<Core::TimelineRow>& visibleTimelineRows = TimelineRowsForCurrentFilters();
 
             TimelinePanelContext context;
+            context.snapshot = &snapshot_;
             context.rows = &visibleTimelineRows;
             context.selectedPid = selectedPid_;
             context.activeFilter = timelineFilter_;
             context.timelineTableNeedsAutoSize = &timelineTableNeedsAutoSize_;
             context.monospaceFont = fonts_.monospace;
             context.selectedRowColor = TableSelectedRow();
+            context.resolveProcessIcon = [this](const Core::ProcessInfo& process) {
+                return reinterpret_cast<ImTextureID>(GetProcessIconTexture(process));
+            };
             context.onFilterChanged = [this](Core::TimelineFilter filter) {
                 if (SetTimelineFilter(filter))
                 {
@@ -5225,21 +6645,21 @@ namespace GlassPane::UI
 
         void RenderBottomPanel()
         {
-            if (!BeginPanelWindow("Indicators / Logs"))
+            if (!BeginPanelWindow("Source Evidence / Logs"))
             {
                 EndPanelWindow();
                 return;
             }
-            LogsAndIndicatorsPanelContext context;
+            LogsAndEvidencePanelContext context;
             context.logs = BuildLogsPanelContext();
-            context.indicators = BuildIndicatorsPanelContext();
-            RenderLogsAndIndicatorsPanel(context);
+            context.evidence = BuildSourceEvidencePanelContext();
+            RenderLogsAndEvidencePanel(context);
             EndPanelWindow();
         }
 
-        void RenderSelectedIndicators()
+        void RenderSelectedSourceEvidence()
         {
-            GlassPane::UI::RenderIndicatorsPanelContent(BuildIndicatorsPanelContext());
+            GlassPane::UI::RenderSourceEvidencePanelContent(BuildSourceEvidencePanelContext());
         }
 
         LogsPanelContext BuildLogsPanelContext()
@@ -5303,9 +6723,9 @@ namespace GlassPane::UI
             return context;
         }
 
-        IndicatorsPanelContext BuildIndicatorsPanelContext()
+        SourceEvidencePanelContext BuildSourceEvidencePanelContext()
         {
-            IndicatorsPanelContext context;
+            SourceEvidencePanelContext context;
             const Core::ProcessInfo* process = Core::FindProcessByPid(snapshot_, selectedPid_);
             if (process == nullptr)
             {
@@ -5313,50 +6733,49 @@ namespace GlassPane::UI
             }
 
             context.hasSelectedProcess = true;
-            const Core::ChainAnalysisResult& chain = CachedChainAnalysis(*process);
-            const Core::FileIdentity& fileIdentity = CachedFileIdentity(*process);
-            const std::vector<Core::FileIdentityIndicator> fileIdentityIndicators =
-                BuildProcessFileIdentityIndicators(*process, fileIdentity);
-
-            context.processIndicators.reserve(process->indicators.size() + fileIdentityIndicators.size());
-            for (const std::wstring& indicator : process->indicators)
+            context.historical = UsesHistoricalSourceEvidence();
+            if (context.historical)
             {
-                IndicatorItemView item;
-                item.text = indicator;
-                context.processIndicators.push_back(std::move(item));
+                context.records.reserve(
+                    process->indicators.size() + process->contextNotes.size());
+                for (const std::wstring& historical : process->indicators)
+                {
+                    SourceEvidenceItemView item;
+                    item.title = historical.empty()
+                        ? L"Historical source record"
+                        : historical;
+                    item.role = "Imported historical metadata; not current TriageEngine input.";
+                    context.records.push_back(std::move(item));
+                }
+                for (const std::wstring& note : process->contextNotes)
+                {
+                    SourceEvidenceItemView item;
+                    item.title = L"Historical collection/context note";
+                    item.summary = note;
+                    item.role = "Imported historical metadata; not current TriageEngine input.";
+                    context.records.push_back(std::move(item));
+                }
             }
-            for (const Core::FileIdentityIndicator& indicator : fileIdentityIndicators)
+            else
             {
-                IndicatorItemView item;
-                item.text = indicator.message;
-                item.hasSeverity = true;
-                item.severityLabel = WideToUtf8(Core::SeverityToString(indicator.severity));
-                item.severityColor = SeverityColor(indicator.severity);
-                context.processIndicators.push_back(std::move(item));
-            }
-
-            const std::vector<Core::NetworkIndicatorMatch> networkIntelMatches =
-                SelectedNetworkIndicatorMatchesForProcess(process->pid);
-            if (!networkIntelMatches.empty())
-            {
-                IndicatorItemView item;
-                item.text =
-                    L"Network intelligence: " +
-                    std::to_wstring(networkIntelMatches.size()) +
-                    L" remote endpoint matched local indicator feed.";
-                item.hasSeverity = true;
-                item.severityLabel = WideToUtf8(networkIntelMatches.front().indicator.severity.empty()
-                    ? std::wstring(L"Info")
-                    : networkIntelMatches.front().indicator.severity);
-                item.severityColor =
-                    SeverityColor(NetworkIndicatorSeverityAsCoreSeverity(networkIntelMatches.front().indicator.severity));
-                context.processIndicators.push_back(std::move(item));
-            }
-
-            context.chainIndicators = chain.chainIndicators;
-            if (ModulesLoadedForProcess(*process) && !selectedModules_.indicators.empty())
-            {
-                context.moduleIndicators = selectedModules_.indicators;
+                const std::vector<Core::NativeSourceEvidenceRecord>& records =
+                    SelectedNativeSourceEvidenceForProcess(*process);
+                context.records.reserve(records.size());
+                for (const Core::NativeSourceEvidenceRecord& record : records)
+                {
+                    SourceEvidenceItemView item;
+                    item.title = Utf8ToWide(record.title.c_str());
+                    item.summary = Utf8ToWide(record.summary.c_str());
+                    item.metadata =
+                        Core::EvidenceDomainDisplayText(record.domain) + " / " +
+                        Core::ObservationDispositionDisplayText(record.disposition);
+                    item.role = record.collectionLimitation
+                        ? "Collection limitation"
+                        : (record.contributedToVerdict
+                            ? "Contributed to verdict"
+                            : "Supporting context");
+                    context.records.push_back(std::move(item));
+                }
             }
 
             if (compareResultValid_ && compareResult_.hasBaseline && compareResult_.hasCurrent)
@@ -5417,18 +6836,21 @@ namespace GlassPane::UI
                 return true;
             }
 
-            for (const std::wstring& indicator : process.indicators)
+            if (UsesHistoricalSourceEvidence())
             {
-                if (FieldContainsQuery(indicator, query))
+                for (const std::wstring& indicator : process.indicators)
                 {
-                    return true;
+                    if (FieldContainsQuery(indicator, query))
+                    {
+                        return true;
+                    }
                 }
-            }
-            for (const std::wstring& note : process.contextNotes)
-            {
-                if (FieldContainsQuery(note, query))
+                for (const std::wstring& note : process.contextNotes)
                 {
-                    return true;
+                    if (FieldContainsQuery(note, query))
+                    {
+                        return true;
+                    }
                 }
             }
 
@@ -5446,18 +6868,20 @@ namespace GlassPane::UI
 
         bool MatchesSidebarFilterMode(const Core::ProcessInfo& process) const
         {
+            const Core::Severity authoritySeverity = ProcessAuthoritySeverity(process);
+            const bool authoritySuspicious = ProcessAuthorityIsSuspicious(process);
             switch (processFilterMode_)
             {
             case ProcessFilterMode::All:
                 return true;
             case ProcessFilterMode::Suspicious:
-                return process.suspicious;
+                return authoritySuspicious;
             case ProcessFilterMode::Low:
-                return process.suspicious && process.severity == Core::Severity::Low;
+                return authoritySuspicious && authoritySeverity == Core::Severity::Low;
             case ProcessFilterMode::Medium:
-                return process.suspicious && process.severity == Core::Severity::Medium;
+                return authoritySuspicious && authoritySeverity == Core::Severity::Medium;
             case ProcessFilterMode::High:
-                return process.suspicious && process.severity == Core::Severity::High;
+                return authoritySuspicious && authoritySeverity == Core::Severity::High;
             default:
                 return true;
             }
@@ -5527,6 +6951,30 @@ namespace GlassPane::UI
 
         Core::ProcessSnapshot snapshot_;
         Core::ServiceCollectionResult serviceSnapshot_;
+        Core::ProcessTriageCache processTriageCache_;
+        Core::ProcessTriageCacheSourceStamp processAuthorityProjectionStamp_;
+        std::vector<Core::Severity> processAuthoritySeverities_;
+        std::vector<std::uint8_t> processAuthoritySuspicious_;
+        std::vector<std::uint8_t> processAuthorityAvailable_;
+        std::vector<Core::ProcessTriageUnavailableKind> processAuthorityUnavailableKinds_;
+        bool processAuthorityProjectionValid_ = false;
+        std::size_t processAuthorityUnavailableCount_ = 0;
+        std::array<
+            std::size_t,
+            static_cast<std::size_t>(
+                Core::ProcessTriageUnavailableKind::InvalidVerdict) + 1>
+            processAuthorityUnavailableCountsByKind_{};
+        std::array<
+            std::string,
+            static_cast<std::size_t>(
+                Core::ProcessTriageUnavailableKind::InvalidVerdict) + 1>
+            processAuthorityUnavailableFirstIdentityByKind_{};
+        std::array<
+            std::string,
+            static_cast<std::size_t>(
+                Core::ProcessTriageUnavailableKind::InvalidVerdict) + 1>
+            processAuthorityUnavailableFirstDiagnosticByKind_{};
+        std::uint64_t processAuthorityProjectionBuildMicroseconds_ = 0;
         Core::FocusedGraph focusedGraph_;
         Core::ProcessSnapshotCapture baselineCompareSnapshot_;
         Core::ProcessSnapshotCapture currentCompareSnapshot_;
@@ -5537,6 +6985,8 @@ namespace GlassPane::UI
         Core::NetworkIndicatorFeed networkIndicatorFeed_;
         Export::SavedSnapshotMetadata loadedSnapshotMetadata_;
         Export::NetworkIntelligenceSnapshotMetadata loadedSnapshotNetworkIntel_;
+        Core::PersistedTriageContext loadedSnapshotTriage_;
+        Export::SavedNativeSourceEvidenceContext loadedSnapshotNativeSourceEvidence_;
         std::vector<Export::ProcessEvidenceSnapshot> loadedSnapshotEvidence_;
         std::unordered_map<std::uint32_t, std::size_t> loadedSnapshotEvidenceByPid_;
         std::vector<Core::NetworkIndicatorMatch> loadedSnapshotNetworkIndicatorMatches_;
@@ -5567,8 +7017,6 @@ namespace GlassPane::UI
         std::uint64_t selectedRuntimeCreationTime_ = 0;
         std::uint64_t selectedMemoryCreationTime_ = 0;
         std::uint64_t selectedHandlesCreationTime_ = 0;
-        ULONGLONG lastTriageRecomputeLogTick_ = 0;
-        std::uint64_t findingsCacheCreationTime_ = 0;
         std::uint64_t selectedChainCacheCreationTime_ = 0;
         std::uint64_t selectedChainCacheSnapshotGeneration_ = 0;
         int networkTableAutoFitGeneration_ = 0;
@@ -5637,7 +7085,6 @@ namespace GlassPane::UI
         std::wstring loadedSnapshotStatus_;
         std::wstring liveLastRefreshTimeBeforeLoad_;
         std::wstring liveLastNetworkRefreshTimeBeforeLoad_;
-        std::string lastTriageRecomputeLogMessage_;
         LongRunningOperationKind longOperationKind_ = LongRunningOperationKind::None;
         std::string longOperationTitle_;
         std::string longOperationStatus_;
@@ -5646,8 +7093,6 @@ namespace GlassPane::UI
         std::size_t liveSuspiciousCountBeforeLoad_ = 0;
         std::uint32_t liveSelectedPidBeforeLoad_ = InvalidPid;
         CollectorTimings timings_;
-        bool findingsCacheValid_ = false;
-        bool selectedHighTriageCacheValid_ = false;
         bool graphFitRequested_ = true;
         bool graphLayoutDirty_ = true;
         bool graphLeftCanvasPanActive_ = false;
@@ -5659,9 +7104,7 @@ namespace GlassPane::UI
         bool graphLayoutHasWorldBounds_ = false;
         bool graphLayoutSingleNode_ = false;
         bool graphLayoutSmallGraph_ = false;
-        std::uint32_t findingsCachePid_ = InvalidPid;
         std::uint32_t selectedChainCachePid_ = InvalidPid;
-        std::uint32_t selectedHighTriagePid_ = InvalidPid;
         std::uint32_t graphFitPid_ = InvalidPid;
         std::uint32_t graphLayoutFocusPid_ = InvalidPid;
         std::uint32_t visibleHandlesPid_ = InvalidPid;
@@ -5671,10 +7114,17 @@ namespace GlassPane::UI
         std::size_t graphLayoutEdgeCount_ = 0;
         std::size_t visibleHandlesSourceSize_ = 0;
         std::size_t visibleMemorySourceSize_ = 0;
-        std::size_t visibleHandlesWithIndicatorsCount_ = 0;
+        std::size_t visibleHandlesWithTypedAccessCount_ = 0;
         std::size_t visibleHandlesNameStatusCount_ = 0;
-        std::uint64_t selectedHighTriageCreationTime_ = 0;
         std::uint64_t snapshotGeneration_ = 0;
+        std::uint64_t baselineEvidenceGeneration_ = 0;
+        std::uint64_t baselineScopeGeneration_ = 0;
+        std::uint64_t baselineCacheBuildInvocationCount_ = 0;
+        std::uint64_t selectedEvidenceGeneration_ = 0;
+        std::uint64_t observationShadowNativeBuildInvocationCount_ = 0;
+        std::uint64_t observationShadowRefinementInvocationCount_ = 0;
+        std::uint64_t observationShadowCorrelationInvocationCount_ = 0;
+        std::uint64_t observationShadowTriageInvocationCount_ = 0;
         std::uint64_t processQueryRevision_ = 0;
         std::uint64_t visibleProcessRowsSnapshotGeneration_ = 0;
         std::uint64_t visibleProcessRowsQueryRevision_ = 0;
@@ -5682,7 +7132,6 @@ namespace GlassPane::UI
         std::uint64_t timelineRowsQueryRevision_ = 0;
         std::uint64_t visibleHandlesCreationTime_ = 0;
         std::uint64_t visibleMemoryCreationTime_ = 0;
-        bool selectedHighTriage_ = false;
         float graphZoom_ = 1.0f;
         ImVec2 graphPan_ = ImVec2(0.0f, 0.0f);
         ImVec2 graphLayoutBaseNodeSize_ = ImVec2(302.0f, 106.0f);
@@ -5703,9 +7152,14 @@ namespace GlassPane::UI
         std::vector<GraphLayoutNode> graphLayoutNodes_;
         std::vector<std::size_t> visibleHandleIndexes_;
         std::vector<std::size_t> visibleMemoryRegionIndexes_;
-        std::vector<Core::Finding> selectedFindingsCache_;
+        Core::ObservationShadowState selectedObservationShadow_;
+        Core::NativeSourceEvidenceProjectionResult selectedNativeSourceEvidence_;
+        Core::SelectedProcessEnrichedLifecycleState selectedEnrichedLifecycle_;
         std::vector<LogEntry> logs_;
-        std::unordered_map<std::wstring, CachedIconTexture> iconCache_;
+        std::unordered_map<
+            Core::ProcessIconCacheKey,
+            CachedIconTexture,
+            Core::ProcessIconCacheKeyHash> iconCache_;
         std::unordered_map<std::wstring, Core::FileIdentity> fileIdentityCache_;
         std::unordered_map<std::wstring, Core::ModuleCollectionResult> moduleEvidenceCache_;
         std::unordered_map<std::wstring, Core::TokenInfo> tokenEvidenceCache_;
@@ -5714,8 +7168,14 @@ namespace GlassPane::UI
         std::unordered_map<std::wstring, Core::HandleCollectionResult> handleEvidenceCache_;
         std::unordered_map<std::wstring, std::vector<std::size_t>> networkIndicatorMatchIndexesByRemote_;
         std::unordered_map<std::uint32_t, std::size_t> graphLayoutNodeIndexByPid_;
-        ID3D11ShaderResourceView* fallbackIconTexture_ = nullptr;
+        ID3D11ShaderResourceView* genericProcessIconTexture_ = nullptr;
         ID3D11ShaderResourceView* appLogoTexture_ = nullptr;
+        std::uint64_t processIconCacheHits_ = 0;
+        std::uint64_t processIconCacheMisses_ = 0;
+        std::uint64_t processIconExtractionAttempts_ = 0;
+        std::uint64_t processIconExtractionSuccesses_ = 0;
+        std::uint64_t processIconGenericFallbackUses_ = 0;
+        std::uint64_t genericProcessIconTextureBuilds_ = 0;
 
         ImGuiID dockspaceId_ = 0;
         ImGuiID leftDockId_ = 0;

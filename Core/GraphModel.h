@@ -11,9 +11,13 @@ namespace GlassPane::Core
 {
     struct FocusedGraphNode
     {
+        // Ephemeral index into the ProcessSnapshot used to build this graph.
+        // It is not serialized and keeps authority projection identity-exact.
+        std::size_t sourceProcessIndex = 0;
         std::uint32_t pid = 0;
         std::uint32_t parentPid = 0;
         std::wstring name;
+        bool authorityAvailable = false;
         bool suspicious = false;
         Severity severity = Severity::None;
         bool focus = false;
@@ -35,8 +39,14 @@ namespace GlassPane::Core
         std::vector<FocusedGraphEdge> edges;
     };
 
+    // Authority vectors are aligned to snapshot.processes. A missing entry is
+    // rendered as neutral/unavailable; ProcessInfo legacy severity is never
+    // consulted by the graph model.
     FocusedGraph BuildFocusedTree(
         const ProcessSnapshot& snapshot,
         std::uint32_t focusPid,
+        const std::vector<Severity>& authoritativeSeverities,
+        const std::vector<std::uint8_t>& authoritativeSuspicious,
+        const std::vector<std::uint8_t>& authoritativeAvailable,
         std::size_t descendantDepth = 2);
 }

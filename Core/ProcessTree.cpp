@@ -44,14 +44,6 @@ namespace GlassPane::Core
             return ProcessLess(snapshot, left.pid, right.pid);
         }
 
-        void AddContextNote(ProcessInfo& process, const std::wstring& note)
-        {
-            if (std::find(process.contextNotes.begin(), process.contextNotes.end(), note) == process.contextNotes.end())
-            {
-                process.contextNotes.push_back(note);
-            }
-        }
-
         void AppendTreeRows(
             const ProcessSnapshot& snapshot,
             std::uint32_t pid,
@@ -163,11 +155,6 @@ namespace GlassPane::Core
                 {
                     process.parentPidReuseSuspected =
                         relationshipStatus == ParentRelationshipStatus::InvalidPidReuse;
-                    if (process.parentPidReuseSuspected)
-                    {
-                        AddContextNote(process, L"Parent PID may be stale due to PID reuse.");
-                        AddContextNote(process, L"Parent relationship could not be validated; PID reuse suspected.");
-                    }
                     snapshot.roots.push_back(snapshot.indexByPid[process.pid]);
                 }
             }

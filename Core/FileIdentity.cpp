@@ -13,14 +13,11 @@
 #include <wincrypt.h>
 #include <wintrust.h>
 
-#include <algorithm>
 #include <array>
 #include <cstdio>
-#include <cwctype>
 #include <iomanip>
 #include <sstream>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #pragma comment(lib, "Bcrypt.lib")
@@ -37,19 +34,6 @@ namespace GlassPane::Core
             WORD language = 0;
             WORD codePage = 0;
         };
-
-        std::wstring ToLower(std::wstring value)
-        {
-            std::transform(value.begin(), value.end(), value.begin(), [](wchar_t ch) {
-                return static_cast<wchar_t>(std::towlower(ch));
-            });
-            return value;
-        }
-
-        bool Contains(const std::wstring& haystack, const std::wstring& needle)
-        {
-            return haystack.find(needle) != std::wstring::npos;
-        }
 
         void AppendError(FileIdentity& identity, const std::wstring& message)
         {
@@ -632,63 +616,6 @@ namespace GlassPane::Core
             }
         }
 
-        bool IsRiskyUserPath(const std::wstring& path)
-        {
-            const std::wstring loweredPath = ToLower(path);
-            return Contains(loweredPath, L"\\appdata\\") ||
-                Contains(loweredPath, L"\\temp\\") ||
-                Contains(loweredPath, L"\\downloads\\") ||
-                Contains(loweredPath, L"\\desktop\\");
-        }
-
-        bool IsMicrosoftLookingName(const std::wstring& imageName)
-        {
-            static const std::unordered_set<std::wstring> microsoftProcessNames = {
-                L"audiodg.exe",
-                L"bitsadmin.exe",
-                L"calc.exe",
-                L"certutil.exe",
-                L"conhost.exe",
-                L"consent.exe",
-                L"control.exe",
-                L"csrss.exe",
-                L"ctfmon.exe",
-                L"dllhost.exe",
-                L"dwm.exe",
-                L"explorer.exe",
-                L"fontdrvhost.exe",
-                L"lsass.exe",
-                L"msbuild.exe",
-                L"mshta.exe",
-                L"msiexec.exe",
-                L"notepad.exe",
-                L"powershell.exe",
-                L"regsvr32.exe",
-                L"rundll32.exe",
-                L"runtimebroker.exe",
-                L"services.exe",
-                L"sihost.exe",
-                L"smartscreen.exe",
-                L"smss.exe",
-                L"spoolsv.exe",
-                L"svchost.exe",
-                L"taskhostw.exe",
-                L"werfault.exe",
-                L"wininit.exe",
-                L"winlogon.exe",
-                L"wscript.exe",
-                L"cscript.exe",
-                L"wmic.exe"
-            };
-
-            return microsoftProcessNames.find(ToLower(imageName)) != microsoftProcessNames.end();
-        }
-
-        bool IsMicrosoftSigner(const FileIdentity& identity)
-        {
-            const std::wstring signer = ToLower(identity.signerName);
-            return Contains(signer, L"microsoft");
-        }
     }
 
     FileIdentity CollectFileIdentity(const std::wstring& path)
@@ -717,54 +644,4 @@ namespace GlassPane::Core
         return identity;
     }
 
-    std::vector<FileIdentityIndicator> BuildFileIdentityIndicators(
-        const FileIdentity& identity,
-        const std::wstring& imageName,
-        bool executableContext)
-    {
-        std::vector<FileIdentityIndicator> indicators;
-
-        if (identity.path.empty() || !identity.exists || identity.sha256.empty())
-        {
-            indicators.push_back({
-                Severity::Info,
-                executableContext
-                    ? L"Executable missing or inaccessible for file identity checks"
-                    : L"Module file missing or inaccessible for file identity checks"
-            });
-            return indicators;
-        }
-
-        if (IsRiskyUserPath(identity.path) && !identity.signaturePresent)
-        {
-            indicators.push_back({
-                Severity::Medium,
-                executableContext
-                    ? L"Unsigned executable from AppData, Temp, Downloads, or Desktop"
-                    : L"Unsigned module from AppData, Temp, Downloads, or Desktop"
-            });
-        }
-
-        if (identity.signaturePresent && !identity.signatureValid)
-        {
-            indicators.push_back({
-                Severity::Medium,
-                L"Authenticode signature is present but invalid"
-            });
-        }
-
-        if (executableContext &&
-            identity.signaturePresent &&
-            !identity.signerName.empty() &&
-            IsMicrosoftLookingName(imageName) &&
-            !IsMicrosoftSigner(identity))
-        {
-            indicators.push_back({
-                Severity::Medium,
-                L"Microsoft-looking process name has a non-Microsoft signer"
-            });
-        }
-
-        return indicators;
-    }
 }
